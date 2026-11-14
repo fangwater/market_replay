@@ -1,0 +1,10 @@
+[package]
+name = "cn_futures_core"
+version.workspace = true
+edition.workspace = true
+description = "Pure CN futures market logic shared by live (mkt_signal) and post-market (market_replay): sessions, universe, snapshot->trade state machine, 1-minute aggregation. No IO dependencies."
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+chrono-tz = "0.10"

@@ -7,7 +7,12 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 cd "$ROOT_DIR"
+# librocksdb-sys runs bindgen; point it at the system libclang (same shim mkt_signal uses).
+if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+  if [[ -e "$HOME/libclang-shim/libclang.so" ]]; then LIBCLANG_PATH="$HOME/libclang-shim"; else LIBCLANG_PATH=/usr/lib/llvm-18/lib; fi
+fi
+export LIBCLANG_PATH
 cargo build --release --locked -p mdl_replay --bin mdl-replay
-BIN="$ROOT_DIR/target/release/mdl-replay"
-echo "[INFO] built $BIN"
-sha256sum "$BIN"
+cargo build --release --locked -p cn_futures_l2 --bins
+echo "[INFO] built release binaries under $ROOT_DIR/target/release"
+sha256sum "$ROOT_DIR/target/release/mdl-replay" "$ROOT_DIR/target/release/cn_futures_l2" "$ROOT_DIR/target/release/export_baseline_1min"

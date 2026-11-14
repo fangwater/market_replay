@@ -1,0 +1,5 @@
+# Machine-specific settings (target-dir etc.) belong in ~/.cargo/config.toml.
+[env]
+# Vendored C++ deps (librocksdb-sys) rely on transitive <cstdint> includes that
+# libstdc++ stopped providing with GCC 13+; same setting as mkt_signal.
+CXXFLAGS_x86_64_unknown_linux_gnu = "-include cstdint"

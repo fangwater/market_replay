@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/mdl_replay"]
+members = [
+    "crates/core/cn_futures_core",
+    "crates/mdl_replay",
+    "crates/cn/cn_futures_l2",
+    "crates/cn/cn_futures_trim",
+]
 
 [workspace.package]
 edition = "2021"

@@ -65,3 +65,30 @@
 目标：给 `/home/fanghaizhou/cn_futures_cta_manager` 提供一个 Binance `/fapi/v1/klines` 兼容的 1 分钟 HTTP 接口（它的配置示例是 `127.0.0.1:18311`），从 tonglian_msg 计算。契约见该仓库的 `docs/native_reference_cost.md`：`volume` 是单边增量手数，`turnover` 是单边人民币增量（已含乘数），缺失分钟直接省略，不能前填。
 
 已知的硬约束：CTA manager 要求每根 bar 的 `turnover/volume/乘数` 落在 `[low, high]` 内，否则整页拒收。原型测试中有 0.3–0.7% 的 bar 越界，全部出在收盘时刻的快照（02:30、10:15、11:30、15:00、23:00）或收盘后的成交上。修正方案和口径细节记在持久记忆里，实现后要在多个交易日上验证，并和 `baseline_data_1min`（数据到 20260826）对照。
+
+## 仓库结构与 core 约束（2026-11-14 起）
+
+本仓库是 `market_replay`（GitHub `fangwater/market_replay`），也就是盘后仓库：国内期货、CME、美股的盘后处理都迁到这里；实盘留在 mkt_signal。
+
+| 路径 | 内容 |
+| --- | --- |
+| `crates/core/cn_futures_core` | 实盘和盘后共享的纯逻辑：交易时段、品种 universe、记录编码、快照到成交的状态机、断段、1 分钟累加 |
+| `crates/cn/cn_futures_l2` | 从 mkt_signal `685896ce` 迁入：通联 → RocksDB 回放，以及 1s / 1min / ylabel / hfq 导出 |
+| `crates/cn/cn_futures_trim` | 从 mkt_signal `eb58eaf4` 迁入：按 reference 服务的交易时段快照裁剪 parquet |
+| `crates/mdl_replay` | 单日 MDL 回放服务 |
+| `reference/` | 参考数据服务（Python） |
+
+- `crates/core/*` **只能依赖纯计算 crate**（目前是 anyhow、chrono、chrono-tz），不得引入 RocksDB、parquet、arrow、iceoryx、网络或文件 IO 依赖，也不得依赖本仓库的其他 crate。mkt_signal 用 `git` + `rev` 固定版本依赖 core，core 里的任何改动都会进入实盘编译。
+- 修改 core 后必须跑本仓库的全部测试，并用真实数据重跑一天、与生产 parquet 逐值比对（方法见下文）；要进入实盘，还需要在 mkt_signal 中更新 rev 并跑通那边的测试。
+- 依赖版本以 mkt_signal 的 `Cargo.lock` 为基准，除本仓库独有的包以外保持一致。rocksdb 编译需要 `LIBCLANG_PATH`，`scripts/build-release.sh` 已经处理。
+
+### baseline_data_1min 每日工序
+
+生产的 1 分钟表依次经过四道工序。preprocess 的 `cn_pipeline.md` 漏写了第 3 步：
+
+1. `cn_futures_l2 --msg-root ... --exchange X --start D --end D`：写入 RocksDB
+2. `export_baseline_1min --start D --end D`
+3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 裁剪，生产上是原地改写，溯源记录在 `baseline_data_1min/_provenance/continuous_sessions.json`，现有快照日是 2026-09-08
+4. `fill_1min_size_buckets`：按自然月的 P50/P90 大小单分桶，只读打开 RocksDB。**注意：这个工具没有日期范围参数，每次会重写该品种的全部历史文件**，每日任务里使用前必须先加上日期范围
+
+迁移验证（2026-11-14）：用新二进制在临时目录按以上四步重跑 2026-08-26 的上期所和广期所，共 24 个文件、105,785 行，与生产 parquet 的 schema 和全部值完全一致；抽出 core 之后再验证广期所，5/5 个文件一致。
