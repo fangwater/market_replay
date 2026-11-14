@@ -20,16 +20,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::codec::{
-    decode_depth, decode_key, decode_trade, encode_key, KIND_DEPTH, KIND_TRADE,
-};
+use crate::codec::{decode_depth, decode_key, decode_trade, encode_key, KIND_DEPTH, KIND_TRADE};
 use crate::db::{open_rocksdb_read_only, L2Db, FORBIDDEN_ROCKSDB_MARK};
 use crate::session::Exchange;
+use crate::universe::is_maintained_product;
 pub use cn_futures_core::segments::{
     book_valid, exchange_of, is_session_break, parse_product_cf, split_depth_segments,
     trad_day_from_ts, SESSION_BREAK_SEC,
 };
-use crate::universe::is_maintained_product;
 
 pub const DEFAULT_OUT_ROOT: &str = "/mnt/hdd-raid5-72t/liang_torch/cn_futures_data/backtest_1s";
 
@@ -80,12 +78,6 @@ pub struct OutRow {
     pub close: f64,
     pub midp: f64,
 }
-
-
-
-
-
-
 
 fn last_depth_before<'a>(depths: &'a [SparseDepth], ts_sec: i64) -> Option<&'a SparseDepth> {
     let mut lo = 0usize;
@@ -204,8 +196,6 @@ pub fn densify_instrument(
     }
     rows
 }
-
-
 
 fn schema() -> Schema {
     Schema::new(vec![

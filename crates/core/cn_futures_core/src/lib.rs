@@ -5,6 +5,7 @@
 pub mod baseline_1min;
 pub mod codec;
 pub mod events;
+pub mod mdl;
 pub mod segments;
 pub mod session;
 pub mod universe;
