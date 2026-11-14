@@ -92,3 +92,11 @@
 4. `fill_1min_size_buckets`：按自然月的 P50/P90 大小单分桶，只读打开 RocksDB。**注意：这个工具没有日期范围参数，每次会重写该品种的全部历史文件**，每日任务里使用前必须先加上日期范围
 
 迁移验证（2026-11-14）：用新二进制在临时目录按以上四步重跑 2026-08-26 的上期所和广期所，共 24 个文件、105,785 行，与生产 parquet 的 schema 和全部值完全一致；抽出 core 之后再验证广期所，5/5 个文件一致。
+
+### 迁自 mkt_signal 的规则（cn_futures_l2）
+
+以下规则原先在 mkt_signal `AGENTS.md`，2026-11-14 随代码迁到这里：
+
+- `cn_futures_l2` 只从只读 PostgreSQL 表 `market_metadata.public.domestic_future_product_multipliers` 读取 `volume_multiple` 及其 `verified` 状态（Unix socket `/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run`，端口 `5433`）。不得恢复代码里的品种映射，不得调用 DataGateway 或交易所接口，不得从成交额反推乘数，也不得默认取 `1`。载入的目录里缺少某个品种时，必须带着能定位问题的上下文直接 panic；这是批处理工具的明确例外。不得写入这个元数据实例，也不得用 `5432` 端口的只读热备库。
+- 以前的根二进制 `tonglian_baseline_replay` 及其 ClickHouse staging 配置已经退役，不得恢复。
+- 用法文档见 [docs/cn_futures_l2.md](docs/cn_futures_l2.md)。
