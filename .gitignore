@@ -1,0 +1,6 @@
+target/
+reference/.env
+reference/.venv/
+reference/.venv-mcp/
+__pycache__/
+*.egg-info/

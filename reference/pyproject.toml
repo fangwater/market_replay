@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cn-futures-reference"
+version = "0.5.0"
+description = "Chinese futures reference data, exchange notices, and message-fee rules"
+requires-python = ">=3.8"
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "psycopg[binary]>=3.1,<4",
+  "tomli>=2,<3; python_version<'3.11'",
+]
+
+[project.scripts]
+cn-futures-ref = "cn_futures_ref.cli:main"
+
+[tool.setuptools]
+packages = ["cn_futures_ref"]
+
+[tool.setuptools.package-data]
+cn_futures_ref = ["static/*"]

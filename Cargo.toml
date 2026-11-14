@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/mdl_replay"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+
+# Same release profile as /home/fanghaizhou/mkt_signal/Cargo.toml.
+[profile.release]
+debug = 0
+strip = "symbols"
+lto = "thin"
+codegen-units = 4

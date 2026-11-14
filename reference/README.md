@@ -1,0 +1,166 @@
+# 中国期货参考数据服务
+
+## CN / CME 统一 MCP 与 Web 查询
+
+已增加供同机其他用户使用的只读共享入口：中文查询页 `http://127.0.0.1:8780/`，
+Streamable HTTP MCP `http://127.0.0.1:8780/mcp`，普通查询接口 `GET /api/{工具名}`。
+同时覆盖本项目与 `/home/fanghaizhou/cme_exchange_info_summary` 的数据，
+包含 CME 官方历史交易时段和海外佣金参考。使用者无需访问项目目录或数据库。
+给其他用户或 AI 的独立文件是 [同机数据使用说明](docs/cn-cme-data-guide.md)，包含全部接口、参数、返回字段及示例。
+使用者在自己的目录执行下列命令即可下载，不必配置 MCP：
+
+```bash
+curl -fsS http://127.0.0.1:8780/usage.md -o cn-cme-data-guide.md
+```
+
+网页文档为 `http://127.0.0.1:8780/docs`；运维与协议细节见 [服务维护说明](docs/mcp-access.md)。
+
+面向回测的国内期货参考数据接口及中文看板。系统同时维护 OpenCTP 经纪商参考数据、逐品种连续竞价时段、交易所公告原文、AI 分析结果和经人工审核的申报费规则。OpenCTP 不是交易所正式数据，也不会覆盖本机权威乘数表或既有交易时段表。
+
+服务通过本机国内期货 PostgreSQL 16 实例的 Unix socket 连接 `market_metadata`，使用 `u171` peer 认证。项目数据只写入独立 schema `cn_futures_reference`，不会触碰 `public` 中已有的乘数和交易时段表。
+
+## 增量存储
+
+OpenCTP 同步不保存整表快照，也不归档其整页 HTML。每个合约的每个不同状态是一条增量版本：
+
+- `start_ts`：该状态首次从数据源观测到的 UTC 时间。
+- `update_ts`：该相同状态最近一次被确认的 UTC 时间。
+- 数据相同：仅推进现有行的 `update_ts`。
+- 数据变化：新增该合约的一行版本并写入新的 `start_ts`。
+
+`asOf=YYYY-MM-DD` 会为每个合约选择该日及以前的最新版本。历史精确度仍取决于实际导入过的数据日期，不能把未采集日期推断为交易所正式历史费率。
+
+连续竞价时段保存在 `cn_futures_reference.continuous_session_versions`，同样按内容增量版本化。每行对应一个交易所、品种和 OpenCTP 段号，并保存本地开始/结束时间、日盘或夜盘、是否跨午夜及原始 JSON。当前中金所规则被作为导入校验条件：`IF/IH/IC/IM` 为 `09:30-11:30、13:00-15:00`，`T/TF/TL/TS` 为 `09:30-11:30、13:00-15:15`；上游返回偏离时同步会停止，需先核验交易所规则。
+
+OpenCTP 时段用于生成基础模板，不等同于交易所官方历史日历。表中的 `source_date` 是首次观测日期；休市日、临时调整及尚未采集的历史变化不能由静态模板推断。
+
+手动同步当前全量期货连续竞价时段：
+
+```bash
+set -a; . ./.env; set +a
+python cn_futures_ref.py sync-trading-sessions
+```
+
+相同内容只更新原版本的 `update_ts`；变更内容会生成新版本。全量响应会为消失的时段写入停用版本，按 `markets` 或 `products` 筛选的响应不会停用查询范围外的数据。
+
+交易所公告采用独立的增量版本：公告索引、HTML 原文和 PDF、图片、Office 附件均保存在 PostgreSQL；内容哈希不变时只更新 `update_ts`，内容变化时才新增 `announcement_versions`。公告原文不会写入文件系统。
+
+## 公告与申报费规则
+
+公告只在网页“公告规则”视图点击“拉取并分析”，或显式执行以下命令时刷新。看板和 AI 分析只处理期货相关公告，纯期权公告不进入待审核流程；默认回看每家交易所最近 5 页，并固定核验上期所、能源中心 2024 年申报费调整基准公告的官方 URL：
+
+```bash
+set -a; . ./.env; set +a
+python cn_futures_ref.py refresh-announcements
+```
+
+PM2 的每日任务同步 OpenCTP 手续费参考数据和连续竞价时段，不会拉取或分析公告。每次公告刷新均在 `announcement_refresh_runs` 中记录 `trigger_type=MANUAL`。
+
+分析服务直接读取当前用户的 `~/.codex/config.toml` 和 `~/.codex/auth.json`，使用其中的 model provider `base_url` 和 `OPENAI_API_KEY`。仓库及 `.env` 不保存或复制密钥。模型固定为 `gpt-5.6-sol`，Responses API 参数固定为 `reasoning.effort=high`，并关闭响应存储。可通过 `CN_FUTURES_REF_CODEX_HOME` 指向另一份同结构配置。
+
+模型产出的规则默认是 `PENDING`。统计粒度、生效日或分档不完整的结果仅作为“待补充候选”保留在分析 JSON 中，不能审核通过，也不会参与计算。只有网页审核或导入时标记为 `VERIFIED` 的规则才可执行。
+
+导入审校后的规则：
+
+```bash
+python cn_futures_ref.py import-message-rules rules.json --verified
+```
+
+规则 JSON 可为单个对象、对象数组或 `{"rules": [...]}`。每条规则必须包含 `rule_id`、`exchange`、`products`、`instrument_type`、`effective_from`、`aggregation_scope`、`information_volume`、`otr_formula`、`zero_fill_denominator`、`tiers`、`source_url` 和 `source_sha256`。当前计算器支持 `trading_day+account+instrument` 聚合。
+
+根据订单事件计算每日申报费：
+
+```bash
+python cn_futures_ref.py message-fee --orders order_events.csv
+```
+
+CSV 必须提供 `trading_day`、`account`、`exchange`、`instrument`、`event_type`，可选 `order_id` 和 `filled_quantity`。也支持对应的中文表头：`交易日`、`账户`、`交易所`、`合约代码`、`事件类型`、`报单编号`、`成交量`。事件类型支持 `NEW/报单`、`CANCEL/撤单`、`INQUIRY/询价`、`OTHER/其他`、`FILL/成交`。分档费用按“各档位信息量 × 对应费率”累加。
+
+## 部署
+
+```bash
+./scripts/bootstrap.sh
+cp .env.example .env
+```
+
+`.env.example` 已配置 `u171` 的 Unix socket DSN。将 `PYTHON_BIN` 改为本项目虚拟环境路径：
+
+```bash
+PYTHON_BIN=/home/fanghaizhou/cn_futures_db/reference/.venv/bin/python
+```
+
+迁移旧 SQLite 数据（只执行一次；目标 schema 已有数据时会停止）：
+
+```bash
+set -a; . ./.env; set +a
+"$PYTHON_BIN" scripts/migrate_sqlite_to_postgres.py --sqlite cn_futures_ref.db
+```
+
+安装 PM2 后启动 API 和每日同步调度器：
+
+```bash
+npm install --global pm2
+./scripts/pm2-start.sh
+pm2 status
+```
+
+API 默认监听 `0.0.0.0:8765`，进程管理命令：
+
+```bash
+./scripts/pm2-stop.sh
+./scripts/pm2-start.sh
+pm2 logs cn-futures-reference-api
+pm2 logs cn-futures-reference-daily-sync
+```
+
+每日 OpenCTP 手续费及交易时段任务在 `Asia/Shanghai` 时区的 18:15 运行。它使用 PostgreSQL advisory lock，重叠运行时只允许一个同步写入。公告人工刷新使用另一个 advisory lock。服务器重启后使用 `pm2 startup` 和 `pm2 save` 恢复进程。
+
+## HTTP API
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/v1/health` | 健康检查 |
+| GET | `/api/v1/data-state?asOf=YYYY-MM-DD` | 增量数据状态 |
+| GET | `/api/v1/trading-sessions?asOf=YYYY-MM-DD&venue=CFFEX&product=IF` | 连续竞价时段 |
+| GET | `/api/v1/overview` | 按交易所分组的数据 |
+| GET | `/api/v1/exchanges/{venue}` | 单个交易所数据 |
+| GET | `/api/v1/instruments/{venue}/{instrument}` | 单个合约及 exchangeInfo 表示 |
+| GET | `/api/v1/exports/exchange-info` | exchangeInfo JSON 导出 |
+| GET | `/api/v1/exports/records.csv` | 当前合约记录 CSV 导出 |
+| POST | `/api/v1/sync` | 拉取 OpenCTP 并增量合并 |
+| POST | `/api/v1/trading-sessions/sync` | 拉取 OpenCTP times 并增量合并连续竞价时段 |
+| POST | `/api/v1/import` | 导入 Base64 HTML/CSV 历史数据并增量合并 |
+| POST | `/api/v1/overrides/import` | 导入 Base64 官方 override CSV |
+| POST | `/api/v1/fees/estimate` | 单腿手续费估算 |
+| POST | `/api/v1/fees/round-trip` | 往返成本估算 |
+| GET | `/api/v1/announcements` | 公告、附件、分析和规则看板数据 |
+| POST | `/api/v1/announcements/refresh` | 人工拉取公告并分析新内容版本 |
+| GET | `/api/v1/announcements/{id}/raw` | 从 PG 读取公告 HTML 原文 |
+| GET | `/api/v1/announcement-assets/{id}` | 从 PG 读取公告附件 |
+| GET | `/api/v1/message-fee-rules` | 查询申报费规则 |
+| POST | `/api/v1/message-fee-rules/{id}/review` | 审核或驳回候选规则 |
+| POST | `/api/v1/message-fee-rules/import` | 导入 Base64 规则 JSON |
+| POST | `/api/v1/message-fee/calculate` | 使用 Base64 订单事件 CSV 计算申报费 |
+
+## 项目结构
+
+```text
+cn_futures_ref/
+  models.py      字段定义、交易所别名与数值标准化
+  source.py      OpenCTP 传输及 HTML/CSV 解析
+  trading_sessions.py OpenCTP 连续竞价时段 JSON 校验与标准化
+  announcements.py  六家交易所公告发现、原文和附件采集
+  codex_ai.py    当前 Codex provider 配置与结构化分析
+  message_fees.py   申报费规则验证、版本化与订单事件计算
+  storage.py     PostgreSQL 合约、公告、分析和规则存储
+  services.py    同步、查询、导出及费率计算
+  cli.py         公告刷新、规则导入和申报费计算命令
+  api.py         HTTP API 与前端静态资源服务
+  server.py      环境变量驱动的服务入口
+scripts/
+  migrate_sqlite_to_postgres.py  SQLite 快照到增量记录的迁移
+  daily_sync.py                  单次手续费与连续竞价时段同步任务
+  daily_scheduler.py             PM2 常驻每日调度器
+  run-api.sh / run-daily-sync.sh PM2 运行包装
+  pm2-start.sh / pm2-stop.sh     PM2 运维命令
+```

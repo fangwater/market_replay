@@ -1,0 +1,14 @@
+# mdl-replay server. NFS is read-only; shards go to local NVMe.
+msg_root = "/mnt/nfs/30.3_tonglian_msg"
+cache_root = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/mdl_replay_cache"
+# Control plane (ROUTER; clients use REQ). Loopback by default.
+control_endpoint = "tcp://127.0.0.1:13100"
+# Per-session XPUB sockets bind here on an ephemeral port.
+bind_host = "127.0.0.1"
+advertise_host = "127.0.0.1"
+build_threads = 16
+max_sessions = 32
+max_jobs = 4
+session_ttl_s = 1800
+# LRU budget for replay shards (whole natural days, ~8 GB each); 0 = unlimited.
+cache_max_gb = 48

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CN 与 CME 参考数据 · 统一查询</title>
+<style>
+  :root{color-scheme:light;font-family:system-ui,sans-serif;color:#153047;background:#f3f6f8}
+  body{max-width:1180px;margin:36px auto;padding:0 24px;line-height:1.7}
+  h1{font-size:30px;line-height:1.3}h2{font-size:19px}p{color:#43596a}
+  .tag{color:#087e81;font-size:14px;letter-spacing:.1em}a{color:#006e89}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:24px 0}
+  section,.card{background:white;border:1px solid #dce5eb;border-radius:12px;padding:22px}
+  section{margin-top:20px}code,pre,textarea{font-family:ui-monospace,monospace}
+  pre{background:#edf3f6;padding:16px;overflow:auto;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+  label{display:block;font-weight:600;margin-top:14px}
+  select,textarea,button{font:inherit;box-sizing:border-box;border-radius:7px;border:1px solid #b6c8d3;padding:10px}
+  select,textarea{width:100%;background:#fff}textarea{font-family:ui-monospace,monospace;min-height:120px}
+  button{background:#087e81;color:white;border:0;cursor:pointer;margin-top:12px}button:disabled{opacity:.6}
+  #result{max-height:600px;font-size:13px}#description{min-height:28px}small{color:#536b7c}
+  nav{display:flex;flex-wrap:wrap;gap:12px 24px;padding:14px 0;border-bottom:1px solid #dce5eb}
+  h3{font-size:16px;margin:20px 0 8px}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid #e1e8ed;vertical-align:top}th{color:#526b7c;background:#f5f8fa}td{overflow-wrap:anywhere}td code{font-size:12px}
+  .interface{border-top:1px solid #dce5eb;padding:16px 0;scroll-margin-top:20px}.interface summary{cursor:pointer;font-weight:650}.interface summary code{font-size:12px;color:#536b7c;margin-left:8px}.interface[open]{background:#fbfdfe;padding:16px 12px}.note{padding:12px 16px;background:#eef7f7;border-left:3px solid #087e81}.error{color:#ad3824}#coverage-status{font-size:13px}.actions{display:flex;gap:18px;flex-wrap:wrap}.copy{font-size:13px;padding:6px 12px;margin-top:0}section{scroll-margin-top:20px}
+  @media(max-width:650px){body{margin:24px auto;padding:0 14px}.cards{grid-template-columns:1fr}}
+</style>
+<header>
+  <div class="tag">交易所参考数据 / 只读共享服务</div>
+  <h1>CN 与 CME，统一查询入口</h1>
+  <p>同机其他用户可直接通过网页、HTTP 或 MCP 查询，无需访问维护者目录、安装数据库或配置数据源密钥。</p>
+  <p><strong>把本页链接发给使用者即可。</strong>这里列出数据来源、覆盖日期、全部 12 个接口、参数、字段解释与调用示例。</p>
+  <nav><a href="#start">如何开始</a><a href="#data">有什么数据</a><a href="#interfaces">接口与字段</a><a href="#examples">响应与 Python 示例</a><a href="#mcp">MCP（可选）</a><a href="#query">在线查询</a></nav>
+</header>
+<section id="start"><h2>其他用户如何开始</h2>
+<ol><li><strong>先打开数据：</strong><a href="/api/cn_instruments?venue=CFFEX&amp;product=IF&amp;page_size=2" target="_blank" rel="noopener">国内 IF 合约 JSON</a>，或 <a href="/api/cme_definitions?product=ES&amp;page_size=2" target="_blank" rel="noopener">CME ES 合约 JSON</a>。浏览器即可查看，无需安装软件。</li>
+<li><strong>脚本读取：</strong>所有查询都是 <code>GET /api/工具名</code>，参数放在 URL 中，返回 JSON。复制下方命令即可运行。</li>
+<li><strong>让 AI 读取：</strong>下载 <a href="/usage.md" download="cn-cme-data-guide.md">Markdown 数据使用说明</a>，交给 AI，告诉它“按这份说明查询本机 CN / CME 数据”。具备终端或 HTTP 工具的 AI 即可按说明调用，无需配置 MCP。</li></ol>
+<div class="table-scroll"><table><thead><tr><th>使用位置</th><th>基础地址</th><th>需要准备什么</th></tr></thead><tbody><tr><td>服务所在机器的其他 Linux 用户</td><td><code>http://127.0.0.1:8780</code></td><td>curl、Python 或浏览器；无需访问维护者目录、数据库账号或数据源密钥。</td></tr></tbody></table></div>
+<p>其他用户在自己的工作目录下载说明：</p><pre>curl -fsS http://127.0.0.1:8780/usage.md -o cn-cme-data-guide.md</pre>
+<pre data-curl-path="/api/cme_definitions?product=ES&amp;page_size=2">curl -fsS 'http://127.0.0.1:8780/api/cme_definitions?product=ES&amp;page_size=2'</pre>
+<div class="actions"><a href="/usage.md" download="cn-cme-使用说明.md">下载完整 Markdown 说明</a><a href="/openapi.json" download="cn-cme-openapi.json">下载 OpenAPI 接口定义</a><a href="/api/tools">机器可读参数与字段目录</a></div>
+</section>
+<section id="data"><h2>有什么数据</h2><p>这里只提供已采集的参考数据与历史状态，不提供实时行情或订单执行。</p>
+<div class="cards">
+  <div class="card"><h2>国内期货 · CN</h2><p>六家交易所合约规格、手续费及保证金参考、连续竞价时段、已采集公告和申报费规则。</p><small>OpenCTP 属于经纪商参考数据。时段为基础模板，历史精确度取决于已采集版本。</small></div>
+  <div class="card"><h2>海外期货 · CME</h2><p>ES、NQ、RTY、YM、GC、CL 的历史定义、状态事件、官方历史交易时段，以及海外经纪商佣金参考。</p><small>状态事件按 UTC 接收日期查询；官方交易日按芝加哥时区。佣金保留原始收费口径。</small></div>
+</div>
+<div class="table-scroll"><table><thead><tr><th>数据集</th><th>范围 / 更新日期</th><th>数据口径</th></tr></thead><tbody>
+<tr><td>CN 合约、手续费、保证金</td><td id="cn-coverage">点击“刷新数据范围”查询实时覆盖</td><td>六家交易所、逐合约版本；可能保留已到期合约，每条记录的 sourceDate 可能早于全局最新日期。</td></tr>
+<tr><td>CN 连续竞价时段</td><td id="cn-session-coverage">按交易所与品种查询；响应自带 dataState</td><td>上海时区的基础模板，不包含完整节假日规则。</td></tr>
+<tr><td>CME 历史合约定义</td><td id="cme-definition-coverage">ES / NQ / RTY / YM / GC / CL</td><td>Databento GLBX.MDP3，UTC 当日结束时已观测的单腿期货定义。</td></tr>
+<tr><td>CME 股指状态事件</td><td id="cme-equity-coverage">ES / NQ / RTY / YM；实际范围以数据统计为准</td><td>按 UTC 接收日期查询，包含开收盘、停盘、禁撤等事件。</td></tr>
+<tr><td>CME 商品状态事件</td><td id="cme-commodity-coverage">GC / CL；实际范围以数据统计为准</td><td>午夜快照会显式标记，不等于真实状态切换。</td></tr>
+<tr><td>CME 官方历史时段</td><td>六个品种；按起止交易日查询，一次最多 366 天</td><td>Chicago 交易日，开收盘时间返回 UTC，保留来源和分段；空结果不能单独证明休市。</td></tr>
+<tr><td>海外经纪商佣金</td><td>按关联代码或交易所查询；包括 CME Group 及其他海外市场</td><td>保留币种、版本及有效期。收费方向未指定时不能自行解释为单边或往返。</td></tr>
+<tr><td>CN 公告 / 申报费规则</td><td id="cn-rule-coverage">已采集公告与已保存规则；默认只查询已审核规则</td><td>无数据返回空数组；只有 VERIFIED 规则可执行。</td></tr>
+</tbody></table></div><button id="refresh-coverage">刷新数据范围</button><span id="coverage-status" aria-live="polite"></span>
+</section>
+<section id="interfaces"><h2>全部 12 个接口与数据字段</h2>
+<p>HTTP 接口和 MCP 工具使用相同参数。点击“参数与字段”展开说明，点击“真实数据”直接查看 JSON。可选参数不传即使用默认值。</p>
+<p class="note">日期使用 YYYY-MM-DD；布尔参数使用 true / false。分页接口最多每页 200 条，先读 total 与 pages，再按 page=1、2、3 依次取完。HTTP 400 表示参数错误，502/503 表示数据源暂不可用。</p>
+{{INTERFACES}}
+</section>
+<section id="examples"><h2>返回什么数据，脚本怎么读</h2>
+<p>下面是实际查询结果的<strong>字段节选</strong>，仅用于说明结构，不代表实时行情或今日有效费率。完整响应通过接口目录中的“真实数据”查看。</p>
+<div class="cards"><div><h3>CN 单条合约字段节选</h3><pre>{
+  "instrumentId": "IF2609",
+  "contractMultiplier": "300",
+  "priceTick": "0.2",
+  "sourceDate": "2026-09-18",
+  "fees": {"open": {"rate": "0.000024", "perLot": "0.01"}},
+  "margin": {"longRate": "0.12", "shortRate": "0.12"}
+}</pre><p>CN 金额、比例和乘数通常为十进制字符串。记录从 <code>records</code> 读取；单合约接口则从 <code>instrument</code> 读取。</p></div>
+<div><h3>CME 单条定义字段节选</h3><pre>{
+  "raw_symbol": "ESU6",
+  "asset": "ES",
+  "min_price_increment": 0.25,
+  "unit_of_measure_qty": 50.0,
+  "tick_value": 12.5,
+  "currency": "USD",
+  "expiration": "2026-09-18T13:30:00Z",
+  "ts_recv": "2026-09-03T00:00:00Z"
+}</pre><p><code>tick_value</code> 由最小报价变动乘以计量数量得到。上游原始 <code>contract_multiplier</code> 可能为占位值，不能直接作为经济乘数。</p></div></div>
+<h3>Python：读取 CN 与 CME 数据（仅标准库）</h3>
+<pre id="python-example">import json
+from urllib.parse import urlencode
+from urllib.request import urlopen
+
+BASE = "http://127.0.0.1:8780"
+
+def query(tool, **params):
+    url = BASE + "/api/" + tool + "?" + urlencode(params)
+    with urlopen(url, timeout=65) as response:
+        return json.load(response)
+
+cn = query("cn_instruments", venue="CFFEX", product="IF", page_size=2)
+for row in cn["records"]:
+    print(row["instrumentId"], row["priceTick"], row["fees"])
+
+page = 1
+while True:
+    cme = query("cme_definitions", product="ES", page=page, page_size=50)
+    for row in cme["records"]:
+        print(row["raw_symbol"], row["min_price_increment"], row["tick_value"])
+    if page &gt;= cme["pages"]:
+        break
+    page += 1</pre>
+</section>
+<section id="mcp"><h2>MCP 接入（可选）</h2><p>Markdown 是调用说明；MCP 是让客户端发现并调用工具的协议。按说明使用 HTTP 已能完成全部查询，需要自动发现工具时再配置 MCP。</p><p>在支持远程 MCP 的客户端中选择 <strong>Streamable HTTP</strong>，填入：</p>
+<pre id="endpoint"></pre><p>同机访问使用 <code>http://127.0.0.1:8780/mcp</code>。同机其他用户可直接连接，无需登录。</p>
+<p>MCP 地址需要填入客户端的连接配置。浏览器直接打开时会显示本说明页；网页查询请使用下方表单。</p>
+<p>连接后可直接让 AI：“先查询 CN/CME 的数据覆盖日期，再列出 IF 和 ES 的合约规格，说明来源与日期。”</p>
+<p>客户端通过 <code>tools/list</code> 发现 12 个工具；通过 <code>resources/list</code> 可发现使用说明和字段目录，分别为 <code>exchange-reference://guide</code> 与 <code>exchange-reference://catalog</code>。其他客户端请按其远程 HTTP MCP 配置格式填写上方 URL。</p>
+<small>普通脚本或具备终端工具的 AI，按 Markdown 说明使用 GET 接口即可。</small></section>
+<section id="query"><h2>在线查询</h2>
+  <label for="tool">查询内容</label><select id="tool"></select><p id="description"></p>
+  <label for="arguments">查询参数（JSON 对象）</label><textarea id="arguments" spellcheck="false">{}</textarea>
+  <details><summary>查看当前接口的参数定义</summary><pre id="schema"></pre></details>
+  <button id="run">执行只读查询</button><p id="status" aria-live="polite"></p>
+  <p><a id="query-link" hidden target="_blank" rel="noopener">打开此 JSON 查询链接</a></p>
+  <pre id="result">选择查询后点击“执行只读查询”。</pre>
+</section>
+<script>
+const $=id=>document.getElementById(id);
+$('endpoint').textContent='http://127.0.0.1:8780/mcp';
+let tools=[];
+function choose(){const t=tools.find(t=>t.name===$('tool').value);if(!t)return;$('description').textContent=t.description;$('arguments').value=JSON.stringify(t.exampleArguments||{},null,2);$('schema').textContent=JSON.stringify(t.inputSchema,null,2);$('query-link').hidden=true;}
+$('tool').addEventListener('change',choose);
+document.querySelectorAll('[data-open]').forEach(link=>link.addEventListener('click',()=>{$(link.dataset.open).open=true;}));
+document.querySelectorAll('[data-query]').forEach(link=>link.addEventListener('click',async()=>{await catalogReady;$('tool').value=link.dataset.query;choose();}));
+function revealHash(){const el=document.getElementById(location.hash.slice(1));if(el&&el.tagName==='DETAILS')el.open=true;}
+window.addEventListener('hashchange',revealHash);revealHash();
+const catalogReady=fetch('/api/tools').then(r=>{if(!r.ok)throw Error('接口目录加载失败');return r.json()}).then(data=>{tools=data.tools;for(const t of tools){const o=document.createElement('option');o.value=t.name;o.textContent=t.title+' · '+t.name;$('tool').append(o);}choose();}).catch(e=>{$('status').textContent=e.message;});
+$('run').addEventListener('click',async()=>{
+  $('run').disabled=true;$('status').textContent='正在查询…';
+  try{const args=JSON.parse($('arguments').value);if(!args||Array.isArray(args)||typeof args!=='object')throw Error('参数必须是 JSON 对象');const url=new URL('/api/'+$('tool').value,location.origin);for(const [k,v] of Object.entries(args)){if(v!==null)url.searchParams.set(k,String(v));}const response=await fetch(url);const data=await response.json();$('result').textContent=JSON.stringify(data,null,2);$('status').textContent=response.ok?'查询完成':'查询失败：请检查参数或服务状态';$('query-link').href=url.href;$('query-link').hidden=false;
+  }catch(e){$('status').textContent='查询失败：'+e.message;}finally{$('run').disabled=false;}
+});
+async function refreshCoverage(){
+ $('refresh-coverage').disabled=true;$('coverage-status').textContent=' 正在读取数据范围…';
+ try{
+  const response=await fetch('/api/exchange_summary');if(!response.ok)throw Error('数据范围查询失败');
+  const {markets}=await response.json();
+  const cn=markets.cn,cme=markets.cme;
+  $('cn-coverage').textContent=cn.error||`最新日期 ${cn.as_of}；${cn.instrument_count} 个合约、${cn.version_count} 个版本`;
+  if(cme.error){for(const id of ['cme-definition-coverage','cme-equity-coverage','cme-commodity-coverage'])$(id).textContent=cme.error;}
+  else{const d=cme.definition;$('cme-definition-coverage').textContent=`${d.start.slice(0,10)} 至 ${d.latestDate}；${d.uniqueSymbols} 个历史合约`;
+   for(const type of ['equity','commodity']){const c=cme.status.coverage[type];$('cme-'+type+'-coverage').textContent=`${c.ts_recv_min.slice(0,10)} 起；最新完整日 ${cme.status.latestCompleteDates[type]}`;}}
+  $('coverage-status').textContent=' 已读取当前数据范围；每条记录的日期以返回字段为准。';
+ }catch(e){$('coverage-status').textContent=' '+e.message;}finally{$('refresh-coverage').disabled=false;}
+}
+$('refresh-coverage').addEventListener('click',refreshCoverage);refreshCoverage();
+</script>
+</html>

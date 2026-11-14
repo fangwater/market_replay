@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111916">
+  <title>中国期货参考数据库</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="参考数据导航">
+      <div class="brand">
+        <span class="brand-mark">FR</span>
+        <span>期货<br>参考</span>
+      </div>
+      <div class="sidebar-label">数据视图</div>
+      <nav class="primary-nav view-nav">
+        <button class="nav-item active" type="button" data-view="contracts"><span>合约参考</span><span id="nav-total">--</span></button>
+        <button class="nav-item" type="button" data-view="announcements"><span>公告规则</span><span id="nav-rules">--</span></button>
+      </nav>
+      <div class="sidebar-label exchange-label" id="exchange-label">交易所</div>
+      <nav class="exchange-nav" id="exchange-nav" aria-label="交易所"></nav>
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <span id="connection-status">正在连接</span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="page-eyebrow">参考数据库</p>
+          <h1 id="page-title">期货参考数据</h1>
+        </div>
+        <div class="topbar-actions" id="contract-actions">
+          <button class="sync-button" id="sync-button" type="button">同步数据源</button>
+          <button class="refresh-button" id="refresh-button" type="button">刷新</button>
+        </div>
+        <div class="topbar-actions hidden" id="announcement-actions">
+          <button class="refresh-button pull-button" id="pull-button" type="button">拉取并分析</button>
+        </div>
+      </header>
+
+      <section class="metrics" id="contract-metrics" aria-label="数据统计">
+        <article class="metric"><span>已载入合约</span><strong id="metric-contracts">--</strong></article>
+        <article class="metric"><span>交易所</span><strong id="metric-exchanges">--</strong></article>
+        <article class="metric"><span>期货合约</span><strong id="metric-futures">--</strong></article>
+        <article class="metric"><span>增量版本</span><strong id="metric-versions">--</strong></article>
+      </section>
+
+      <div id="contract-view">
+        <section class="control-row" aria-label="合约筛选">
+          <label class="search-field"><span>搜索</span><input id="search-input" type="search" placeholder="合约代码、品种或名称"></label>
+          <span class="scope-label">仅显示期货合约</span>
+        </section>
+
+        <section class="exchange-list" id="exchange-list" aria-live="polite"></section>
+      </div>
+
+      <div class="hidden" id="announcement-view">
+        <section class="metrics" id="announcement-metrics" aria-label="公告规则统计">
+          <article class="metric"><span>已保存公告</span><strong id="metric-announcements">--</strong></article>
+          <article class="metric"><span>待审核规则</span><strong id="metric-pending">--</strong></article>
+          <article class="metric"><span>已审核规则</span><strong id="metric-verified">--</strong></article>
+          <article class="metric"><span>分析失败</span><strong id="metric-failed">--</strong></article>
+        </section>
+        <section class="notice-toolbar">
+          <div><span class="status-dot"></span><strong id="ai-status">正在读取分析配置</strong></div>
+          <span id="last-refresh">尚未手动拉取</span>
+        </section>
+        <div class="operation-report hidden" id="operation-report" aria-live="polite"></div>
+        <section class="definition-section" id="cffex-definition" data-definition-venue="CFFEX" aria-labelledby="cffex-definition-title">
+          <header class="definition-heading">
+            <div><span class="venue-tag">CFFEX</span><h2 id="cffex-definition-title">中金所信息量与 OTR 口径</h2></div>
+            <span>股指期货梯度申报费</span>
+          </header>
+          <div class="definition-grid">
+            <dl>
+              <dt>信息量</dt>
+              <dd>买入报单、卖出报单和撤单笔数之和。报单和撤单各计 1 笔；一笔委托报出后又撤销，共产生 2 笔信息量。</dd>
+            </dl>
+            <dl>
+              <dt>有成交的委托笔数</dt>
+              <dd>发生过成交的委托数量，不是成交手数。一笔委托即使成交多手，也按 1 笔有成交委托统计。</dd>
+            </dl>
+            <dl class="formula-definition">
+              <dt>委托成交比 OTR</dt>
+              <dd><code>OTR = 信息量 / 有成交的委托笔数 - 1</code><span>没有成交时，有成交的委托笔数按 1 计算。</span></dd>
+            </dl>
+          </div>
+          <p class="definition-scope">按客户、交易日和单个股指期货合约分别统计；同一客户通过不同期货公司会员产生的数据合并，实际控制关系账户也合并计算。</p>
+        </section>
+        <section class="definition-section" data-definition-venue="SHFE" aria-labelledby="shfe-definition-title">
+          <header class="definition-heading">
+            <div><span class="venue-tag">SHFE</span><h2 id="shfe-definition-title">上期所申报费分组与档位</h2></div>
+            <span>自 2024-06-03 起</span>
+          </header>
+          <div class="fee-groups">
+            <p><strong>A 组（期货）</strong><span>白银、不锈钢、黄金、螺纹钢、铝、镍、铅、热轧卷板、燃料油、石油沥青、铜、天然橡胶、锌、锡、纸浆</span></p>
+            <p><strong>B 组（期权）</strong><span>白银期权、黄金期权、螺纹钢期权、铝期权、铜期权、天然橡胶期权、锌期权、丁二烯橡胶期权</span></p>
+            <p><strong>C 组（期货）</strong><span>丁二烯橡胶、线材、氧化铝</span></p>
+          </div>
+          <div class="data-table-wrap fee-guide-wrap">
+            <table class="fee-guide-table">
+              <thead><tr><th>信息量</th><th>OTR ≤ 2</th><th>OTR &gt; 2</th></tr></thead>
+              <tbody>
+                <tr><td>1 - 4000</td><td>全部组别 0 元/笔</td><td>全部组别 0 元/笔</td></tr>
+                <tr><td>4001 - 8000</td><td>A 组 1.5 / B 组 0.5 / C 组 0.1 元/笔</td><td>A 组 3 / B 组 1 / C 组 0.2 元/笔</td></tr>
+                <tr><td>8001 - 40000</td><td>A 组 7.5 / B 组 2.5 / C 组 0.5 元/笔</td><td>A 组 15 / B 组 5 / C 组 1 元/笔</td></tr>
+                <tr><td>40001 以上</td><td>A 组 25 / B 组 5 / C 组 2 元/笔</td><td>A 组 50 / B 组 10 / C 组 5 元/笔</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="definition-section" data-definition-venue="INE" aria-labelledby="ine-definition-title">
+          <header class="definition-heading">
+            <div><span class="venue-tag">INE</span><h2 id="ine-definition-title">能源中心申报费分组与档位</h2></div>
+            <span>自 2024-06-03 起</span>
+          </header>
+          <div class="fee-groups">
+            <p><strong>A 组（期货）</strong><span>原油、低硫燃料油、20号胶</span></p>
+            <p><strong>B 组（期权）</strong><span>原油期权</span></p>
+            <p><strong>C 组（期货）</strong><span>国际铜、集运指数（欧线）</span></p>
+          </div>
+          <div class="data-table-wrap fee-guide-wrap">
+            <table class="fee-guide-table">
+              <thead><tr><th>信息量</th><th>OTR ≤ 2</th><th>OTR &gt; 2</th></tr></thead>
+              <tbody>
+                <tr><td>1 - 4000</td><td>全部组别 0 元/笔</td><td>全部组别 0 元/笔</td></tr>
+                <tr><td>4001 - 8000</td><td>A 组 1.5 / B 组 0.5 / C 组 0.1 元/笔</td><td>A 组 3 / B 组 1 / C 组 0.2 元/笔</td></tr>
+                <tr><td>8001 - 40000</td><td>A 组 7.5 / B 组 2.5 / C 组 0.5 元/笔</td><td>A 组 15 / B 组 5 / C 组 1 元/笔</td></tr>
+                <tr><td>40001 以上</td><td>A 组 25 / B 组 5 / C 组 2 元/笔</td><td>A 组 50 / B 组 10 / C 组 5 元/笔</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="definition-section" data-definition-venue="DCE" aria-labelledby="dce-definition-title">
+          <header class="definition-heading">
+            <div><span class="venue-tag">DCE</span><h2 id="dce-definition-title">大商所申报费品种与档位</h2></div>
+            <span>2024-10-25 基准 · <a href="http://www.dce.com.cn/dalianshangpin/ywfw/jystz/ywtz/8605414/index.html" target="_blank" rel="noreferrer">官方通知</a></span>
+          </header>
+          <p class="definition-intro">信息量为报单、撤单等交易指令笔数之和；<code>OTR = 信息量 / 有成交报单笔数 - 1</code>。下表每格依次为“OTR ≤ 2 / OTR &gt; 2”，单位为元/笔。</p>
+          <div class="data-table-wrap fee-guide-wrap">
+            <table class="fee-guide-table fee-guide-table-wide">
+              <thead><tr><th>适用品种</th><th>信息量 ≤ 4000</th><th>4001 - 8000</th><th>8000 以上</th></tr></thead>
+              <tbody>
+                <tr><td>棕榈油、豆粕、鸡蛋、苯乙烯、乙二醇、液化石油气、聚丙烯、聚氯乙烯期货</td><td>0 / 0</td><td>0 / 3</td><td>6 / 15</td></tr>
+                <tr><td>聚乙烯、玉米期货</td><td>0 / 0</td><td>0 / 2</td><td>4 / 10</td></tr>
+                <tr><td>黄大豆1号、黄大豆2号、豆油、纤维板、粳米、玉米淀粉期货</td><td>0 / 0</td><td>0 / 1</td><td>2 / 5</td></tr>
+                <tr><td>全部期权品种（规则背景）</td><td>0 / 0</td><td>0 / 1</td><td>2 / 5</td></tr>
+                <tr><td>生猪、铁矿石、焦煤、焦炭、胶合板期货</td><td>0 / 0</td><td>0 / 0.1</td><td>0.2 / 0.5</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="definition-scope">期货按客户、交易日和合约统计，期权按合约月份统计；同一客户跨会员及实际控制关系账户合并，做市商做市交易免收申报费。</p>
+        </section>
+        <section class="definition-section" data-definition-venue="CZCE" aria-labelledby="czce-definition-title">
+          <header class="definition-heading">
+            <div><span class="venue-tag">CZCE</span><h2 id="czce-definition-title">郑商所申报费品种与档位</h2></div>
+            <span>2024-10-25 基准 · <a href="https://www.czce.com.cn/cn/gyjys/jysdt/ggytz/webinfo/2024/05/1715232136958603.htm" target="_blank" rel="noreferrer">5 月通知</a> · <a href="https://www.czce.com.cn/cn/gyjys/jysdt/ggytz/webinfo/2024/07/1715237246527911.htm" target="_blank" rel="noreferrer">7 月通知</a></span>
+          </header>
+          <p class="definition-intro">信息量为报单、撤单等交易指令笔数之和；<code>OTR = 信息量 / 有成交报单笔数 - 1</code>。下表每格依次为“OTR ≤ 2 / OTR &gt; 2”，单位为元/笔。</p>
+          <div class="fee-groups fee-groups-two">
+            <p><strong>3 / 15 档期货</strong><span>甲醇、白糖、菜油、菜粕、棉花、玻璃、纯碱、硅铁、锰硅、红枣、苹果、对二甲苯、烧碱、尿素</span></p>
+            <p><strong>1 / 5 档期货</strong><span>短纤、花生、普通小麦、优质强筋小麦、早籼稻、晚籼稻、粳稻、动力煤、棉纱、油菜籽</span></p>
+          </div>
+          <div class="data-table-wrap fee-guide-wrap">
+            <table class="fee-guide-table">
+              <thead><tr><th>品种组</th><th>信息量 ≤ 4000</th><th>4001 - 8000</th><th>8000 以上</th></tr></thead>
+              <tbody>
+                <tr><td>3 / 15 档期货</td><td>0 / 0</td><td>0 / 3</td><td>7.5 / 15</td></tr>
+                <tr><td>1 / 5 档期货</td><td>0 / 0</td><td>0 / 1</td><td>2.5 / 5</td></tr>
+                <tr><td>指定期权品种（规则背景）</td><td>0 / 0</td><td>0 / 1</td><td>2.5 / 5</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="fee-groups fee-groups-two fee-groups-secondary">
+            <p><strong>PTA 期货单独四档</strong><span>1 - 4000：0 / 0；4001 - 8000：0 / 2；8001 - 20000：5 / 10；20000 以上：10 / 40 元/笔。</span></p>
+            <p><strong>指定期权品种</strong><span>白糖、棉花、PTA、甲醇、菜粕、菜籽油、动力煤、花生、烧碱、对二甲苯、短纤、纯碱、硅铁、锰硅、尿素、苹果、红枣、玻璃期权。</span></p>
+          </div>
+          <p class="definition-scope">期货按客户、交易日和合约统计，期权按合约月份统计；无成交时 OTR 按大于 2 处理。同一客户跨会员及实际控制关系账户合并，做市商做市交易免收申报费。</p>
+        </section>
+        <section class="rules-section">
+          <header class="section-heading"><h2>待审核规则</h2><span id="pending-count">0 条</span></header>
+          <div class="rule-list" id="rule-list"></div>
+        </section>
+        <section class="announcements-section">
+          <header class="section-heading"><h2>期货公告档案</h2><span id="announcement-count">0 条</span></header>
+          <div class="announcement-list" id="announcement-list" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

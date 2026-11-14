@@ -1,0 +1,5 @@
+# 独立环境安装，不升级原 CN/CME 服务的依赖。Python >= 3.10。
+mcp==1.30.0
+httpx==0.28.1
+uvicorn==0.54.0
+psycopg[binary]==3.3.6

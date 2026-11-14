@@ -1,0 +1,263 @@
+{
+  "schema": "cn-futures-exchange-info/v1",
+  "asOf": "2026-09-02",
+  "snapshot": {
+    "id": 1,
+    "snapshot_date": "2026-09-02",
+    "fetched_at_utc": "2026-09-02T07:30:21+00:00",
+    "source_url": "http://www.openctp.cn/fees.html",
+    "source_type": "OPENCTP_BROKER_REFERENCE",
+    "source_updated_at": null,
+    "content_sha256": "7c5d6b93f68889ae194812b2701d04541594ba0d23140f5e6b86944a644844f6",
+    "raw_path": "/home/fanghaizhou/cn_exchange_info_summary/raw_snapshots/openctp_fees_20260902_7c5d6b93f688.html",
+    "row_count": 866
+  },
+  "feeScope": "BROKER_REFERENCE",
+  "sourceType": "OPENCTP_BROKER_REFERENCE",
+  "historicalExact": false,
+  "makerTakerApplicable": false,
+  "messageFeeSupported": false,
+  "feeFormula": "quantity * fixedPerLot + abs(price * contractMultiplier * quantity) * adValoremRate",
+  "symbols": [
+    {
+      "venue": "CFFEX",
+      "symbol": "IF2609",
+      "productId": "IF",
+      "name": "股指2609",
+      "instrumentType": "FUTURE",
+      "contractMultiplier": "300",
+      "tickValue": "60.0",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.2"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "1",
+          "minQty": "1",
+          "maxQty": null,
+          "status": "OPENCTP_FEE_TABLE_DOES_NOT_SUPPLY_LIMITS"
+        }
+      ],
+      "fees": [
+        {
+          "positionEffect": "OPEN",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "32.37"
+        },
+        {
+          "positionEffect": "CLOSE_YESTERDAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "32.37"
+        },
+        {
+          "positionEffect": "CLOSE_TODAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000231",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "313.82"
+        }
+      ],
+      "margin": {
+        "longRate": "0.12",
+        "longPerLot": "0",
+        "shortRate": "0.12",
+        "shortPerLot": "0",
+        "sourceReferenceLongOneLot": "163159.2",
+        "sourceReferenceShortOneLot": "163159.2"
+      },
+      "marketReference": {
+        "previousSettlementPrice": "4594.8",
+        "previousClosePrice": "4597.2",
+        "latestPrice": "4532.2"
+      },
+      "sourceUpdatedAt": null,
+      "appliedOverrides": []
+    },
+    {
+      "venue": "CFFEX",
+      "symbol": "IF2610",
+      "productId": "IF",
+      "name": "股指2610",
+      "instrumentType": "FUTURE",
+      "contractMultiplier": "300",
+      "tickValue": "60.0",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.2"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "1",
+          "minQty": "1",
+          "maxQty": null,
+          "status": "OPENCTP_FEE_TABLE_DOES_NOT_SUPPLY_LIMITS"
+        }
+      ],
+      "fees": [
+        {
+          "positionEffect": "OPEN",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "32.18"
+        },
+        {
+          "positionEffect": "CLOSE_YESTERDAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "32.18"
+        },
+        {
+          "positionEffect": "CLOSE_TODAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000231",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "311.95"
+        }
+      ],
+      "margin": {
+        "longRate": "0.12",
+        "longPerLot": "0",
+        "shortRate": "0.12",
+        "shortPerLot": "0",
+        "sourceReferenceLongOneLot": "162187.2",
+        "sourceReferenceShortOneLot": "162187.2"
+      },
+      "marketReference": {
+        "previousSettlementPrice": "4569.4",
+        "previousClosePrice": "4573.4",
+        "latestPrice": "4505.2"
+      },
+      "sourceUpdatedAt": null,
+      "appliedOverrides": []
+    },
+    {
+      "venue": "CFFEX",
+      "symbol": "IF2612",
+      "productId": "IF",
+      "name": "股指2612",
+      "instrumentType": "FUTURE",
+      "contractMultiplier": "300",
+      "tickValue": "60.0",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.2"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "1",
+          "minQty": "1",
+          "maxQty": null,
+          "status": "OPENCTP_FEE_TABLE_DOES_NOT_SUPPLY_LIMITS"
+        }
+      ],
+      "fees": [
+        {
+          "positionEffect": "OPEN",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "31.78"
+        },
+        {
+          "positionEffect": "CLOSE_YESTERDAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "31.78"
+        },
+        {
+          "positionEffect": "CLOSE_TODAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000231",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "308.11"
+        }
+      ],
+      "margin": {
+        "longRate": "0.12",
+        "longPerLot": "0",
+        "shortRate": "0.12",
+        "shortPerLot": "0",
+        "sourceReferenceLongOneLot": "160192.8",
+        "sourceReferenceShortOneLot": "160192.8"
+      },
+      "marketReference": {
+        "previousSettlementPrice": "4515.4",
+        "previousClosePrice": "4518",
+        "latestPrice": "4449.8"
+      },
+      "sourceUpdatedAt": null,
+      "appliedOverrides": []
+    },
+    {
+      "venue": "CFFEX",
+      "symbol": "IF2703",
+      "productId": "IF",
+      "name": "股指2703",
+      "instrumentType": "FUTURE",
+      "contractMultiplier": "300",
+      "tickValue": "60.0",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.2"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "1",
+          "minQty": "1",
+          "maxQty": null,
+          "status": "OPENCTP_FEE_TABLE_DOES_NOT_SUPPLY_LIMITS"
+        }
+      ],
+      "fees": [
+        {
+          "positionEffect": "OPEN",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "31.26"
+        },
+        {
+          "positionEffect": "CLOSE_YESTERDAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000024",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "31.26"
+        },
+        {
+          "positionEffect": "CLOSE_TODAY",
+          "liquidityRole": "ANY",
+          "adValoremRate": "0.000231",
+          "fixedPerLot": "0.01",
+          "sourceReferenceOneLotFee": "303.07"
+        }
+      ],
+      "margin": {
+        "longRate": "0.12",
+        "longPerLot": "0",
+        "shortRate": "0.12",
+        "shortPerLot": "0",
+        "sourceReferenceLongOneLot": "157572",
+        "sourceReferenceShortOneLot": "157572"
+      },
+      "marketReference": {
+        "previousSettlementPrice": "4443.4",
+        "previousClosePrice": "4445.8",
+        "latestPrice": "4377"
+      },
+      "sourceUpdatedAt": null,
+      "appliedOverrides": []
+    }
+  ]
+}
