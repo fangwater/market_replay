@@ -4,7 +4,7 @@
 //! inferred trade amounts. Amounts themselves are not adjusted.
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, TimeZone};
+use chrono::{Datelike, NaiveDate, TimeZone};
 use chrono_tz::Asia::Shanghai;
 use clap::Parser;
 use cn_futures_l2::baseline_1min::{linear_percentile, minute_left_sec, SizeBuckets};
@@ -14,6 +14,7 @@ use cn_futures_l2::db::{
 };
 use cn_futures_l2::export_1min::{read_day_parquet, write_day_parquet};
 use cn_futures_l2::export_1s::parse_product_cf;
+use cn_futures_l2::source::parse_day;
 use cn_futures_l2::universe::is_maintained_product;
 use rocksdb::{Direction, IteratorMode};
 use std::collections::HashMap;
@@ -34,6 +35,14 @@ struct Args {
     workers: usize,
     #[arg(long)]
     product: Option<String>,
+    /// Only overlay day files with TradDay >= start (YYYY-MM-DD or YYYYMMDD).
+    /// Thresholds stay whole-calendar-month, so a daily run should pass the
+    /// first day of the month to keep earlier days consistent.
+    #[arg(long)]
+    start: Option<String>,
+    /// Only overlay day files with TradDay <= end.
+    #[arg(long)]
+    end: Option<String>,
 }
 
 fn year_month(ts_utc_ns: u64) -> u32 {
@@ -44,7 +53,16 @@ fn year_month(ts_utc_ns: u64) -> u32 {
     local.year() as u32 * 100 + local.month()
 }
 
-fn list_product_days(root: &Path, exchange: &str, product: &str) -> Result<Vec<PathBuf>> {
+fn day_of(path: &Path) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(path.file_stem()?.to_str()?, "%Y%m%d").ok()
+}
+
+fn list_product_days(
+    root: &Path,
+    exchange: &str,
+    product: &str,
+    range: Option<(NaiveDate, NaiveDate)>,
+) -> Result<Vec<PathBuf>> {
     let dir = root.join(exchange).join(product);
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -52,9 +70,16 @@ fn list_product_days(root: &Path, exchange: &str, product: &str) -> Result<Vec<P
     let mut out = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-            out.push(path);
+        if path.extension().and_then(|ext| ext.to_str()) != Some("parquet") {
+            continue;
         }
+        if let Some((start, end)) = range {
+            match day_of(&path) {
+                Some(day) if day >= start && day <= end => {}
+                _ => continue,
+            }
+        }
+        out.push(path);
     }
     out.sort();
     Ok(out)
@@ -188,13 +213,30 @@ fn main() -> Result<()> {
     if args.workers == 0 {
         bail!("--workers must be positive");
     }
+    let range = match (&args.start, &args.end) {
+        (None, None) => None,
+        (Some(s), Some(e)) => {
+            let (s, e) = (parse_day(s)?, parse_day(e)?);
+            if s > e {
+                bail!("--start must not be after --end");
+            }
+            Some((s, e))
+        }
+        _ => bail!("give both --start and --end, or neither"),
+    };
     let db = open_rocksdb_read_only(&args.rocksdb_dir)?;
     let names = L2Db::list_cf(&rocksdb::Options::default(), &args.rocksdb_dir)?;
     let mut by_product: HashMap<String, Vec<String>> = HashMap::new();
     for name in names {
-        let Some((_, product)) = parse_product_cf(&name) else {
+        let Some((year, product)) = parse_product_cf(&name) else {
             continue;
         };
+        // Year CFs outside the range cannot hold trades of the overlaid months.
+        if let Some((start, end)) = range {
+            if year < start.year() || year > end.year() {
+                continue;
+            }
+        }
         if !is_maintained_product(&product) {
             continue;
         }
@@ -213,6 +255,7 @@ fn main() -> Result<()> {
         args.root.display()
     );
     let db = Arc::new(db);
+
     let root = Arc::new(args.root);
     let (tx, rx) = crossbeam_channel::unbounded::<(String, Vec<String>)>();
     for job in jobs {
@@ -235,7 +278,7 @@ fn main() -> Result<()> {
                     eprintln!("skip {product}: no baseline_data_1min directory");
                     continue;
                 };
-                let days = list_product_days(&root, &exchange, &product)?;
+                let days = list_product_days(&root, &exchange, &product, range)?;
                 if days.is_empty() {
                     eprintln!("skip {exchange} {product}: empty 1min directory");
                     continue;

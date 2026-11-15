@@ -1,0 +1,27 @@
+[package]
+name = "cn_kline_server"
+version.workspace = true
+edition.workspace = true
+description = "gRPC (cn_market.v1) minute bars for CN futures read from baseline_data_1min"
+
+[[bin]]
+name = "cn-kline-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+chrono-tz = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+cn_futures_l2 = { path = "../cn_futures_l2" }
+cn_market_proto = { path = "../../proto/cn_market_proto" }
+reqwest = { version = "0.12.19", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+toml = "0.8"
+tonic = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

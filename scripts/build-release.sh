@@ -14,5 +14,8 @@ fi
 export LIBCLANG_PATH
 cargo build --release --locked -p mdl_replay --bin mdl-replay
 cargo build --release --locked -p cn_futures_l2 --bins
+cargo build --release --locked -p cn_futures_trim -p cn_daily -p cn_kline_server
 echo "[INFO] built release binaries under $ROOT_DIR/target/release"
-sha256sum "$ROOT_DIR/target/release/mdl-replay" "$ROOT_DIR/target/release/cn_futures_l2" "$ROOT_DIR/target/release/export_baseline_1min"
+sha256sum "$ROOT_DIR/target/release/mdl-replay" "$ROOT_DIR/target/release/cn_futures_l2" "$ROOT_DIR/target/release/export_baseline_1min" \
+  "$ROOT_DIR/target/release/trim_cn_futures_continuous_sessions" "$ROOT_DIR/target/release/cn-daily" \
+  "$ROOT_DIR/target/release/cn-kline-server"

@@ -1,0 +1,98 @@
+// CN futures post-market market data, served by market_replay.
+// Futures-native contract (no Binance compatibility): every field carries
+// explicit units. Times are UTC Unix milliseconds; trading days are YYYYMMDD
+// integers in Asia/Shanghai exchange convention (night session belongs to the
+// next trading day).
+syntax = "proto3";
+
+package cn_market.v1;
+
+service CnFuturesMarket {
+  // Closed one-minute bars of one contract from baseline_data_1min.
+  rpc GetMinuteBars(GetMinuteBarsRequest) returns (GetMinuteBarsResponse);
+  // Which trading days are available.
+  rpc GetDataState(GetDataStateRequest) returns (DataState);
+}
+
+enum Exchange {
+  EXCHANGE_UNSPECIFIED = 0;
+  CFFEX = 1;
+  SHFE = 2;
+  INE = 3;
+  CZCE = 4;
+  DCE = 5;
+  GFEX = 6;
+}
+
+message TimeRange {
+  // Inclusive bounds on bar open time.
+  int64 start_ms = 1;
+  int64 end_ms = 2;
+}
+
+message GetMinuteBarsRequest {
+  Exchange exchange = 1;
+  // Native contract code, case-insensitive. CZCE accepts both AP601 and AP2601.
+  string contract = 2;
+  oneof range {
+    uint32 trading_day = 3;
+    TimeRange time = 4;
+  }
+}
+
+message Contract {
+  Exchange exchange = 1;
+  // Upper-case product code, e.g. RB, AP, IF.
+  string product = 2;
+  // Code as stored in the archive (CZCE keeps 3-digit YMM).
+  string native_code = 3;
+  // Lower-case, CZCE widened to 4 digits: ap2601, rb2601.
+  string canonical_code = 4;
+  // From PostgreSQL market_metadata.public.domestic_future_product_multipliers.
+  double volume_multiple = 5;
+  // Minimum price increment (OpenCTP broker reference via the reference service).
+  double price_tick = 6;
+  // "instrument" or "product" (all listed contracts of the product agree).
+  string price_tick_source = 7;
+}
+
+message MinuteBar {
+  int64 open_time_ms = 1;
+  uint32 trading_day = 2;
+  // OHLC in quote units. high/low are widened, on the tick grid, to contain
+  // vwap when the snapshot-derived range misses trades between snapshots.
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double close = 6;
+  // high/low exactly as derived from 5-level snapshots (baseline_data_1min).
+  double snapshot_high = 7;
+  double snapshot_low = 8;
+  // Single-sided lots traded in [open_time, open_time + 60s).
+  double volume_lots = 9;
+  // Single-sided turnover in CNY, contract multiplier included.
+  double turnover_cny = 10;
+  // turnover_cny / volume_lots / volume_multiple.
+  double vwap = 11;
+  // Number of snapshot intervals with a volume increase (not real trade count).
+  uint32 snapshot_trades = 12;
+  bool widened = 13;
+}
+
+message GetMinuteBarsResponse {
+  Contract contract = 1;
+  // Only minutes with volume > 0, ascending; missing minutes are omitted.
+  repeated MinuteBar bars = 2;
+  DataState data_state = 3;
+}
+
+message GetDataStateRequest {}
+
+message DataState {
+  // "baseline_data_1min"
+  string source = 1;
+  // Latest trading day processed by the daily job (0 if unknown).
+  uint32 latest_trading_day = 2;
+  // Continuous-session snapshot used to trim the archive.
+  string session_snapshot_as_of = 3;
+}

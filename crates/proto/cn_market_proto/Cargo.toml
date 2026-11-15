@@ -1,0 +1,13 @@
+[package]
+name = "cn_market_proto"
+version.workspace = true
+edition.workspace = true
+description = "gRPC contract (cn_market.v1) for CN futures post-market market data served by market_replay"
+
+[dependencies]
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"

@@ -75,6 +75,9 @@
 | `crates/core/cn_futures_core` | 实盘和盘后共享的纯逻辑：交易时段、品种 universe、记录编码、快照到成交的状态机、断段、1 分钟累加 |
 | `crates/cn/cn_futures_l2` | 从 mkt_signal `685896ce` 迁入：通联 → RocksDB 回放，以及 1s / 1min / ylabel / hfq 导出 |
 | `crates/cn/cn_futures_trim` | 从 mkt_signal `eb58eaf4` 迁入：按 reference 服务的交易时段快照裁剪 parquet |
+| `crates/cn/cn_daily` | 每日任务 `cn-daily`：回放、导出、裁剪、分桶、审计、钉钉通知，见 [docs/cn_daily_and_kline.md](docs/cn_daily_and_kline.md) |
+| `crates/cn/cn_kline_server` + `crates/proto/cn_market_proto` | gRPC `cn_market.v1` 分钟线服务（读 parquet，不做 Binance 兼容） |
+| `crates/common/dingtalk` | 钉钉机器人客户端（凭据只从环境变量读取） |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
 
@@ -88,8 +91,8 @@
 
 1. `cn_futures_l2 --msg-root ... --exchange X --start D --end D`：写入 RocksDB
 2. `export_baseline_1min --start D --end D`
-3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 裁剪，生产上是原地改写，溯源记录在 `baseline_data_1min/_provenance/continuous_sessions.json`，现有快照日是 2026-09-08
-4. `fill_1min_size_buckets`：按自然月的 P50/P90 大小单分桶，只读打开 RocksDB。**注意：这个工具没有日期范围参数，每次会重写该品种的全部历史文件**，每日任务里使用前必须先加上日期范围
+3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 的时段裁剪。这个工具不允许输入和输出是同一个目录，所以先导出到 staging，再裁剪进生产目录。生产 `baseline_data_1min` 本身就是裁剪的输出目录，溯源记录在 `_provenance/continuous_sessions.json`，快照日是 2026-09-08；快照日不同时工具会拒绝执行
+4. `fill_1min_size_buckets --start <月初> --end D`：按自然月的 P50/P90 做大小单分桶，只读打开 RocksDB。2026-11-15 加上了 `--start/--end`：只扫覆盖这些日期的年份分区，只改写范围内的文件。不带参数时仍然重写全部历史。已用生产数据验证，结果和不带参数时一致
 
 迁移验证（2026-11-14）：用新二进制在临时目录按以上四步重跑 2026-08-26 的上期所和广期所，共 24 个文件、105,785 行，与生产 parquet 的 schema 和全部值完全一致；抽出 core 之后再验证广期所，5/5 个文件一致。
 

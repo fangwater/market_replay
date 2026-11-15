@@ -1,0 +1,21 @@
+# Daily CN futures post-market job (cn-daily). Run from PM2 at 16:30 Asia/Shanghai.
+msg_root = "/mnt/nfs/30.3_tonglian_msg"
+rocksdb_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_l2_rocksdb"
+# Production archive = trim output root; its _provenance fixes the session snapshot.
+baseline_root = "/mnt/hdd-raid5-72t/liang_torch/cn_futures_data/baseline_data_1min"
+staging_root = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/staging/baseline_data_1min_untrimmed"
+log_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/logs/cn_daily"
+state_file = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_daily_state.json"
+session_api = "http://127.0.0.1:8765/api/v1/trading-sessions"
+# Must equal baseline_root/_provenance/continuous_sessions.json (trim refuses otherwise).
+# Changing it means building a new archive root, not editing this line.
+session_as_of = "2026-09-08"
+replay_workers = 32
+export_workers = 8
+fill_workers = 8
+# TradDay D is complete after the CFFEX treasury close (15:15) and before the
+# 20:55 night auction, while D's msg files are not being appended.
+ready_after = "16:00"
+host_tag = "market_replay@30.38"
+dingtalk_webhook_env = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL"
+dingtalk_secret_env = "CN_FUTURES_DB_DINGTALK_SECRET"

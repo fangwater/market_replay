@@ -1,0 +1,61 @@
+# 国内期货每日 1 分钟处理与 gRPC kline 服务
+
+最后更新：2026-11-15。
+
+## 每日任务 `cn-daily`
+
+代码在 `crates/cn/cn_daily`，配置在 `config/cn_daily.toml`。由 PM2 定时在上海时间 16:30（UTC 08:30）运行，进程名 `cn-futures-daily`。
+
+每次运行会找出所有**已完成但还没处理**的交易日，按顺序处理：
+
+| 步骤 | 工具 | 说明 |
+| --- | --- | --- |
+| 回放 | `cn_futures_l2` | 把通联 msg 写入生产 RocksDB；已经是 `done` 的交易日直接跳过 |
+| 导出 | `export_baseline_1min` | RocksDB → staging（未裁剪），staging 在 NVMe 上 |
+| 时段裁剪 | `trim_cn_futures_continuous_sessions` | staging → 生产 `baseline_data_1min`。时段快照固定为 `session_as_of = 2026-09-08`，必须和生产目录 `_provenance` 里的记录一致，否则工具会拒绝执行；生产目录里已有的文件不会覆盖，`--overwrite` 时才覆盖 |
+| 大小单分桶 | `fill_1min_size_buckets --start 月初 --end D` | 阈值按完整自然月的 P50/P90 计算，所以每次重算当月 1 号到 D 的全部文件；每个月只跑一次 |
+| 审计与通知 | 内置 | 统计文件数、行数、有成交分钟数、合约数、各所文件数，VWAP 落在快照高低价外的比例，与上一交易日相比缺少或新增的品种，以及没有已验证乘数的品种。结果写入 `logs/cn_daily/cn_daily_YYYYMMDD_audit.json`，然后发钉钉 |
+
+规则：
+
+- **交易日的认定：** 只有含中金所 `mdl_21_1_0.csv` 的 NFS 目录才算开市日。当天上海时间 `ready_after`（16:00）之后才认为 D 已完成：此时 15:15 国债已收盘，20:55 夜盘集合竞价还没开始，D 的 msg 文件不再追加。
+- **状态文件：** `cn_daily_state.json` 记录 `last_done`。只有四步全部成功、staging 清理完毕后，才标记为完成。中途失败会停止整次运行并发钉钉，重跑时会自动跳过已经完成的部分。
+- **需要人工处理的情况：** 回放中断后，RocksDB 里该交易日会留下 `writing` 状态。按 [cn_futures_l2](cn_futures_l2.md) 的 reset 流程处理后再重跑。
+- **钉钉：** webhook 和加签 secret 只从环境变量 `CN_FUTURES_DB_DINGTALK_WEBHOOK_URL` / `CN_FUTURES_DB_DINGTALK_SECRET` 读取。启动脚本从仓库外的 `~/.config/market_replay/env`（权限必须是 600）加载它们。没有配置时只写日志，不发通知。用 `cn-daily test-notify --config config/cn_daily.toml` 测试连通性。
+
+常用命令：
+
+```bash
+target/release/cn-daily status --config config/cn_daily.toml
+target/release/cn-daily run --config config/cn_daily.toml --dry-run          # 只打印计划
+target/release/cn-daily run --config config/cn_daily.toml --start 2026-08-27  # 首次运行或补跑
+target/release/cn-daily audit --config config/cn_daily.toml --day 2026-11-13
+scripts/start_cn_services.sh   # PM2: cn-futures-kline + cn-futures-daily
+```
+
+## gRPC kline：`cn_market.v1.CnFuturesMarket`
+
+契约在 `crates/proto/cn_market_proto/proto/cn_market.proto`，服务端在 `crates/cn/cn_kline_server`，默认监听 `127.0.0.1:18312`，PM2 进程名 `cn-futures-kline`。
+
+这里**不做 Binance 兼容**，字段直接用期货的口径和单位：交易日、单边手数、含乘数的人民币成交额、合约乘数、最小变动价位、郑商所三位码和四位码。kline 数据也不单独维护，每次请求直接读生产 `baseline_data_1min` 的日文件。
+
+- `GetMinuteBars(exchange, contract, trading_day | time{start_ms,end_ms})`：
+  - `contract` 不区分大小写，郑商所的 `AP601` 和 `AP2601` 都可以。
+  - 按时间范围查询时最长 31 天，会向后多看 10 个自然日，把夜盘所属的交易日也找进来。
+  - 只返回 `volume > 0` 的分钟；归档里前填的空分钟不返回。
+- `Contract`：
+  - `volume_multiple` 来自 PostgreSQL 的 `domestic_future_product_multipliers`，没有已验证的乘数时直接报错（`FAILED_PRECONDITION`）。
+  - `price_tick` 来自 reference 服务里的 OpenCTP 期货公司参考数据：先按合约精确查找，查不到再用同品种的值（同品种的值不一致时报错）。`price_tick_source` 标明取自哪一种。
+- `MinuteBar`：
+  - `snapshot_high/low` 是 parquet 里的原值。
+  - `high/low` 会在 tick 网格上扩展到包含 `vwap`：快照每秒 2 或 4 次，会漏掉快照之间的成交和大商所组合腿价成交，而真实成交区间一定包含 VWAP，并且落在 tick 网格上，所以扩展后的值不会超出真实范围。扩展过的 bar 带 `widened = true`。
+- 元数据（乘数和最小变动价位）每小时刷新一次；刷新失败时保留旧数据。
+
+验证（2026-11-15）：用 `examples/kline_check.rs` 查询 20260826 全部 793 个合约，返回 135,515 根 bar，其中 1,666 根（1.23%）做了扩展。按 cn_futures_cta_manager 的 candle 规则逐根检查（OHLC 为正且有序、成交量与成交额一致、价格落在 tick 网格上、VWAP 在高低价之内），0 根不合格，RPC 错误也是 0。
+
+```bash
+target/release/examples/kline_check http://127.0.0.1:18312 \
+  /mnt/hdd-raid5-72t/liang_torch/cn_futures_data/baseline_data_1min 20260826
+```
+
+客户端用 git + rev 依赖 `cn_market_proto`，方式和 mkt_signal 依赖 core 一样。
