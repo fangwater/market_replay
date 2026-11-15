@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cme-exchange-info-summary"
+version = "0.1.0"
+description = "Point-in-time CME futures definitions and session status browser"
+requires-python = ">=3.11"
+dependencies = [
+  "databento",
+  "duckdb",
+  "python-dotenv",
+  "pytz",
+]
+
+[project.scripts]
+cme-reference = "cme_reference.server:serve"
+
+[tool.setuptools]
+packages = ["cme_reference"]
+
+[tool.setuptools.package-data]
+cme_reference = ["static/*"]

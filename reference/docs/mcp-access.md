@@ -153,7 +153,7 @@ CN 交易所代码：`CFFEX / SHFE / INE / DCE / CZCE / GFEX`。CME 定义、状
 
 ## 维护者运行说明
 
-代码位于 `/home/fanghaizhou/cn_futures_db/reference/exchange_mcp/`，CME 上游为 `/home/fanghaizhou/cme_exchange_info_summary` 的现有 Web 服务。
+代码位于 `/home/fanghaizhou/cn_futures_db/reference/exchange_mcp/`，CME 上游为 `/home/fanghaizhou/cn_futures_db/reference_cme` 的现有 Web 服务。
 
 ```bash
 cd /home/fanghaizhou/cn_futures_db/reference

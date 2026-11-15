@@ -1,0 +1,4 @@
+databento
+duckdb
+python-dotenv
+pytz

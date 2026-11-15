@@ -1,0 +1,1281 @@
+{
+  "generatedAt": "2026-09-04T03:23:25.532797Z",
+  "method": {
+    "toleranceSeconds": 2,
+    "timeBasis": "Databento ts_event versus LSEG Date-Time, compared in UTC",
+    "deduplication": "unique event seconds per product/category or canonical contract/category",
+    "contractNormalization": "Databento instrument_id + maturity_year; LSEG one- or two-digit RIC maturity year",
+    "databentoStatusFields": {
+      "action": [
+        "NONE",
+        "PRE_OPEN",
+        "TRADING",
+        "NEW_PRICE_INDICATION",
+        "CLOSE",
+        "NOT_AVAILABLE_FOR_TRADING",
+        "HALT"
+      ],
+      "tradingEvent": [
+        "NONE",
+        "CHANGE_TRADING_SESSION",
+        "NO_CANCEL",
+        "IMPLIED_MATCHING_ON",
+        "IMPLIED_MATCHING_OFF"
+      ],
+      "reason": [
+        "NONE",
+        "SCHEDULED",
+        "MARKET_EVENT",
+        "SURVEILLANCE_INTERVENTION",
+        "RECOVERY_IN_PROCESS",
+        "INSTRUMENT_EXPIRATION"
+      ],
+      "stateFlags": [
+        "is_trading",
+        "is_quoting"
+      ]
+    },
+    "tasQualifierMapping": {
+      "4[TRD_TYPE] + C[INST_PHASE]": "CLOSE",
+      "21[TRD_TYPE] + O[INST_PHASE]": "PRE_OPEN",
+      "N[ORD_ENT_ST]": "NO_CANCEL",
+      "15[TRD_TYPE] or 17[TRD_TYPE] + T[INST_PHASE]": "TRADING/open boundary; also used to infer NEW_PRICE_INDICATION time",
+      "5[SECUR_ST]": "IMPLIED_MATCHING_ON heuristic",
+      "6[SECUR_ST]": "IMPLIED_MATCHING_OFF heuristic",
+      "nonzero HALT_REASN": "subset of HALT/NOT_AVAILABLE_FOR_TRADING"
+    },
+    "excludedDatabentoMidnightSnapshots": 283821
+  },
+  "coverage": {
+    "ES": {
+      "start": "2024-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    },
+    "NQ": {
+      "start": "2024-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    },
+    "RTY": {
+      "start": "2024-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    },
+    "YM": {
+      "start": "2024-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    },
+    "GC": {
+      "start": "2020-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    },
+    "CL": {
+      "start": "2020-01-01T00:00:00Z",
+      "endExclusive": "2026-06-01T00:00:00Z"
+    }
+  },
+  "summary": {
+    "coreScheduledSessionFamily": {
+      "tasEvents": 19564,
+      "databentoEvents": 17265,
+      "exactMatches": 16556,
+      "matchesWithinTolerance": 17260,
+      "exactRecallPct": 95.8934,
+      "recallWithinTolerancePct": 99.971
+    },
+    "scheduledNoCancelFamily": {
+      "tasEvents": 3593,
+      "databentoEvents": 5802,
+      "exactMatches": 3456,
+      "matchesWithinTolerance": 3585,
+      "exactRecallPct": 59.5657,
+      "recallWithinTolerancePct": 61.789
+    },
+    "scheduledNewPriceTimeFamily": {
+      "tasEvents": 7266,
+      "databentoEvents": 5804,
+      "exactMatches": 5773,
+      "matchesWithinTolerance": 5802,
+      "exactRecallPct": 99.4659,
+      "recallWithinTolerancePct": 99.9655
+    },
+    "scheduledImpliedMatchingFamily": {
+      "tasEvents": 5620,
+      "databentoEvents": 6609,
+      "exactMatches": 2981,
+      "matchesWithinTolerance": 3161,
+      "exactRecallPct": 45.1052,
+      "recallWithinTolerancePct": 47.8287
+    },
+    "allStatusTimepointPresenceFamily": {
+      "tasEvents": 43017,
+      "databentoEvents": 26938,
+      "exactMatches": 23216,
+      "matchesWithinTolerance": 23960,
+      "exactRecallPct": 86.1831,
+      "recallWithinTolerancePct": 88.945
+    },
+    "allStatusTimepointPresenceContract": {
+      "tasEvents": 1381972,
+      "databentoEvents": 1350852,
+      "exactMatches": 1048136,
+      "matchesWithinTolerance": 1221309,
+      "exactRecallPct": 77.5907,
+      "recallWithinTolerancePct": 90.4103
+    },
+    "exceptionTimepointPresenceFamily": {
+      "tasEvents": 43017,
+      "databentoEvents": 3746,
+      "exactMatches": 2483,
+      "matchesWithinTolerance": 2619,
+      "exactRecallPct": 66.284,
+      "recallWithinTolerancePct": 69.9146
+    }
+  },
+  "scheduledFamilyByCategory": {
+    "close": {
+      "tasEvents": 5662,
+      "databentoEvents": 5652,
+      "exactMatches": 5363,
+      "matchesWithinTolerance": 5652,
+      "exactRecallPct": 94.8868,
+      "recallWithinTolerancePct": 100.0
+    },
+    "pre_open": {
+      "tasEvents": 6636,
+      "databentoEvents": 5809,
+      "exactMatches": 5420,
+      "matchesWithinTolerance": 5806,
+      "exactRecallPct": 93.3035,
+      "recallWithinTolerancePct": 99.9484
+    },
+    "no_cancel": {
+      "tasEvents": 3593,
+      "databentoEvents": 5802,
+      "exactMatches": 3456,
+      "matchesWithinTolerance": 3585,
+      "exactRecallPct": 59.5657,
+      "recallWithinTolerancePct": 61.789
+    },
+    "open": {
+      "tasEvents": 7266,
+      "databentoEvents": 5804,
+      "exactMatches": 5773,
+      "matchesWithinTolerance": 5802,
+      "exactRecallPct": 99.4659,
+      "recallWithinTolerancePct": 99.9655
+    },
+    "new_price": {
+      "tasEvents": 7266,
+      "databentoEvents": 5804,
+      "exactMatches": 5773,
+      "matchesWithinTolerance": 5802,
+      "exactRecallPct": 99.4659,
+      "recallWithinTolerancePct": 99.9655
+    },
+    "implied_on": {
+      "tasEvents": 2630,
+      "databentoEvents": 3303,
+      "exactMatches": 1525,
+      "matchesWithinTolerance": 1581,
+      "exactRecallPct": 46.1701,
+      "recallWithinTolerancePct": 47.8656
+    },
+    "implied_off": {
+      "tasEvents": 2990,
+      "databentoEvents": 3306,
+      "exactMatches": 1456,
+      "matchesWithinTolerance": 1580,
+      "exactRecallPct": 44.0411,
+      "recallWithinTolerancePct": 47.7919
+    },
+    "halt_or_unavailable": {
+      "tasEvents": 2976,
+      "databentoEvents": 1,
+      "exactMatches": 0,
+      "matchesWithinTolerance": 0,
+      "exactRecallPct": 0.0,
+      "recallWithinTolerancePct": 0.0
+    }
+  },
+  "allReasonFamilyByCategory": {
+    "close": {
+      "tasEvents": 5662,
+      "databentoEvents": 5652,
+      "exactMatches": 5363,
+      "matchesWithinTolerance": 5652,
+      "exactRecallPct": 94.8868,
+      "recallWithinTolerancePct": 100.0
+    },
+    "pre_open": {
+      "tasEvents": 6636,
+      "databentoEvents": 6626,
+      "exactMatches": 6117,
+      "matchesWithinTolerance": 6524,
+      "exactRecallPct": 92.3181,
+      "recallWithinTolerancePct": 98.4606
+    },
+    "no_cancel": {
+      "tasEvents": 3593,
+      "databentoEvents": 5802,
+      "exactMatches": 3456,
+      "matchesWithinTolerance": 3585,
+      "exactRecallPct": 59.5657,
+      "recallWithinTolerancePct": 61.789
+    },
+    "open": {
+      "tasEvents": 7266,
+      "databentoEvents": 6504,
+      "exactMatches": 6444,
+      "matchesWithinTolerance": 6498,
+      "exactRecallPct": 99.0775,
+      "recallWithinTolerancePct": 99.9077
+    },
+    "new_price": {
+      "tasEvents": 7266,
+      "databentoEvents": 6339,
+      "exactMatches": 6286,
+      "matchesWithinTolerance": 6335,
+      "exactRecallPct": 99.1639,
+      "recallWithinTolerancePct": 99.9369
+    },
+    "implied_on": {
+      "tasEvents": 2630,
+      "databentoEvents": 4281,
+      "exactMatches": 2256,
+      "matchesWithinTolerance": 2355,
+      "exactRecallPct": 52.698,
+      "recallWithinTolerancePct": 55.0105
+    },
+    "implied_off": {
+      "tasEvents": 2990,
+      "databentoEvents": 5134,
+      "exactMatches": 2389,
+      "matchesWithinTolerance": 2546,
+      "exactRecallPct": 46.5329,
+      "recallWithinTolerancePct": 49.591
+    },
+    "halt_or_unavailable": {
+      "tasEvents": 2976,
+      "databentoEvents": 1445,
+      "exactMatches": 380,
+      "matchesWithinTolerance": 452,
+      "exactRecallPct": 26.2976,
+      "recallWithinTolerancePct": 31.2803
+    }
+  },
+  "scheduledContractByCategory": {
+    "close": {
+      "tasEvents": 268729,
+      "databentoEvents": 273518,
+      "exactMatches": 232742,
+      "matchesWithinTolerance": 268440,
+      "exactRecallPct": 85.092,
+      "recallWithinTolerancePct": 98.1434
+    },
+    "pre_open": {
+      "tasEvents": 305251,
+      "databentoEvents": 280708,
+      "exactMatches": 217864,
+      "matchesWithinTolerance": 278068,
+      "exactRecallPct": 77.6123,
+      "recallWithinTolerancePct": 99.0595
+    },
+    "no_cancel": {
+      "tasEvents": 239425,
+      "databentoEvents": 280458,
+      "exactMatches": 222207,
+      "matchesWithinTolerance": 239123,
+      "exactRecallPct": 79.23,
+      "recallWithinTolerancePct": 85.2616
+    },
+    "open": {
+      "tasEvents": 301975,
+      "databentoEvents": 280297,
+      "exactMatches": 212345,
+      "matchesWithinTolerance": 259319,
+      "exactRecallPct": 75.7571,
+      "recallWithinTolerancePct": 92.5158
+    },
+    "new_price": {
+      "tasEvents": 301975,
+      "databentoEvents": 280297,
+      "exactMatches": 212345,
+      "matchesWithinTolerance": 259319,
+      "exactRecallPct": 75.7571,
+      "recallWithinTolerancePct": 92.5158
+    },
+    "implied_on": {
+      "tasEvents": 257941,
+      "databentoEvents": 252772,
+      "exactMatches": 154008,
+      "matchesWithinTolerance": 161177,
+      "exactRecallPct": 60.9276,
+      "recallWithinTolerancePct": 63.7638
+    },
+    "implied_off": {
+      "tasEvents": 293943,
+      "databentoEvents": 253470,
+      "exactMatches": 145720,
+      "matchesWithinTolerance": 161462,
+      "exactRecallPct": 57.49,
+      "recallWithinTolerancePct": 63.7006
+    },
+    "halt_or_unavailable": {
+      "tasEvents": 5,
+      "databentoEvents": 1,
+      "exactMatches": 0,
+      "matchesWithinTolerance": 0,
+      "exactRecallPct": 0.0,
+      "recallWithinTolerancePct": 0.0
+    }
+  },
+  "byProduct": {
+    "ES": {
+      "coverageStart": "2024-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 607,
+          "databentoEvents": 607,
+          "exactMatches": 607,
+          "matchesWithinTolerance": 607,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 690,
+          "databentoEvents": 625,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 99.84,
+          "recallWithinTolerancePct": 99.84
+        },
+        "no_cancel": {
+          "tasEvents": 0,
+          "databentoEvents": 624,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 0.0,
+          "recallWithinTolerancePct": 0.0
+        },
+        "open": {
+          "tasEvents": 687,
+          "databentoEvents": 625,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 99.84,
+          "recallWithinTolerancePct": 99.84
+        },
+        "new_price": {
+          "tasEvents": 687,
+          "databentoEvents": 625,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 99.84,
+          "recallWithinTolerancePct": 99.84
+        },
+        "implied_on": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_off": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 27,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 1984,
+        "databentoEvents": 1857,
+        "exactMatches": 1855,
+        "matchesWithinTolerance": 1855,
+        "exactRecallPct": 99.8923,
+        "recallWithinTolerancePct": 99.8923
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 2108,
+        "databentoEvents": 2746,
+        "exactMatches": 2108,
+        "matchesWithinTolerance": 2108,
+        "exactRecallPct": 76.7662,
+        "recallWithinTolerancePct": 76.7662
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 2108,
+        "databentoEvents": 259,
+        "exactMatches": 123,
+        "matchesWithinTolerance": 123,
+        "exactRecallPct": 47.4903,
+        "recallWithinTolerancePct": 47.4903
+      }
+    },
+    "NQ": {
+      "coverageStart": "2024-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 607,
+          "databentoEvents": 607,
+          "exactMatches": 607,
+          "matchesWithinTolerance": 607,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 773,
+          "databentoEvents": 625,
+          "exactMatches": 625,
+          "matchesWithinTolerance": 625,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "no_cancel": {
+          "tasEvents": 0,
+          "databentoEvents": 624,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 0.0,
+          "recallWithinTolerancePct": 0.0
+        },
+        "open": {
+          "tasEvents": 768,
+          "databentoEvents": 624,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "new_price": {
+          "tasEvents": 768,
+          "databentoEvents": 624,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_on": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_off": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 68,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 2148,
+        "databentoEvents": 1856,
+        "exactMatches": 1856,
+        "matchesWithinTolerance": 1856,
+        "exactRecallPct": 100.0,
+        "recallWithinTolerancePct": 100.0
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 2250,
+        "databentoEvents": 2887,
+        "exactMatches": 2245,
+        "matchesWithinTolerance": 2249,
+        "exactRecallPct": 77.7624,
+        "recallWithinTolerancePct": 77.9009
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 2250,
+        "databentoEvents": 411,
+        "exactMatches": 269,
+        "matchesWithinTolerance": 273,
+        "exactRecallPct": 65.4501,
+        "recallWithinTolerancePct": 66.4234
+      }
+    },
+    "RTY": {
+      "coverageStart": "2024-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 607,
+          "databentoEvents": 607,
+          "exactMatches": 607,
+          "matchesWithinTolerance": 607,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 690,
+          "databentoEvents": 625,
+          "exactMatches": 625,
+          "matchesWithinTolerance": 625,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "no_cancel": {
+          "tasEvents": 0,
+          "databentoEvents": 624,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 0.0,
+          "recallWithinTolerancePct": 0.0
+        },
+        "open": {
+          "tasEvents": 689,
+          "databentoEvents": 624,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "new_price": {
+          "tasEvents": 689,
+          "databentoEvents": 624,
+          "exactMatches": 624,
+          "matchesWithinTolerance": 624,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_on": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_off": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 18,
+          "databentoEvents": 1,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 0.0,
+          "recallWithinTolerancePct": 0.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 1986,
+        "databentoEvents": 1856,
+        "exactMatches": 1856,
+        "matchesWithinTolerance": 1856,
+        "exactRecallPct": 100.0,
+        "recallWithinTolerancePct": 100.0
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 2113,
+        "databentoEvents": 2751,
+        "exactMatches": 2110,
+        "matchesWithinTolerance": 2112,
+        "exactRecallPct": 76.6994,
+        "recallWithinTolerancePct": 76.7721
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 2113,
+        "databentoEvents": 264,
+        "exactMatches": 124,
+        "matchesWithinTolerance": 126,
+        "exactRecallPct": 46.9697,
+        "recallWithinTolerancePct": 47.7273
+      }
+    },
+    "YM": {
+      "coverageStart": "2024-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 607,
+          "databentoEvents": 607,
+          "exactMatches": 607,
+          "matchesWithinTolerance": 607,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 658,
+          "databentoEvents": 625,
+          "exactMatches": 625,
+          "matchesWithinTolerance": 625,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "no_cancel": {
+          "tasEvents": 391,
+          "databentoEvents": 624,
+          "exactMatches": 391,
+          "matchesWithinTolerance": 391,
+          "exactRecallPct": 62.6603,
+          "recallWithinTolerancePct": 62.6603
+        },
+        "open": {
+          "tasEvents": 658,
+          "databentoEvents": 625,
+          "exactMatches": 625,
+          "matchesWithinTolerance": 625,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "new_price": {
+          "tasEvents": 658,
+          "databentoEvents": 625,
+          "exactMatches": 625,
+          "matchesWithinTolerance": 625,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_on": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_off": {
+          "tasEvents": 0,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 72,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 1923,
+        "databentoEvents": 1857,
+        "exactMatches": 1857,
+        "matchesWithinTolerance": 1857,
+        "exactRecallPct": 100.0,
+        "recallWithinTolerancePct": 100.0
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 3100,
+        "databentoEvents": 2692,
+        "exactMatches": 2321,
+        "matchesWithinTolerance": 2321,
+        "exactRecallPct": 86.2184,
+        "recallWithinTolerancePct": 86.2184
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 3100,
+        "databentoEvents": 204,
+        "exactMatches": 66,
+        "matchesWithinTolerance": 66,
+        "exactRecallPct": 32.3529,
+        "recallWithinTolerancePct": 32.3529
+      }
+    },
+    "GC": {
+      "coverageStart": "2020-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 1614,
+          "databentoEvents": 1612,
+          "exactMatches": 1612,
+          "matchesWithinTolerance": 1612,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 1772,
+          "databentoEvents": 1655,
+          "exactMatches": 1654,
+          "matchesWithinTolerance": 1654,
+          "exactRecallPct": 99.9396,
+          "recallWithinTolerancePct": 99.9396
+        },
+        "no_cancel": {
+          "tasEvents": 1655,
+          "databentoEvents": 1653,
+          "exactMatches": 1653,
+          "matchesWithinTolerance": 1653,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        },
+        "open": {
+          "tasEvents": 1772,
+          "databentoEvents": 1655,
+          "exactMatches": 1654,
+          "matchesWithinTolerance": 1654,
+          "exactRecallPct": 99.9396,
+          "recallWithinTolerancePct": 99.9396
+        },
+        "new_price": {
+          "tasEvents": 1772,
+          "databentoEvents": 1655,
+          "exactMatches": 1654,
+          "matchesWithinTolerance": 1654,
+          "exactRecallPct": 99.9396,
+          "recallWithinTolerancePct": 99.9396
+        },
+        "implied_on": {
+          "tasEvents": 728,
+          "databentoEvents": 1655,
+          "exactMatches": 431,
+          "matchesWithinTolerance": 431,
+          "exactRecallPct": 26.0423,
+          "recallWithinTolerancePct": 26.0423
+        },
+        "implied_off": {
+          "tasEvents": 746,
+          "databentoEvents": 1653,
+          "exactMatches": 429,
+          "matchesWithinTolerance": 429,
+          "exactRecallPct": 25.9528,
+          "recallWithinTolerancePct": 25.9528
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 812,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 5158,
+        "databentoEvents": 4922,
+        "exactMatches": 4920,
+        "matchesWithinTolerance": 4920,
+        "exactRecallPct": 99.9594,
+        "recallWithinTolerancePct": 99.9594
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 12070,
+        "databentoEvents": 7590,
+        "exactMatches": 7296,
+        "matchesWithinTolerance": 7363,
+        "exactRecallPct": 96.1265,
+        "recallWithinTolerancePct": 97.0092
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 12070,
+        "databentoEvents": 948,
+        "exactMatches": 656,
+        "matchesWithinTolerance": 723,
+        "exactRecallPct": 69.1983,
+        "recallWithinTolerancePct": 76.2658
+      }
+    },
+    "CL": {
+      "coverageStart": "2020-01-01",
+      "coverageEndExclusive": "2026-06-01",
+      "scheduledFamily": {
+        "close": {
+          "tasEvents": 1620,
+          "databentoEvents": 1612,
+          "exactMatches": 1323,
+          "matchesWithinTolerance": 1612,
+          "exactRecallPct": 82.072,
+          "recallWithinTolerancePct": 100.0
+        },
+        "pre_open": {
+          "tasEvents": 2053,
+          "databentoEvents": 1654,
+          "exactMatches": 1267,
+          "matchesWithinTolerance": 1653,
+          "exactRecallPct": 76.6022,
+          "recallWithinTolerancePct": 99.9395
+        },
+        "no_cancel": {
+          "tasEvents": 1547,
+          "databentoEvents": 1653,
+          "exactMatches": 1412,
+          "matchesWithinTolerance": 1541,
+          "exactRecallPct": 85.4204,
+          "recallWithinTolerancePct": 93.2244
+        },
+        "open": {
+          "tasEvents": 2692,
+          "databentoEvents": 1651,
+          "exactMatches": 1622,
+          "matchesWithinTolerance": 1651,
+          "exactRecallPct": 98.2435,
+          "recallWithinTolerancePct": 100.0
+        },
+        "new_price": {
+          "tasEvents": 2692,
+          "databentoEvents": 1651,
+          "exactMatches": 1622,
+          "matchesWithinTolerance": 1651,
+          "exactRecallPct": 98.2435,
+          "recallWithinTolerancePct": 100.0
+        },
+        "implied_on": {
+          "tasEvents": 1902,
+          "databentoEvents": 1648,
+          "exactMatches": 1094,
+          "matchesWithinTolerance": 1150,
+          "exactRecallPct": 66.3835,
+          "recallWithinTolerancePct": 69.7816
+        },
+        "implied_off": {
+          "tasEvents": 2244,
+          "databentoEvents": 1653,
+          "exactMatches": 1027,
+          "matchesWithinTolerance": 1151,
+          "exactRecallPct": 62.1295,
+          "recallWithinTolerancePct": 69.631
+        },
+        "halt_or_unavailable": {
+          "tasEvents": 1979,
+          "databentoEvents": 0,
+          "exactMatches": 0,
+          "matchesWithinTolerance": 0,
+          "exactRecallPct": 100.0,
+          "recallWithinTolerancePct": 100.0
+        }
+      },
+      "coreSession": {
+        "tasEvents": 6365,
+        "databentoEvents": 4917,
+        "exactMatches": 4212,
+        "matchesWithinTolerance": 4916,
+        "exactRecallPct": 85.662,
+        "recallWithinTolerancePct": 99.9797
+      },
+      "allStatusTimepointPresence": {
+        "tasEvents": 21376,
+        "databentoEvents": 8272,
+        "exactMatches": 7136,
+        "matchesWithinTolerance": 7807,
+        "exactRecallPct": 86.2669,
+        "recallWithinTolerancePct": 94.3786
+      },
+      "exceptionTimepointPresence": {
+        "tasEvents": 21376,
+        "databentoEvents": 1660,
+        "exactMatches": 1245,
+        "matchesWithinTolerance": 1308,
+        "exactRecallPct": 75.0,
+        "recallWithinTolerancePct": 78.7952
+      }
+    }
+  },
+  "byYear": {
+    "2020": {
+      "products": [
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 3853,
+        "databentoEvents": 2519,
+        "exactMatches": 1923,
+        "matchesWithinTolerance": 2327,
+        "exactRecallPct": 76.3398,
+        "recallWithinTolerancePct": 92.3779
+      }
+    },
+    "2021": {
+      "products": [
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 3557,
+        "databentoEvents": 2204,
+        "exactMatches": 1859,
+        "matchesWithinTolerance": 2088,
+        "exactRecallPct": 84.3466,
+        "recallWithinTolerancePct": 94.7368
+      }
+    },
+    "2022": {
+      "products": [
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 7200,
+        "databentoEvents": 2781,
+        "exactMatches": 2700,
+        "matchesWithinTolerance": 2768,
+        "exactRecallPct": 97.0874,
+        "recallWithinTolerancePct": 99.5325
+      }
+    },
+    "2023": {
+      "products": [
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 5854,
+        "databentoEvents": 2246,
+        "exactMatches": 2135,
+        "matchesWithinTolerance": 2147,
+        "exactRecallPct": 95.0579,
+        "recallWithinTolerancePct": 95.5922
+      }
+    },
+    "2024": {
+      "products": [
+        "ES",
+        "NQ",
+        "RTY",
+        "YM",
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 9079,
+        "databentoEvents": 6766,
+        "exactMatches": 5660,
+        "matchesWithinTolerance": 5662,
+        "exactRecallPct": 83.6536,
+        "recallWithinTolerancePct": 83.6831
+      }
+    },
+    "2025": {
+      "products": [
+        "ES",
+        "NQ",
+        "RTY",
+        "YM",
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 8555,
+        "databentoEvents": 6973,
+        "exactMatches": 5719,
+        "matchesWithinTolerance": 5729,
+        "exactRecallPct": 82.0163,
+        "recallWithinTolerancePct": 82.1598
+      }
+    },
+    "2026": {
+      "products": [
+        "ES",
+        "NQ",
+        "RTY",
+        "YM",
+        "GC",
+        "CL"
+      ],
+      "allStatusTimepointPresence": {
+        "tasEvents": 4919,
+        "databentoEvents": 3449,
+        "exactMatches": 3220,
+        "matchesWithinTolerance": 3239,
+        "exactRecallPct": 93.3604,
+        "recallWithinTolerancePct": 93.9113
+      }
+    }
+  },
+  "knownTasUnparsedStatusRows2025": {
+    "byProduct": {
+      "YM": 1392
+    },
+    "total": 1392
+  },
+  "diagnostics": {
+    "tas": {
+      "rows": 2596629,
+      "shadowRows": 24209
+    },
+    "databento": {
+      "rows": 2616935,
+      "midnightSnapshotsExcluded": 283821
+    },
+    "tasScans": {
+      "2020:CL": {
+        "scanned": 137333,
+        "exported": 137333
+      },
+      "2020:GC": {
+        "scanned": 25047,
+        "exported": 25047
+      },
+      "2021:CL": {
+        "scanned": 160788,
+        "exported": 160788
+      },
+      "2021:GC": {
+        "scanned": 24530,
+        "exported": 24530
+      },
+      "2022:CL": {
+        "scanned": 993590,
+        "exported": 993590
+      },
+      "2022:GC": {
+        "scanned": 24623,
+        "exported": 24623
+      },
+      "2023:CL": {
+        "scanned": 261151,
+        "exported": 261151
+      },
+      "2023:GC": {
+        "scanned": 23668,
+        "exported": 23668
+      },
+      "2024:CL": {
+        "scanned": 250556,
+        "exported": 250556
+      },
+      "2024:ES": {
+        "scanned": 16869,
+        "exported": 16869
+      },
+      "2024:GC": {
+        "scanned": 27731,
+        "exported": 27731
+      },
+      "2024:NQ": {
+        "scanned": 8249,
+        "exported": 8249
+      },
+      "2024:RTY": {
+        "scanned": 4313,
+        "exported": 4313
+      },
+      "2024:YM": {
+        "scanned": 6321,
+        "exported": 6321
+      },
+      "2025:CL": {
+        "scanned": 254502,
+        "exported": 254502
+      },
+      "2025:ES": {
+        "scanned": 19840,
+        "exported": 19840
+      },
+      "2025:GC": {
+        "scanned": 64914,
+        "exported": 64914
+      },
+      "2025:NQ": {
+        "scanned": 10531,
+        "exported": 10531
+      },
+      "2025:RTY": {
+        "scanned": 8491,
+        "exported": 8491
+      },
+      "2025:YM": {
+        "scanned": 4221,
+        "exported": 4221
+      },
+      "2026:CL": {
+        "scanned": 180955,
+        "exported": 180955
+      },
+      "2026:ES": {
+        "scanned": 17480,
+        "exported": 17480
+      },
+      "2026:GC": {
+        "scanned": 51468,
+        "exported": 51468
+      },
+      "2026:NQ": {
+        "scanned": 9203,
+        "exported": 9203
+      },
+      "2026:RTY": {
+        "scanned": 8542,
+        "exported": 8542
+      },
+      "2026:YM": {
+        "scanned": 1713,
+        "exported": 1713
+      }
+    }
+  },
+  "missingSamples": {
+    "close": {},
+    "pre_open": {
+      "ES": [
+        "2025-11-28T13:00:00Z"
+      ],
+      "GC": [
+        "2025-11-28T13:00:00Z"
+      ],
+      "CL": [
+        "2021-08-19T21:45:00Z"
+      ]
+    },
+    "no_cancel": {
+      "ES": [
+        "2024-01-01T22:59:30Z",
+        "2024-01-02T22:59:30Z",
+        "2024-01-03T22:59:30Z",
+        "2024-01-04T22:59:30Z",
+        "2024-01-07T22:59:30Z"
+      ],
+      "NQ": [
+        "2024-01-01T22:59:30Z",
+        "2024-01-02T22:59:30Z",
+        "2024-01-03T22:59:30Z",
+        "2024-01-04T22:59:30Z",
+        "2024-01-07T22:59:30Z"
+      ],
+      "RTY": [
+        "2024-01-01T22:59:30Z",
+        "2024-01-02T22:59:30Z",
+        "2024-01-03T22:59:30Z",
+        "2024-01-04T22:59:30Z",
+        "2024-01-07T22:59:30Z"
+      ],
+      "YM": [
+        "2025-04-27T21:59:30Z",
+        "2025-04-28T21:59:30Z",
+        "2025-04-29T21:59:30Z",
+        "2025-04-30T21:59:30Z",
+        "2025-05-01T21:59:30Z"
+      ],
+      "CL": [
+        "2020-01-05T22:59:30Z",
+        "2020-01-12T22:59:30Z",
+        "2020-01-19T22:59:30Z",
+        "2020-01-20T22:59:30Z",
+        "2020-01-26T22:59:30Z"
+      ]
+    },
+    "open": {
+      "ES": [
+        "2025-11-28T13:30:00Z"
+      ],
+      "GC": [
+        "2025-11-28T13:30:00Z"
+      ]
+    },
+    "new_price": {
+      "ES": [
+        "2025-11-28T13:30:00Z"
+      ],
+      "GC": [
+        "2025-11-28T13:30:00Z"
+      ]
+    },
+    "implied_on": {
+      "GC": [
+        "2020-01-01T23:00:00Z",
+        "2020-01-02T23:00:00Z",
+        "2020-01-05T23:00:00Z",
+        "2020-01-06T23:00:00Z",
+        "2020-01-07T23:00:00Z"
+      ],
+      "CL": [
+        "2020-01-01T23:00:00Z",
+        "2020-01-02T23:00:00Z",
+        "2020-01-05T23:00:00Z",
+        "2020-01-06T23:00:00Z",
+        "2020-01-07T23:00:00Z"
+      ]
+    },
+    "implied_off": {
+      "GC": [
+        "2020-01-02T22:00:00Z",
+        "2020-01-03T22:00:00Z",
+        "2020-01-06T22:00:00Z",
+        "2020-01-07T22:00:00Z",
+        "2020-01-08T22:00:00Z"
+      ],
+      "CL": [
+        "2020-01-02T22:00:00Z",
+        "2020-01-03T22:00:00Z",
+        "2020-01-06T22:00:00Z",
+        "2020-01-07T22:00:00Z",
+        "2020-01-08T22:00:00Z"
+      ]
+    },
+    "halt_or_unavailable": {
+      "ES": [
+        "2024-01-07T13:00:04Z",
+        "2024-01-14T13:00:04Z",
+        "2024-01-21T13:00:04Z",
+        "2024-01-28T13:00:04Z",
+        "2024-02-04T13:00:03Z"
+      ],
+      "NQ": [
+        "2024-01-07T13:00:04Z",
+        "2024-01-14T13:00:04Z",
+        "2024-01-21T13:00:04Z",
+        "2024-01-28T13:00:04Z",
+        "2024-02-04T13:00:04Z"
+      ],
+      "RTY": [
+        "2024-01-07T13:00:04Z",
+        "2024-01-14T13:00:04Z",
+        "2024-01-21T13:00:04Z",
+        "2024-01-28T13:00:04Z",
+        "2024-02-04T13:00:04Z"
+      ],
+      "YM": [
+        "2024-01-07T13:00:04Z",
+        "2024-01-14T13:00:04Z",
+        "2024-01-21T13:00:04Z",
+        "2024-01-28T13:00:04Z",
+        "2024-02-04T13:00:04Z"
+      ],
+      "GC": [
+        "2020-07-24T21:38:58Z",
+        "2021-11-19T23:14:40Z",
+        "2023-06-25T12:00:03Z",
+        "2023-07-02T12:00:03Z",
+        "2023-07-09T12:00:03Z"
+      ],
+      "CL": [
+        "2020-01-05T20:00:10Z",
+        "2020-01-12T20:00:07Z",
+        "2020-01-19T20:00:12Z",
+        "2020-01-26T20:00:14Z",
+        "2020-02-02T20:00:12Z"
+      ]
+    }
+  },
+  "limitations": [
+    "TAS Mkt. Condition is a vendor qualifier stream, not the Databento status schema.",
+    "An LSEG open transition identifies the open second but cannot separate Databento NEW_PRICE_INDICATION from TRADING.",
+    "SECUR_ST 5/6 to implied matching on/off is an observed heuristic and is not complete across products or years.",
+    "HALT_REASN identifies only a subset of Databento HALT/NOT_AVAILABLE_FOR_TRADING events and does not recover Databento reason taxonomy.",
+    "Event-time presence only proves a TAS status exists near a Databento event; it does not prove field-for-field semantic identity."
+  ]
+}

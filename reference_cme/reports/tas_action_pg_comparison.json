@@ -1,0 +1,634 @@
+{
+  "generatedAt": "2026-09-04T05:16:29.565470Z",
+  "method": {
+    "toleranceSeconds": 2,
+    "timeBasis": "Databento ts_event versus TAS event timestamp, UTC seconds",
+    "databentoMidnightSnapshotsExcluded": 27309,
+    "familyDeduplication": "unique product/action/event second",
+    "contractDeduplication": "unique canonical contract/action/event second after clustering direct CME 15/17 states within five seconds",
+    "newPriceSemantics": "CME status 15 is direct NEW_PRICE_INDICATION; a clustered status 17 is an explicit fallback when 15 is absent",
+    "tradingSemantics": "CME status 17 is direct TRADING; the aligned boundary uses clustered status 15 as an explicit fallback when 17 is absent",
+    "stageTransitionFilter": "excludes PRE_OPEN rows whose trading_event is NO_CANCEL because they carry the current action without a new phase boundary"
+  },
+  "coverage": {
+    "equityStart": "2024-01-01T00:00:00+00:00",
+    "commodityStart": "2020-01-01T00:00:00+00:00",
+    "endExclusive": "2026-06-01T00:00:00+00:00"
+  },
+  "summary": {
+    "allReasonFamily": {
+      "tasEvents": 25196,
+      "databentoEvents": 25121,
+      "exactMatches": 24130,
+      "exactPrecisionPct": 95.7692,
+      "exactRecallPct": 96.0551,
+      "exactF1Pct": 95.9119,
+      "matchesWithinTolerance": 24927,
+      "precisionWithinTolerancePct": 98.9324,
+      "recallWithinTolerancePct": 99.2277,
+      "f1WithinTolerancePct": 99.0798
+    },
+    "scheduledFamily": {
+      "tasEvents": 25196,
+      "databentoEvents": 23069,
+      "exactMatches": 22329,
+      "exactPrecisionPct": 88.6212,
+      "exactRecallPct": 96.7922,
+      "exactF1Pct": 92.5267,
+      "matchesWithinTolerance": 23062,
+      "precisionWithinTolerancePct": 91.5304,
+      "recallWithinTolerancePct": 99.9697,
+      "f1WithinTolerancePct": 95.5641
+    },
+    "allReasonContract": {
+      "tasEvents": 1170824,
+      "databentoEvents": 1196507,
+      "exactMatches": 945793,
+      "exactPrecisionPct": 80.7801,
+      "exactRecallPct": 79.0462,
+      "exactF1Pct": 79.9037,
+      "matchesWithinTolerance": 1142826,
+      "precisionWithinTolerancePct": 97.6087,
+      "recallWithinTolerancePct": 95.5135,
+      "f1WithinTolerancePct": 96.5497
+    }
+  },
+  "allReasonFamilyByAction": {
+    "CLOSE": {
+      "tasEvents": 5662,
+      "databentoEvents": 5652,
+      "exactMatches": 5363,
+      "exactPrecisionPct": 94.7192,
+      "exactRecallPct": 94.8868,
+      "exactF1Pct": 94.8029,
+      "matchesWithinTolerance": 5652,
+      "precisionWithinTolerancePct": 99.8234,
+      "recallWithinTolerancePct": 100.0,
+      "f1WithinTolerancePct": 99.9116
+    },
+    "PRE_OPEN": {
+      "tasEvents": 6636,
+      "databentoEvents": 6626,
+      "exactMatches": 6117,
+      "exactPrecisionPct": 92.179,
+      "exactRecallPct": 92.3181,
+      "exactF1Pct": 92.2485,
+      "matchesWithinTolerance": 6524,
+      "precisionWithinTolerancePct": 98.3122,
+      "recallWithinTolerancePct": 98.4606,
+      "f1WithinTolerancePct": 98.3863
+    },
+    "TRADING": {
+      "tasEvents": 6449,
+      "databentoEvents": 6504,
+      "exactMatches": 6392,
+      "exactPrecisionPct": 99.1161,
+      "exactRecallPct": 98.278,
+      "exactF1Pct": 98.6953,
+      "matchesWithinTolerance": 6444,
+      "precisionWithinTolerancePct": 99.9225,
+      "recallWithinTolerancePct": 99.0775,
+      "f1WithinTolerancePct": 99.4982
+    },
+    "NEW_PRICE_INDICATION": {
+      "tasEvents": 6449,
+      "databentoEvents": 6339,
+      "exactMatches": 6258,
+      "exactPrecisionPct": 97.0383,
+      "exactRecallPct": 98.7222,
+      "exactF1Pct": 97.873,
+      "matchesWithinTolerance": 6307,
+      "precisionWithinTolerancePct": 97.7981,
+      "recallWithinTolerancePct": 99.4952,
+      "f1WithinTolerancePct": 98.6394
+    }
+  },
+  "scheduledFamilyByAction": {
+    "CLOSE": {
+      "tasEvents": 5662,
+      "databentoEvents": 5652,
+      "exactMatches": 5363,
+      "exactPrecisionPct": 94.7192,
+      "exactRecallPct": 94.8868,
+      "exactF1Pct": 94.8029,
+      "matchesWithinTolerance": 5652,
+      "precisionWithinTolerancePct": 99.8234,
+      "recallWithinTolerancePct": 100.0,
+      "f1WithinTolerancePct": 99.9116
+    },
+    "PRE_OPEN": {
+      "tasEvents": 6636,
+      "databentoEvents": 5809,
+      "exactMatches": 5420,
+      "exactPrecisionPct": 81.6757,
+      "exactRecallPct": 93.3035,
+      "exactF1Pct": 87.1033,
+      "matchesWithinTolerance": 5806,
+      "precisionWithinTolerancePct": 87.4925,
+      "recallWithinTolerancePct": 99.9484,
+      "f1WithinTolerancePct": 93.3066
+    },
+    "TRADING": {
+      "tasEvents": 6449,
+      "databentoEvents": 5804,
+      "exactMatches": 5773,
+      "exactPrecisionPct": 89.5178,
+      "exactRecallPct": 99.4659,
+      "exactF1Pct": 94.23,
+      "matchesWithinTolerance": 5802,
+      "precisionWithinTolerancePct": 89.9674,
+      "recallWithinTolerancePct": 99.9655,
+      "f1WithinTolerancePct": 94.7033
+    },
+    "NEW_PRICE_INDICATION": {
+      "tasEvents": 6449,
+      "databentoEvents": 5804,
+      "exactMatches": 5773,
+      "exactPrecisionPct": 89.5178,
+      "exactRecallPct": 99.4659,
+      "exactF1Pct": 94.23,
+      "matchesWithinTolerance": 5802,
+      "precisionWithinTolerancePct": 89.9674,
+      "recallWithinTolerancePct": 99.9655,
+      "f1WithinTolerancePct": 94.7033
+    }
+  },
+  "allReasonContractByAction": {
+    "CLOSE": {
+      "tasEvents": 268729,
+      "databentoEvents": 273518,
+      "exactMatches": 232742,
+      "exactPrecisionPct": 86.6084,
+      "exactRecallPct": 85.092,
+      "exactF1Pct": 85.8435,
+      "matchesWithinTolerance": 268440,
+      "precisionWithinTolerancePct": 99.8925,
+      "recallWithinTolerancePct": 98.1434,
+      "f1WithinTolerancePct": 99.0102
+    },
+    "PRE_OPEN": {
+      "tasEvents": 305251,
+      "databentoEvents": 308118,
+      "exactMatches": 242164,
+      "exactPrecisionPct": 79.3327,
+      "exactRecallPct": 78.5946,
+      "exactF1Pct": 78.9619,
+      "matchesWithinTolerance": 304451,
+      "precisionWithinTolerancePct": 99.7379,
+      "recallWithinTolerancePct": 98.8099,
+      "f1WithinTolerancePct": 99.2717
+    },
+    "TRADING": {
+      "tasEvents": 298422,
+      "databentoEvents": 307602,
+      "exactMatches": 235523,
+      "exactPrecisionPct": 78.9228,
+      "exactRecallPct": 76.5674,
+      "exactF1Pct": 77.7273,
+      "matchesWithinTolerance": 285049,
+      "precisionWithinTolerancePct": 95.5188,
+      "recallWithinTolerancePct": 92.6681,
+      "f1WithinTolerancePct": 94.0719
+    },
+    "NEW_PRICE_INDICATION": {
+      "tasEvents": 298422,
+      "databentoEvents": 307269,
+      "exactMatches": 235364,
+      "exactPrecisionPct": 78.8695,
+      "exactRecallPct": 76.5987,
+      "exactF1Pct": 77.7175,
+      "matchesWithinTolerance": 284886,
+      "precisionWithinTolerancePct": 95.4641,
+      "recallWithinTolerancePct": 92.7155,
+      "f1WithinTolerancePct": 94.0697
+    }
+  },
+  "allReasonFamilyByProduct": {
+    "ES": {
+      "CLOSE": {
+        "tasEvents": 607,
+        "databentoEvents": 607,
+        "exactMatches": 607,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 100.0,
+        "exactF1Pct": 100.0,
+        "matchesWithinTolerance": 607,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 100.0
+      },
+      "PRE_OPEN": {
+        "tasEvents": 690,
+        "databentoEvents": 691,
+        "exactMatches": 690,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 99.8553,
+        "exactF1Pct": 99.9276,
+        "matchesWithinTolerance": 690,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.8553,
+        "f1WithinTolerancePct": 99.9276
+      },
+      "TRADING": {
+        "tasEvents": 684,
+        "databentoEvents": 688,
+        "exactMatches": 684,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 99.4186,
+        "exactF1Pct": 99.7085,
+        "matchesWithinTolerance": 684,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.4186,
+        "f1WithinTolerancePct": 99.7085
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 684,
+        "databentoEvents": 680,
+        "exactMatches": 677,
+        "exactPrecisionPct": 98.9766,
+        "exactRecallPct": 99.5588,
+        "exactF1Pct": 99.2668,
+        "matchesWithinTolerance": 677,
+        "precisionWithinTolerancePct": 98.9766,
+        "recallWithinTolerancePct": 99.5588,
+        "f1WithinTolerancePct": 99.2668
+      }
+    },
+    "NQ": {
+      "CLOSE": {
+        "tasEvents": 607,
+        "databentoEvents": 607,
+        "exactMatches": 607,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 100.0,
+        "exactF1Pct": 100.0,
+        "matchesWithinTolerance": 607,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 100.0
+      },
+      "PRE_OPEN": {
+        "tasEvents": 773,
+        "databentoEvents": 779,
+        "exactMatches": 772,
+        "exactPrecisionPct": 99.8706,
+        "exactRecallPct": 99.1014,
+        "exactF1Pct": 99.4845,
+        "matchesWithinTolerance": 773,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.2298,
+        "f1WithinTolerancePct": 99.6134
+      },
+      "TRADING": {
+        "tasEvents": 755,
+        "databentoEvents": 768,
+        "exactMatches": 754,
+        "exactPrecisionPct": 99.8675,
+        "exactRecallPct": 98.1771,
+        "exactF1Pct": 99.0151,
+        "matchesWithinTolerance": 755,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 98.3073,
+        "f1WithinTolerancePct": 99.1464
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 755,
+        "databentoEvents": 755,
+        "exactMatches": 743,
+        "exactPrecisionPct": 98.4106,
+        "exactRecallPct": 98.4106,
+        "exactF1Pct": 98.4106,
+        "matchesWithinTolerance": 744,
+        "precisionWithinTolerancePct": 98.543,
+        "recallWithinTolerancePct": 98.543,
+        "f1WithinTolerancePct": 98.543
+      }
+    },
+    "RTY": {
+      "CLOSE": {
+        "tasEvents": 607,
+        "databentoEvents": 607,
+        "exactMatches": 607,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 100.0,
+        "exactF1Pct": 100.0,
+        "matchesWithinTolerance": 607,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 100.0
+      },
+      "PRE_OPEN": {
+        "tasEvents": 690,
+        "databentoEvents": 694,
+        "exactMatches": 690,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 99.4236,
+        "exactF1Pct": 99.711,
+        "matchesWithinTolerance": 690,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.4236,
+        "f1WithinTolerancePct": 99.711
+      },
+      "TRADING": {
+        "tasEvents": 682,
+        "databentoEvents": 689,
+        "exactMatches": 682,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 98.984,
+        "exactF1Pct": 99.4894,
+        "matchesWithinTolerance": 682,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 98.984,
+        "f1WithinTolerancePct": 99.4894
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 682,
+        "databentoEvents": 679,
+        "exactMatches": 674,
+        "exactPrecisionPct": 98.827,
+        "exactRecallPct": 99.2636,
+        "exactF1Pct": 99.0448,
+        "matchesWithinTolerance": 674,
+        "precisionWithinTolerancePct": 98.827,
+        "recallWithinTolerancePct": 99.2636,
+        "f1WithinTolerancePct": 99.0448
+      }
+    },
+    "YM": {
+      "CLOSE": {
+        "tasEvents": 607,
+        "databentoEvents": 607,
+        "exactMatches": 607,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 100.0,
+        "exactF1Pct": 100.0,
+        "matchesWithinTolerance": 607,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 100.0
+      },
+      "PRE_OPEN": {
+        "tasEvents": 658,
+        "databentoEvents": 661,
+        "exactMatches": 658,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 99.5461,
+        "exactF1Pct": 99.7725,
+        "matchesWithinTolerance": 658,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.5461,
+        "f1WithinTolerancePct": 99.7725
+      },
+      "TRADING": {
+        "tasEvents": 657,
+        "databentoEvents": 659,
+        "exactMatches": 657,
+        "exactPrecisionPct": 100.0,
+        "exactRecallPct": 99.6965,
+        "exactF1Pct": 99.848,
+        "matchesWithinTolerance": 657,
+        "precisionWithinTolerancePct": 100.0,
+        "recallWithinTolerancePct": 99.6965,
+        "f1WithinTolerancePct": 99.848
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 657,
+        "databentoEvents": 651,
+        "exactMatches": 650,
+        "exactPrecisionPct": 98.9346,
+        "exactRecallPct": 99.8464,
+        "exactF1Pct": 99.3884,
+        "matchesWithinTolerance": 650,
+        "precisionWithinTolerancePct": 98.9346,
+        "recallWithinTolerancePct": 99.8464,
+        "f1WithinTolerancePct": 99.3884
+      }
+    },
+    "GC": {
+      "CLOSE": {
+        "tasEvents": 1614,
+        "databentoEvents": 1612,
+        "exactMatches": 1612,
+        "exactPrecisionPct": 99.8761,
+        "exactRecallPct": 100.0,
+        "exactF1Pct": 99.938,
+        "matchesWithinTolerance": 1612,
+        "precisionWithinTolerancePct": 99.8761,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 99.938
+      },
+      "PRE_OPEN": {
+        "tasEvents": 1772,
+        "databentoEvents": 1771,
+        "exactMatches": 1765,
+        "exactPrecisionPct": 99.605,
+        "exactRecallPct": 99.6612,
+        "exactF1Pct": 99.6331,
+        "matchesWithinTolerance": 1768,
+        "precisionWithinTolerancePct": 99.7743,
+        "recallWithinTolerancePct": 99.8306,
+        "f1WithinTolerancePct": 99.8024
+      },
+      "TRADING": {
+        "tasEvents": 1768,
+        "databentoEvents": 1771,
+        "exactMatches": 1766,
+        "exactPrecisionPct": 99.8869,
+        "exactRecallPct": 99.7177,
+        "exactF1Pct": 99.8022,
+        "matchesWithinTolerance": 1766,
+        "precisionWithinTolerancePct": 99.8869,
+        "recallWithinTolerancePct": 99.7177,
+        "f1WithinTolerancePct": 99.8022
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 1768,
+        "databentoEvents": 1767,
+        "exactMatches": 1763,
+        "exactPrecisionPct": 99.7172,
+        "exactRecallPct": 99.7736,
+        "exactF1Pct": 99.7454,
+        "matchesWithinTolerance": 1763,
+        "precisionWithinTolerancePct": 99.7172,
+        "recallWithinTolerancePct": 99.7736,
+        "f1WithinTolerancePct": 99.7454
+      }
+    },
+    "CL": {
+      "CLOSE": {
+        "tasEvents": 1620,
+        "databentoEvents": 1612,
+        "exactMatches": 1323,
+        "exactPrecisionPct": 81.6667,
+        "exactRecallPct": 82.072,
+        "exactF1Pct": 81.8688,
+        "matchesWithinTolerance": 1612,
+        "precisionWithinTolerancePct": 99.5062,
+        "recallWithinTolerancePct": 100.0,
+        "f1WithinTolerancePct": 99.7525
+      },
+      "PRE_OPEN": {
+        "tasEvents": 2053,
+        "databentoEvents": 2030,
+        "exactMatches": 1542,
+        "exactPrecisionPct": 75.1096,
+        "exactRecallPct": 75.9606,
+        "exactF1Pct": 75.5327,
+        "matchesWithinTolerance": 1945,
+        "precisionWithinTolerancePct": 94.7394,
+        "recallWithinTolerancePct": 95.8128,
+        "f1WithinTolerancePct": 95.2731
+      },
+      "TRADING": {
+        "tasEvents": 1903,
+        "databentoEvents": 1929,
+        "exactMatches": 1849,
+        "exactPrecisionPct": 97.1624,
+        "exactRecallPct": 95.8528,
+        "exactF1Pct": 96.5032,
+        "matchesWithinTolerance": 1900,
+        "precisionWithinTolerancePct": 99.8424,
+        "recallWithinTolerancePct": 98.4966,
+        "f1WithinTolerancePct": 99.1649
+      },
+      "NEW_PRICE_INDICATION": {
+        "tasEvents": 1903,
+        "databentoEvents": 1807,
+        "exactMatches": 1751,
+        "exactPrecisionPct": 92.0126,
+        "exactRecallPct": 96.9009,
+        "exactF1Pct": 94.3935,
+        "matchesWithinTolerance": 1799,
+        "precisionWithinTolerancePct": 94.5349,
+        "recallWithinTolerancePct": 99.5573,
+        "f1WithinTolerancePct": 96.9811
+      }
+    }
+  },
+  "allReasonFamilyProductSummary": {
+    "ES": {
+      "tasEvents": 2665,
+      "databentoEvents": 2666,
+      "exactMatches": 2658,
+      "exactPrecisionPct": 99.7373,
+      "exactRecallPct": 99.6999,
+      "exactF1Pct": 99.7186,
+      "matchesWithinTolerance": 2658,
+      "precisionWithinTolerancePct": 99.7373,
+      "recallWithinTolerancePct": 99.6999,
+      "f1WithinTolerancePct": 99.7186
+    },
+    "NQ": {
+      "tasEvents": 2890,
+      "databentoEvents": 2909,
+      "exactMatches": 2876,
+      "exactPrecisionPct": 99.5156,
+      "exactRecallPct": 98.8656,
+      "exactF1Pct": 99.1895,
+      "matchesWithinTolerance": 2879,
+      "precisionWithinTolerancePct": 99.6194,
+      "recallWithinTolerancePct": 98.9687,
+      "f1WithinTolerancePct": 99.293
+    },
+    "RTY": {
+      "tasEvents": 2661,
+      "databentoEvents": 2669,
+      "exactMatches": 2653,
+      "exactPrecisionPct": 99.6994,
+      "exactRecallPct": 99.4005,
+      "exactF1Pct": 99.5497,
+      "matchesWithinTolerance": 2653,
+      "precisionWithinTolerancePct": 99.6994,
+      "recallWithinTolerancePct": 99.4005,
+      "f1WithinTolerancePct": 99.5497
+    },
+    "YM": {
+      "tasEvents": 2579,
+      "databentoEvents": 2578,
+      "exactMatches": 2572,
+      "exactPrecisionPct": 99.7286,
+      "exactRecallPct": 99.7673,
+      "exactF1Pct": 99.7479,
+      "matchesWithinTolerance": 2572,
+      "precisionWithinTolerancePct": 99.7286,
+      "recallWithinTolerancePct": 99.7673,
+      "f1WithinTolerancePct": 99.7479
+    },
+    "GC": {
+      "tasEvents": 6922,
+      "databentoEvents": 6921,
+      "exactMatches": 6906,
+      "exactPrecisionPct": 99.7689,
+      "exactRecallPct": 99.7833,
+      "exactF1Pct": 99.7761,
+      "matchesWithinTolerance": 6909,
+      "precisionWithinTolerancePct": 99.8122,
+      "recallWithinTolerancePct": 99.8266,
+      "f1WithinTolerancePct": 99.8194
+    },
+    "CL": {
+      "tasEvents": 7479,
+      "databentoEvents": 7378,
+      "exactMatches": 6465,
+      "exactPrecisionPct": 86.442,
+      "exactRecallPct": 87.6254,
+      "exactF1Pct": 87.0297,
+      "matchesWithinTolerance": 7256,
+      "precisionWithinTolerancePct": 97.0183,
+      "recallWithinTolerancePct": 98.3464,
+      "f1WithinTolerancePct": 97.6778
+    }
+  },
+  "tasPostgresLoad": {
+    "sourceRocksdb": "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_tas_rocksdb_all_products",
+    "products": [
+      "ES",
+      "NQ",
+      "RTY",
+      "YM",
+      "GC",
+      "CL"
+    ],
+    "availableYears": [
+      2020,
+      2021,
+      2022,
+      2023,
+      2024,
+      2025,
+      2026
+    ],
+    "periods": [
+      "2020-01-01_2021-01-01",
+      "2021-01-01_2022-01-01",
+      "2022-01-01_2023-01-01",
+      "2023-01-01_2024-01-01",
+      "2024-01-01_2025-01-01",
+      "2025-01-01_2026-01-01",
+      "2026-01-01_2026-06-01"
+    ],
+    "startYear": 2020,
+    "endYear": 2026,
+    "partitionCount": 42,
+    "rawStatusRows": 2733419,
+    "mappedStatusRows": 1149577,
+    "stagedActionRows": 1149577,
+    "storedEventRows": 1149577,
+    "mappingVersion": "cme_tas_action_v2",
+    "loadedAt": "2026-09-04T05:13:11.034042+00:00",
+    "comparisonRead": {
+      "rows": 1055332,
+      "familyAlignmentRows": 25196
+    }
+  },
+  "databentoDiagnostics": {
+    "rows": 1504300,
+    "ancillaryActionRowsExcluded": 280458,
+    "midnightSnapshotsExcluded": 27309
+  },
+  "limitations": [
+    "The alignment layer emits both open actions at the first timestamp in a five-second CME 15/17 cluster; cme_tas_action_events retains only direct per-RIC evidence.",
+    "The PostgreSQL TAS table is observational audit data and does not replace the authoritative CME calendar interval table.",
+    "Scheduled-only precision treats non-scheduled TAS phase observations as extras; all-reason precision is the primary precision measure."
+  ]
+}

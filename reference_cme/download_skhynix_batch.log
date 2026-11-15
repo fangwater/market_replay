@@ -1,0 +1,85 @@
+{
+  "dataset": "XNAS.ITCH",
+  "symbols": [
+    "SKHY",
+    "SKHYV"
+  ],
+  "start": "2026-06-01",
+  "end": "2026-10-17T00:00:00+00:00",
+  "jobs": {},
+  "estimated_cost_usd": {
+    "mbp-10": 7.535309481621,
+    "trades": 1.686672538519
+  }
+}
+submitted mbp-10: XNAS-20261019-X5FNF49AC7
+submitted trades: XNAS-20261019-3Q7G8LJREK
+mbp-10: queued progress=0
+mbp-10: queued progress=0
+mbp-10: queued progress=0
+mbp-10: queued progress=0
+mbp-10: processing progress=16
+mbp-10: processing progress=18
+mbp-10: processing progress=19
+mbp-10: processing progress=21
+mbp-10: processing progress=23
+mbp-10: processing progress=24
+mbp-10: processing progress=25
+mbp-10: processing progress=27
+mbp-10: processing progress=28
+mbp-10: processing progress=30
+mbp-10: processing progress=31
+mbp-10: processing progress=33
+mbp-10: processing progress=35
+mbp-10: processing progress=36
+mbp-10: processing progress=38
+mbp-10: processing progress=39
+mbp-10: processing progress=40
+mbp-10: processing progress=42
+mbp-10: processing progress=43
+mbp-10: processing progress=44
+mbp-10: processing progress=46
+mbp-10: processing progress=47
+mbp-10: processing progress=49
+mbp-10: processing progress=50
+mbp-10: processing progress=52
+mbp-10: processing progress=54
+mbp-10: processing progress=55
+mbp-10: processing progress=57
+mbp-10: processing progress=58
+mbp-10: processing progress=59
+mbp-10: processing progress=61
+mbp-10: processing progress=62
+mbp-10: processing progress=63
+mbp-10: processing progress=65
+mbp-10: processing progress=66
+mbp-10: processing progress=67
+mbp-10: processing progress=68
+mbp-10: processing progress=70
+mbp-10: processing progress=71
+mbp-10: processing progress=72
+mbp-10: processing progress=74
+mbp-10: processing progress=75
+mbp-10: processing progress=76
+mbp-10: processing progress=78
+mbp-10: processing progress=79
+mbp-10: processing progress=81
+mbp-10: processing progress=82
+mbp-10: processing progress=83
+mbp-10: processing progress=84
+mbp-10: processing progress=86
+mbp-10: processing progress=87
+mbp-10: processing progress=88
+mbp-10: processing progress=90
+mbp-10: processing progress=91
+mbp-10: processing progress=92
+mbp-10: processing progress=93
+mbp-10: processing progress=95
+mbp-10: processing progress=96
+mbp-10: processing progress=97
+mbp-10: processing progress=99
+mbp-10: processing progress=100
+mbp-10: done progress=100
+verified mbp-10: 70 files, 1716147437 bytes
+trades: done progress=100
+verified trades: 70 files, 86440443 bytes

@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.dbn
+download_status.log
+batch_downloads/
+.non_equity_status_batch.json
+download_non_equity_status.log
+.core_six_definition_batch.json
+download_core_six_definition.log
+parsed/
+parse_core_six_definition.log
+logs/

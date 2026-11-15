@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#15201c">
+  <title>CME 交易参考数据</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="数据导航">
+      <div class="brand">
+        <span class="brand-mark">CME</span>
+        <span class="brand-copy">交易参考<br><small>REFERENCE DESK</small></span>
+      </div>
+
+      <p class="sidebar-label">数据视图</p>
+      <nav class="view-nav">
+        <button class="nav-item active" type="button" data-view="definition">
+          <span>合约定义</span><strong id="definition-nav-count">--</strong>
+        </button>
+        <button class="nav-item" type="button" data-view="status">
+          <span>交易状态</span><strong id="status-nav-count">--</strong>
+        </button>
+      </nav>
+
+      <p class="sidebar-label product-label">核心品种</p>
+      <nav class="product-nav" id="product-nav" aria-label="核心品种"></nav>
+
+      <div class="sidebar-foot">
+        <span class="connection-dot" id="connection-dot"></span>
+        <div><strong id="connection-state">正在读取</strong><small>GLBX.MDP3</small></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="page-eyebrow">POINT-IN-TIME DEFINITION</p>
+          <h1 id="page-title">CME 合约定义</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="date-control">
+            <span id="date-label">历史时点（UTC）</span>
+            <input id="global-date" type="date">
+          </label>
+          <button class="primary-button" id="refresh-button" type="button">刷新数据</button>
+        </div>
+      </header>
+
+      <div id="definition-view">
+        <section class="metrics" aria-label="定义数据统计">
+          <article class="metric metric-green"><span>当日有效合约</span><strong id="metric-active">--</strong></article>
+          <article class="metric metric-amber"><span>历史原始符号</span><strong id="metric-symbols">--</strong></article>
+          <article class="metric metric-red"><span>定义观测记录</span><strong id="metric-definition-rows">--</strong></article>
+          <article class="metric metric-blue"><span>定义数据截至</span><strong class="metric-date" id="metric-definition-end">--</strong></article>
+        </section>
+
+        <section class="toolbar" aria-label="定义筛选">
+          <label class="field search-field">
+            <span>搜索合约</span>
+            <input id="definition-search" type="search" placeholder="例如 ESU6、CLZ7" autocomplete="off">
+          </label>
+          <label class="toggle-field">
+            <input id="active-only" type="checkbox" checked>
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>仅显示当日有效</span>
+          </label>
+          <div class="toolbar-summary" id="definition-result-summary">--</div>
+        </section>
+
+        <section class="data-split">
+          <div class="table-panel">
+            <div class="table-heading">
+              <div><span class="section-kicker">INSTRUMENTS</span><h2>单腿期货合约</h2></div>
+              <span id="definition-scope">全部品种</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table definition-table">
+                <thead>
+                  <tr>
+                    <th>合约</th><th>交易所</th><th>到期</th><th>最小跳动</th>
+                    <th>合约规模</th><th>每跳价值</th><th>盘口深度</th><th>撮合</th>
+                  </tr>
+                </thead>
+                <tbody id="definition-body"></tbody>
+              </table>
+            </div>
+            <footer class="pagination">
+              <button id="definition-prev" type="button">上一页</button>
+              <span id="definition-page">第 -- 页</span>
+              <button id="definition-next" type="button">下一页</button>
+            </footer>
+          </div>
+
+          <aside class="detail-panel" id="definition-detail" aria-live="polite">
+            <div class="detail-empty">
+              <span class="empty-monogram">ID</span>
+              <strong>未选择合约</strong>
+              <small>定义字段将在这里展开</small>
+            </div>
+          </aside>
+        </section>
+      </div>
+
+      <div id="status-view" class="hidden">
+        <div class="coverage-banner" id="status-coverage"></div>
+        <section class="metrics" aria-label="交易状态统计">
+          <article class="metric metric-green"><span>当日状态事件</span><strong id="metric-events">--</strong></article>
+          <article class="metric metric-amber"><span>涉及合约</span><strong id="metric-event-symbols">--</strong></article>
+          <article class="metric metric-red"><span>异常中断</span><strong id="metric-exceptions">--</strong></article>
+          <article class="metric metric-blue"><span>当前查询合约</span><strong class="metric-symbol" id="metric-status-symbol">--</strong></article>
+        </section>
+
+        <section class="toolbar status-toolbar" aria-label="交易状态筛选">
+          <label class="field contract-field">
+            <span>合约</span>
+            <select id="status-symbol"></select>
+          </label>
+          <div class="state-legend" aria-label="状态标记">
+            <span><i class="state-dot trading"></i>可交易</span>
+            <span><i class="state-dot closed"></i>不可交易</span>
+            <span><i class="state-dot unknown"></i>未定义</span>
+          </div>
+          <div class="toolbar-summary" id="status-result-summary">--</div>
+        </section>
+
+        <section class="timeline-section">
+          <div class="section-heading">
+            <div><span class="section-kicker">SESSION TIMELINE · UTC</span><h2>状态时间线</h2></div>
+            <span id="timeline-range">--</span>
+          </div>
+          <div class="timeline" id="status-timeline"></div>
+        </section>
+
+        <section class="status-table-section">
+          <div class="section-heading">
+            <div><span class="section-kicker">RAW STATUS EVENTS</span><h2>状态事件明细</h2></div>
+            <span>按接收时间升序</span>
+          </div>
+          <div class="table-wrap status-table-wrap">
+            <table class="data-table status-table">
+              <thead>
+                <tr>
+                  <th>接收时间（UTC）</th><th>状态动作</th><th>原因</th><th>附加事件</th>
+                  <th>交易</th><th>报价</th><th>Instrument ID</th>
+                </tr>
+              </thead>
+              <tbody id="status-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="toast hidden" id="toast" role="status"></div>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -82,6 +82,7 @@
 | `crates/cme/cme_tas_replay` | 从 mkt_signal `7b8d96de` 迁入：CME TAS / LL2 / Raw LL2 回放与 1s/1min/hfq/ylabel 导出 |
 | `crates/usstock/*` | 从 mkt_signal `7b8d96de` 迁入：美股 6 个 crate（TAS/normalised、MBP、RAW、Raw LL2、Nasdaq baseline、聚合）。`usstock_features_1min_hfq` 依赖实盘因子公式，仍留在 mkt_signal 根 crate，等因子公式抽进 core 后再迁 |
 | `config/cme_*`、`config/usstock_*`、`scripts/*cme*`、`scripts/usstock_*`、`scripts/*ll2*`、`tests/scripts/test_cme_*` 等 | 随这些 crate 一起从 mkt_signal 迁入，共 85 个配置、脚本、Python 测试和文档。Python 测试从仓库根目录用 `python3 -m pytest tests/scripts` 运行；`tests/__init__.py` 必须保留，否则 `from scripts.x import ...` 会解析到 `tests/scripts` 上 |
+| `reference_cme/` | CME 参考数据服务，原 `cme_exchange_info_summary`（Python，PM2 `cme-exchange-info-summary`，0.0.0.0:8770），是 8780 MCP 的 CME 上游 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
 
@@ -132,3 +133,11 @@
 1. **乘数：** 只能写入 PostgreSQL 的 `domestic_future_product_multipliers`，必须同时有交易所公告和通联成交额恒等式两项证据，并另外写一个增量 SQL 放在 `preprocess/database/`（SO 的是 `domestic_future_product_multipliers_20261115_so.sql`）。不得只凭 OpenCTP 的值写入。
 2. **交易所映射：** 在 `cn_futures_core::segments::exchange_of` 里补上品种。core 的改动只有 mkt_signal 升级 rev 后才会进入实盘。
 3. **时段快照：** 按上面的方法确认新快照只是增加时段，然后升级归档的溯源记录，并修改 `config/cn_daily.toml` 和 `config/cn_kline_server.toml` 里的 `session_as_of`。
+
+## reference_cme/：CME 参考数据服务（2026-11-15 并入）
+
+原 `/home/fanghaizhou/cme_exchange_info_summary` 用 `mv` 整体搬入，原路径保留为软链接。`ly_cme_data` 的脚本和文档、preprocess 的审计证据还按旧路径引用它，等 `ly_cme_data` 整合时统一改路径后，再删这个软链接。
+
+- **不进 git 的内容：** Databento 原始下载 `batch_downloads/`（约 2 GB）、解析结果 `parsed/`（服务读取的 parquet）、`*.dbn`、日志和 `.env`（含 Databento key），按它自己的 `.gitignore` 处理，只留在本机磁盘上。
+- **venv：** 按 `requirements.lock`（搬迁前冻结，24 个包）在新路径重建，版本逐个一致。
+- **PM2：** 从 `reference_cme/ecosystem.config.cjs` 启动。搬迁前后共比对 10 个接口（8770 的首页、health、summary、definitions、status，以及 8780 MCP 的 4 个 CME 工具），响应逐字节一致。
