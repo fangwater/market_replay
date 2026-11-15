@@ -200,6 +200,34 @@ fn list_directories(
     Ok(directories)
 }
 
+/// CFFEX trades day sessions only, so its quote file marks a directory that
+/// holds a full open day (Saturday directories carry only the SHFE/INE night tail).
+const MSG_OPEN_DAY_MARKER: &str = "mdl_21_1_0.csv";
+
+/// `tonglian_msg` directories that can hold rows of `trad_day`: the day's own
+/// directory, back through Saturday / holiday tails, up to and including the
+/// previous open day (whose evening opens the night session). Older
+/// directories inside the lookback window cannot contain `trad_day` rows and
+/// re-reading them only multiplies NFS IO. Without a marker in the window the
+/// whole window is kept.
+fn msg_directories(
+    root: &Path,
+    trad_day: NaiveDate,
+    lookback_days: u64,
+) -> Result<Vec<(NaiveDate, PathBuf)>> {
+    let start = trad_day
+        .checked_sub_days(Days::new(lookback_days))
+        .unwrap_or(trad_day);
+    let all = list_directories(root, start, trad_day)?;
+    let cut = all
+        .iter()
+        .rposition(|(day, dir)| *day < trad_day && dir.join(MSG_OPEN_DAY_MARKER).is_file());
+    Ok(match cut {
+        Some(index) => all[index..].to_vec(),
+        None => all,
+    })
+}
+
 pub fn resolve_layer(
     trad_day: NaiveDate,
     l2_root: Option<&Path>,
@@ -248,11 +276,8 @@ pub fn source_files_for_day(
         }
     }
     if let Some(root) = layer_msg {
-        let start = trad_day
-            .checked_sub_days(Days::new(lookback_days))
-            .unwrap_or(trad_day);
         let expected = exchange.msg_stem();
-        for (day, directory) in list_directories(&root, start, trad_day)? {
+        for (day, directory) in msg_directories(&root, trad_day, lookback_days)? {
             let path = directory.join(expected);
             if path.is_file() {
                 files.push(LocatedFile {
@@ -311,10 +336,7 @@ pub fn source_queue_files_for_day(
         }
     }
     if let (Some(root), Some(expected)) = (layer_msg, exchange.msg_queue_stem()) {
-        let start = trad_day
-            .checked_sub_days(Days::new(lookback_days))
-            .unwrap_or(trad_day);
-        for (day, directory) in list_directories(&root, start, trad_day)? {
+        for (day, directory) in msg_directories(&root, trad_day, lookback_days)? {
             let path = directory.join(expected);
             if path.is_file() {
                 files.push(LocatedFile {
@@ -663,5 +685,64 @@ mod tests {
         );
         assert_eq!(before, (Some(l2.to_path_buf()), None));
         assert_eq!(after, (None, Some(msg.to_path_buf())));
+    }
+}
+
+#[cfg(test)]
+mod msg_directory_tests {
+    use super::*;
+
+    fn day(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y%m%d").unwrap()
+    }
+
+    #[test]
+    fn monday_reads_friday_saturday_monday_only() {
+        let t = tempfile::tempdir().unwrap();
+        // Thu, Fri, Mon are open days; Sat holds only the SHFE night tail.
+        for (d, open) in [
+            ("20261112", true),
+            ("20261113", true),
+            ("20261114", false),
+            ("20261116", true),
+        ] {
+            let dir = t.path().join(d);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(if open {
+                    MSG_OPEN_DAY_MARKER
+                } else {
+                    "mdl_22_1_0.csv"
+                }),
+                "",
+            )
+            .unwrap();
+        }
+        let got: Vec<NaiveDate> = msg_directories(t.path(), day("20261116"), 16)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(got, vec![day("20261113"), day("20261114"), day("20261116")]);
+        let fri: Vec<NaiveDate> = msg_directories(t.path(), day("20261113"), 16)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(fri, vec![day("20261112"), day("20261113")]);
+    }
+
+    #[test]
+    fn without_open_day_marker_the_whole_window_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        for d in ["20261110", "20261111", "20261112"] {
+            fs::create_dir_all(t.path().join(d)).unwrap();
+        }
+        assert_eq!(
+            msg_directories(t.path(), day("20261112"), 16)
+                .unwrap()
+                .len(),
+            3
+        );
     }
 }
