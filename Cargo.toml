@@ -9,6 +9,14 @@ members = [
     "crates/mdl_replay",
     "crates/cn/cn_futures_l2",
     "crates/cn/cn_futures_trim",
+    "crates/core/cme_roll_metadata",
+    "crates/cme/cme_tas_replay",
+    "crates/usstock/usstock_replay",
+    "crates/usstock/usstock_lseg_mbp_replay",
+    "crates/usstock/usstock_lseg_raw_replay",
+    "crates/usstock/usstock_lseg_rawll2_replay",
+    "crates/usstock/usstock_nasdaq_baseline",
+    "crates/usstock/usstock_aggregate_baseline",
 ]
 
 [workspace.package]
@@ -16,6 +24,7 @@ edition = "2021"
 version = "0.1.0"
 
 [workspace.dependencies]
+ahash = "0.8.12"
 anyhow = "1.0"
 serde_json = "1.0"
 

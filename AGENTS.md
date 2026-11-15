@@ -78,10 +78,14 @@
 | `crates/cn/cn_daily` | 每日任务 `cn-daily`：回放、导出、裁剪、分桶、审计、钉钉通知，见 [docs/cn_daily_and_kline.md](docs/cn_daily_and_kline.md) |
 | `crates/cn/cn_kline_server` + `crates/proto/cn_market_proto` | gRPC `cn_market.v1` 分钟线服务（读 parquet，不做 Binance 兼容） |
 | `crates/common/dingtalk` | 钉钉机器人客户端（凭据只从环境变量读取） |
+| `crates/core/cme_roll_metadata` | 共享：CME 换月元数据（mkt_signal 根 crate 的 `cme_features_1min_hfq` 也在用） |
+| `crates/cme/cme_tas_replay` | 从 mkt_signal `7b8d96de` 迁入：CME TAS / LL2 / Raw LL2 回放与 1s/1min/hfq/ylabel 导出 |
+| `crates/usstock/*` | 从 mkt_signal `7b8d96de` 迁入：美股 6 个 crate（TAS/normalised、MBP、RAW、Raw LL2、Nasdaq baseline、聚合）。`usstock_features_1min_hfq` 依赖实盘因子公式，仍留在 mkt_signal 根 crate，等因子公式抽进 core 后再迁 |
+| `config/cme_tas_replay_all*.toml`、`config/usstock_replay.toml`、`scripts/*cme*`、`scripts/usstock_multifrequency_*.py`、`docs/cme_tas_*.md` | 随这些 crate 一起从 mkt_signal 迁入 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
 
-- `crates/core/*` **只能依赖纯计算 crate**（目前是 anyhow、chrono、chrono-tz），不得引入 RocksDB、parquet、arrow、iceoryx、网络或文件 IO 依赖，也不得依赖本仓库的其他 crate。mkt_signal 用 `git` + `rev` 固定版本依赖 core，core 里的任何改动都会进入实盘编译。
+- `crates/core/*` **只能依赖轻量的计算 crate**（目前有 anyhow、chrono、chrono-tz、csv、serde），可以用标准库读文件，但不得引入 RocksDB、parquet、arrow、polars、iceoryx、网络依赖，也不得依赖本仓库的非 core crate。mkt_signal 用 `git` + `rev` 固定版本依赖 core，core 里的任何改动都会进入实盘编译。
 - 修改 core 后必须跑本仓库的全部测试，并用真实数据重跑一天、与生产 parquet 逐值比对（方法见下文）；要进入实盘，还需要在 mkt_signal 中更新 rev 并跑通那边的测试。
 - 依赖版本以 mkt_signal 的 `Cargo.lock` 为基准，除本仓库独有的包以外保持一致。rocksdb 编译需要 `LIBCLANG_PATH`，`scripts/build-release.sh` 已经处理。
 
@@ -103,3 +107,22 @@
 - `cn_futures_l2` 只从只读 PostgreSQL 表 `market_metadata.public.domestic_future_product_multipliers` 读取 `volume_multiple` 及其 `verified` 状态（Unix socket `/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run`，端口 `5433`）。不得恢复代码里的品种映射，不得调用 DataGateway 或交易所接口，不得从成交额反推乘数，也不得默认取 `1`。载入的目录里缺少某个品种时，必须带着能定位问题的上下文直接 panic；这是批处理工具的明确例外。不得写入这个元数据实例，也不得用 `5432` 端口的只读热备库。
 - 以前的根二进制 `tonglian_baseline_replay` 及其 ClickHouse staging 配置已经退役，不得恢复。
 - 用法文档见 [docs/cn_futures_l2.md](docs/cn_futures_l2.md)。
+
+## CME 与美股（2026-11-15 从 mkt_signal 迁入）
+
+迁移验证：依赖版本以拆分前的 mkt_signal lock（`7b8d96de`）为基准，polars、rocksdb、arrow、parquet、chrono、flate2、csv、zstd 的版本全部一致。8 个 crate 的测试在两个仓库里逐个对比，结果一致：都是 253 个通过、2 个失败。少了 4 个测试，是因为它们属于留在 mkt_signal 的 `usstock_features_1min_hfq`。那 2 个失败在 mkt_signal 原始代码上同样失败，属于原有问题，分别是：
+
+- `usstock_lseg_raw_replay::worker_error_does_not_publish_or_leave_building_db`
+- `usstock_lseg_rawll2_replay::source::tests::reads_complete_rawll2_message`（时间戳相差 1600 秒）
+
+为了适应新的目录层级，测试里的 `../../../preprocess` 改成了 `../../../../preprocess`。运行时默认的 `../preprocess/...` 是相对于运行目录的，从本仓库根目录运行时仍然指向 `/home/fanghaizhou/preprocess`，所以没改。
+
+### LSEG 美股回放（规则迁自 mkt_signal AGENTS）
+
+美股生产回放代码维护在本仓库。三种源产品的源数据契约和持久化编码都不同，必须分开维护：
+
+- `crates/usstock/usstock_replay`：TAS / normalised 源行回放及下游工具。
+- `crates/usstock/usstock_lseg_mbp_replay`：Market By Price 原始回放、模板审计、Python 正确性基准，以及 MBP 与 normalised 的比对工具。
+- `crates/usstock/usstock_lseg_raw_replay`：通用 RAW zstd staging、带类型的事件回放、校验器、schema 打印、Python 正确性基准和审计夹具。
+
+数据契约和审计结果文档仍放在 `/home/fanghaizhou/preprocess/data_format/lseg/`。不得把回放实现加回 `preprocess`。
