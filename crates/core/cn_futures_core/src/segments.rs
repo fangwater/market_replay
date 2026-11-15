@@ -94,8 +94,8 @@ pub fn exchange_of(product: &str) -> Option<&'static str> {
         | "PB" | "RB" | "RU" | "SN" | "SP" | "SS" | "WR" | "ZN" => "xsge",
         "BC" | "EC" | "LU" | "NR" | "SC" => "xsie",
         "AP" | "CF" | "CJ" | "CY" | "FG" | "JR" | "LR" | "MA" | "OI" | "PF" | "PK" | "PL"
-        | "PM" | "PR" | "PX" | "RI" | "RM" | "RS" | "SA" | "SF" | "SH" | "SM" | "SR" | "TA"
-        | "UR" | "WH" | "ZC" => "xzce",
+        | "PM" | "PR" | "PX" | "RI" | "RM" | "RS" | "SA" | "SF" | "SH" | "SM" | "SO" | "SR"
+        | "TA" | "UR" | "WH" | "ZC" => "xzce",
         _ => return None,
     })
 }

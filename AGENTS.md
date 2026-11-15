@@ -95,7 +95,7 @@
 
 1. `cn_futures_l2 --msg-root ... --exchange X --start D --end D`：写入 RocksDB
 2. `export_baseline_1min --start D --end D`
-3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 的时段裁剪。这个工具不允许输入和输出是同一个目录，所以先导出到 staging，再裁剪进生产目录。生产 `baseline_data_1min` 本身就是裁剪的输出目录，溯源记录在 `_provenance/continuous_sessions.json`，快照日是 2026-09-08；快照日不同时工具会拒绝执行
+3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 的时段裁剪。这个工具不允许输入和输出是同一个目录，所以先导出到 staging，再裁剪进生产目录。生产 `baseline_data_1min` 本身就是裁剪的输出目录，溯源记录在 `_provenance/continuous_sessions.json`；快照身份不同时，工具会拒绝执行。2026-11-15 快照从 2026-09-08 升级到 as_of 2026-11-14（共 327 段，请求日期 `session_as_of = 2026-11-15`）：新增的只有郑商所 `SO`（葵花籽油，2026-11-12 上市）的 4 个交易时段，其余完全不变。用两份快照裁剪同一份输入，5/5 个文件一致，所以已经裁剪过的历史文件无需重做。旧记录保存为 `continuous_sessions.20260908.json`，升级说明在 `snapshot_upgrade_20261115.json`。以后再出现新品种时，照这个流程处理：先确认新快照只是增加时段，再升级；如果已有品种的时段发生变化，就不能直接升级
 4. `fill_1min_size_buckets --start <月初> --end D`：按自然月的 P50/P90 做大小单分桶，只读打开 RocksDB。2026-11-15 加上了 `--start/--end`：只扫覆盖这些日期的年份分区，只改写范围内的文件。不带参数时仍然重写全部历史。已用生产数据验证，结果和不带参数时一致
 
 迁移验证（2026-11-14）：用新二进制在临时目录按以上四步重跑 2026-08-26 的上期所和广期所，共 24 个文件、105,785 行，与生产 parquet 的 schema 和全部值完全一致；抽出 core 之后再验证广期所，5/5 个文件一致。
@@ -126,3 +126,9 @@
 - `crates/usstock/usstock_lseg_raw_replay`：通用 RAW zstd staging、带类型的事件回放、校验器、schema 打印、Python 正确性基准和审计夹具。
 
 数据契约和审计结果文档仍放在 `/home/fanghaizhou/preprocess/data_format/lseg/`。不得把回放实现加回 `preprocess`。
+
+### 新品种接入流程（以 2026-11-15 的 SO 为例）
+
+1. **乘数：** 只能写入 PostgreSQL 的 `domestic_future_product_multipliers`，必须同时有交易所公告和通联成交额恒等式两项证据，并另外写一个增量 SQL 放在 `preprocess/database/`（SO 的是 `domestic_future_product_multipliers_20261115_so.sql`）。不得只凭 OpenCTP 的值写入。
+2. **交易所映射：** 在 `cn_futures_core::segments::exchange_of` 里补上品种。core 的改动只有 mkt_signal 升级 rev 后才会进入实盘。
+3. **时段快照：** 按上面的方法确认新快照只是增加时段，然后升级归档的溯源记录，并修改 `config/cn_daily.toml` 和 `config/cn_kline_server.toml` 里的 `session_as_of`。
