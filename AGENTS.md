@@ -52,7 +52,7 @@
 
 ## reference/：国内期货参考数据服务（原 cn_exchange_info_summary）
 
-2026-11-14 从 `/home/fanghaizhou/cn_exchange_info_summary` 整体并入 `reference/`。原路径现在是指向这里的软链接；旧目录备份在 `/home/fanghaizhou/cn_exchange_info_summary.pre-merge-20261114`，用户确认后再删。
+2026-11-14 从 `/home/fanghaizhou/cn_exchange_info_summary` 整体并入 `reference/`。2026-11-15 经用户确认，旧目录备份和原路径的软链接都已删除，引用旧路径的地方（快照 JSON 的 `raw_path`、cme_exchange_info_summary 的 README）都改成了新路径。
 
 - 这是一个 Python 项目，自带 `reference/AGENTS.md`，改这个目录时遵守其中的规则：只写 PostgreSQL 独立 schema `cn_futures_reference`，不碰 `public` 下的乘数表和交易时段表。
 - 两个虚拟环境 `.venv` 和 `.venv-mcp` 按 `requirements.lock` / `requirements-mcp.lock` 重建（版本和搬迁前逐个一致）。它们不进版本控制。
