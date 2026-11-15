@@ -8,7 +8,7 @@ from pathlib import Path
 from cme_raw_ll2_reference import extract, fill_baseline_records, minute_snapshots
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / 'crates/cme_tas_replay/tests/fixtures'
+FIXTURES = ROOT / 'crates/cme/cme_tas_replay/tests/fixtures'
 
 
 def cases():

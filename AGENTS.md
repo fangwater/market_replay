@@ -81,7 +81,7 @@
 | `crates/core/cme_roll_metadata` | 共享：CME 换月元数据（mkt_signal 根 crate 的 `cme_features_1min_hfq` 也在用） |
 | `crates/cme/cme_tas_replay` | 从 mkt_signal `7b8d96de` 迁入：CME TAS / LL2 / Raw LL2 回放与 1s/1min/hfq/ylabel 导出 |
 | `crates/usstock/*` | 从 mkt_signal `7b8d96de` 迁入：美股 6 个 crate（TAS/normalised、MBP、RAW、Raw LL2、Nasdaq baseline、聚合）。`usstock_features_1min_hfq` 依赖实盘因子公式，仍留在 mkt_signal 根 crate，等因子公式抽进 core 后再迁 |
-| `config/cme_tas_replay_all*.toml`、`config/usstock_replay.toml`、`scripts/*cme*`、`scripts/usstock_multifrequency_*.py`、`docs/cme_tas_*.md` | 随这些 crate 一起从 mkt_signal 迁入 |
+| `config/cme_*`、`config/usstock_*`、`scripts/*cme*`、`scripts/usstock_*`、`scripts/*ll2*`、`tests/scripts/test_cme_*` 等 | 随这些 crate 一起从 mkt_signal 迁入，共 85 个配置、脚本、Python 测试和文档。Python 测试从仓库根目录用 `python3 -m pytest tests/scripts` 运行；`tests/__init__.py` 必须保留，否则 `from scripts.x import ...` 会解析到 `tests/scripts` 上 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
 
@@ -110,7 +110,7 @@
 
 ## CME 与美股（2026-11-15 从 mkt_signal 迁入）
 
-迁移验证：依赖版本以拆分前的 mkt_signal lock（`7b8d96de`）为基准，polars、rocksdb、arrow、parquet、chrono、flate2、csv、zstd 的版本全部一致。8 个 crate 的测试在两个仓库里逐个对比，结果一致：都是 253 个通过、2 个失败。少了 4 个测试，是因为它们属于留在 mkt_signal 的 `usstock_features_1min_hfq`。那 2 个失败在 mkt_signal 原始代码上同样失败，属于原有问题，分别是：
+迁移验证：20 个 Python 测试文件共 223 个测试，两边结果一致。依赖版本以拆分前的 mkt_signal lock（`7b8d96de`）为基准，polars、rocksdb、arrow、parquet、chrono、flate2、csv、zstd 的版本全部一致。8 个 crate 的测试在两个仓库里逐个对比，结果一致：都是 253 个通过、2 个失败。少了 4 个测试，是因为它们属于留在 mkt_signal 的 `usstock_features_1min_hfq`。那 2 个失败在 mkt_signal 原始代码上同样失败，属于原有问题，分别是：
 
 - `usstock_lseg_raw_replay::worker_error_does_not_publish_or_leave_building_db`
 - `usstock_lseg_rawll2_replay::source::tests::reads_complete_rawll2_message`（时间戳相差 1600 秒）
