@@ -239,21 +239,47 @@ pub fn write_day_parquet(path: &Path, rows: &[BaselineMinute]) -> Result<()> {
     Ok(())
 }
 
+/// Records older than this before the first exported trading day are never
+/// needed: every state (segments, fills, TWAP seed) resets at session breaks,
+/// and the previous trading day's close always separates TradDay D from them.
+const SCAN_LOOKBACK_DAYS: i64 = 7;
+/// Rows after this many days past the last exported day belong to later days.
+const SCAN_LOOKAHEAD_DAYS: i64 = 2;
+
+/// UTC ns window `[start - 7d, end + 2d)` (Shanghai midnights) to read from RocksDB.
+pub fn scan_window_ns(start: chrono::NaiveDate, end: chrono::NaiveDate) -> (u64, u64) {
+    use chrono::TimeZone;
+    let midnight = |d: chrono::NaiveDate| -> u64 {
+        let local = chrono_tz::Asia::Shanghai
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0).expect("midnight"))
+            .single()
+            .expect("Shanghai has no DST");
+        local.timestamp_nanos_opt().unwrap_or(0).max(0) as u64
+    };
+    (
+        midnight(start - chrono::Duration::days(SCAN_LOOKBACK_DAYS)),
+        midnight(end + chrono::Duration::days(SCAN_LOOKAHEAD_DAYS)),
+    )
+}
+
+/// Reads one instrument's depth and trade records inside `[from_ns, to_ns)`
+/// by seeking to `from_ns` instead of iterating the whole product-year CF.
 fn scan_instrument(
     db: &L2Db,
     cf_name: &str,
     instrument: &str,
+    (from_ns, to_ns): (u64, u64),
 ) -> Result<(Vec<crate::codec::DepthRecord>, Vec<PrintTrade>, Vec<i64>)> {
     let cf = db
         .cf_handle(cf_name)
         .ok_or_else(|| anyhow::anyhow!("missing cf {cf_name}"))?;
     let mut depths = Vec::new();
     let mut depth_secs = Vec::new();
-    let start = encode_key(KIND_DEPTH, instrument, 0, 0)?;
+    let start = encode_key(KIND_DEPTH, instrument, from_ns, 0)?;
     for item in db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward)) {
         let (key, value) = item.context("iterate depth")?;
         let (kind, id, ts_ns, _) = decode_key(&key)?;
-        if kind != KIND_DEPTH || id != instrument {
+        if kind != KIND_DEPTH || id != instrument || ts_ns >= to_ns {
             break;
         }
         let rec = decode_depth(&value)?;
@@ -272,11 +298,11 @@ fn scan_instrument(
         depths.push(rec);
     }
     let mut trades = Vec::new();
-    let start = encode_key(KIND_TRADE, instrument, 0, 0)?;
+    let start = encode_key(KIND_TRADE, instrument, from_ns, 0)?;
     for item in db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward)) {
         let (key, value) = item.context("iterate trade")?;
-        let (kind, id, _, _) = decode_key(&key)?;
-        if kind != KIND_TRADE || id != instrument {
+        let (kind, id, ts_ns, _) = decode_key(&key)?;
+        if kind != KIND_TRADE || id != instrument || ts_ns >= to_ns {
             break;
         }
         let rec = decode_trade(&value)?;
@@ -306,10 +332,11 @@ fn export_product(
         fs::remove_dir_all(&tmp_root).with_context(|| format!("remove {}", tmp_root.display()))?;
     }
     let mut days: Vec<chrono::NaiveDate> = Vec::new();
+    let window = scan_window_ns(args.start, args.end);
     for cf_name in cf_names {
         let instruments = list_instruments(db, cf_name)?;
         for instrument in instruments {
-            let (depths, trades, depth_secs) = scan_instrument(db, cf_name, &instrument)?;
+            let (depths, trades, depth_secs) = scan_instrument(db, cf_name, &instrument, window)?;
             if depth_secs.is_empty() && trades.is_empty() {
                 continue;
             }

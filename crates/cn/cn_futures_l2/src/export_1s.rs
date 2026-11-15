@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::codec::{decode_depth, decode_key, decode_trade, encode_key, KIND_DEPTH, KIND_TRADE};
+use crate::codec::{
+    decode_depth, decode_key, decode_trade, encode_key, INSTRUMENT_LEN, KEY_LEN, KIND_DEPTH,
+    KIND_TRADE,
+};
 use crate::db::{open_rocksdb_read_only, L2Db, FORBIDDEN_ROCKSDB_MARK};
 use crate::session::Exchange;
 use crate::universe::is_maintained_product;
@@ -381,27 +384,36 @@ pub fn scan_kind(
     Ok((depths, trades))
 }
 
+/// Instruments with depth records in a product-year CF, in key order.
+///
+/// Keys are `[kind][instrument; 16][ts; 8][seq; 4]`, so after the first key of
+/// an instrument we seek straight past its last possible key instead of
+/// iterating every record (a 2026 CF holds billions of depth rows; scanning it
+/// made each single-day export take ~18 minutes).
 pub fn list_instruments(db: &L2Db, cf_name: &str) -> Result<Vec<String>> {
     let cf = db
         .cf_handle(cf_name)
         .ok_or_else(|| anyhow::anyhow!("missing cf {cf_name}"))?;
-    let start = [KIND_DEPTH];
     let mut out = Vec::new();
-    let mut last = String::new();
-    for item in db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward)) {
-        let (key, _) = item.context("iterate instruments")?;
-        let (kind, instrument, _, _) = match decode_key(&key) {
+    let mut it = db.raw_iterator_cf(&cf);
+    it.seek([KIND_DEPTH]);
+    while let Some(key) = it.key() {
+        let (kind, instrument, _, _) = match decode_key(key) {
             Ok(parsed) => parsed,
             Err(_) => break,
         };
         if kind != KIND_DEPTH {
             break;
         }
-        if instrument != last {
-            out.push(instrument.clone());
-            last = instrument;
+        let mut past = [0xFFu8; KEY_LEN];
+        past[..1 + INSTRUMENT_LEN].copy_from_slice(&key[..1 + INSTRUMENT_LEN]);
+        out.push(instrument);
+        it.seek(past);
+        if it.key() == Some(&past[..]) {
+            it.next();
         }
     }
+    it.status().context("iterate instruments")?;
     Ok(out)
 }
 
