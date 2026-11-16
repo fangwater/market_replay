@@ -46,3 +46,5 @@ parse = 8
 export = 2
 status = 3
 kline = 2
+# 8 groups x 2 workers = 16 cores (budget 18)
+kline_groups = 8

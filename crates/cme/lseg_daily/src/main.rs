@@ -43,7 +43,16 @@ struct Workers {
     parse: usize,
     export: usize,
     status: usize,
+    /// Aggregation workers inside one lseg_kline run.
     kline: usize,
+    /// lseg_kline runs (one per year/product group) in parallel; CPU use is
+    /// about kline_groups x kline (user budget 2026-11-16: 18 cores).
+    #[serde(default = "one")]
+    kline_groups: usize,
+}
+
+fn one() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,6 +251,15 @@ impl Ctx<'_> {
     /// Runs one subprocess, appending its output to `log`.
     fn run(&mut self, step: &'static str, bin: &str, args: &[String], log: &Path) -> Result<()> {
         let t = Instant::now();
+        let r = run_tool(self.cfg, &self.bin(bin), bin, args, log);
+        self.t.add(step, t.elapsed().as_secs_f64());
+        r
+    }
+}
+
+/// One tool subprocess (optionally under `nice`), output appended to `log`.
+fn run_tool(cfg: &Config, exe: &Path, bin: &str, args: &[String], log: &Path) -> Result<()> {
+    {
         if let Some(p) = log.parent() {
             fs::create_dir_all(p)?;
         }
@@ -252,14 +270,12 @@ impl Ctx<'_> {
             Utc::now().to_rfc3339(),
             args.join(" ")
         )?;
-        let mut cmd = if self.cfg.nice > 0 {
+        let mut cmd = if cfg.nice > 0 {
             let mut c = Command::new("nice");
-            c.arg("-n")
-                .arg(self.cfg.nice.to_string())
-                .arg(self.bin(bin));
+            c.arg("-n").arg(cfg.nice.to_string()).arg(exe);
             c
         } else {
-            Command::new(self.bin(bin))
+            Command::new(exe)
         };
         let status = cmd
             .args(args)
@@ -268,7 +284,6 @@ impl Ctx<'_> {
             .stderr(f.try_clone()?)
             .status()
             .with_context(|| format!("spawn {bin}"))?;
-        self.t.add(step, t.elapsed().as_secs_f64());
         ensure!(
             status.success(),
             "{bin} exited with {status}; log {}\n{}",
@@ -1149,12 +1164,23 @@ fn run_kline(ctx: &mut Ctx, st: &mut State) -> Result<KlineReport> {
     )?;
     let mut failed_products = BTreeSet::new();
     let mut rows = Vec::new();
+    // One job per (year, product) group, each with its own work dir and log
+    // so several lseg_kline runs can go in parallel (`workers.kline_groups`).
+    struct GroupJob<'g> {
+        key: String,
+        name: String,
+        news: &'g GroupNews,
+        args: Vec<String>,
+        replaced_log: PathBuf,
+        log: PathBuf,
+    }
+    let mut jobs = Vec::new();
     for ((year, product), news) in &groups {
         let key = format!("{year}:{product}");
-        let replaced_log = work.join(format!(
-            "replaced_{year}_{}.jsonl",
-            publish::component(product)
-        ));
+        let gdir = work
+            .join("groups")
+            .join(format!("{year}_{}", publish::component(product)));
+        let replaced_log = gdir.join("replaced.jsonl");
         let mut args = vec![
             "run".into(),
             "--project".into(),
@@ -1164,7 +1190,7 @@ fn run_kline(ctx: &mut Ctx, st: &mut State) -> Result<KlineReport> {
             "--cache".into(),
             cfg.kline_cache.display().to_string(),
             "--work".into(),
-            work.display().to_string(),
+            gdir.display().to_string(),
             "--output".into(),
             cfg.delivery_root.display().to_string(),
             "--year".into(),
@@ -1193,11 +1219,48 @@ fn run_kline(ctx: &mut Ctx, st: &mut State) -> Result<KlineReport> {
             args.push("--compare-from".into());
             args.push(from.format("%Y-%m-%d").to_string());
         }
-        let name = format!("{year}/{product}");
-        let result = ctx.run("K线", "lseg_kline", &args, &log);
+        jobs.push(GroupJob {
+            key,
+            name: format!("{year}/{product}"),
+            news,
+            args,
+            replaced_log,
+            log: gdir.join("kline.log"),
+        });
+    }
+    let exe = ctx.bin("lseg_kline");
+    let parallel = cfg.workers.kline_groups.clamp(1, 16);
+    let started = Instant::now();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<Result<()>>>> =
+        jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..parallel.min(jobs.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(job) = jobs.get(i) else { break };
+                let r = run_tool(cfg, &exe, "lseg_kline", &job.args, &job.log);
+                eprintln!(
+                    "lseg-daily: K线 {} {}",
+                    job.name,
+                    if r.is_ok() { "ok" } else { "failed" }
+                );
+                *results[i].lock().unwrap() = Some(r);
+            });
+        }
+    });
+    ctx.t.add("K线", started.elapsed().as_secs_f64());
+    for (job, result) in jobs.iter().zip(results) {
+        let result = result.into_inner().unwrap().context("group not run")?;
+        let (news, replaced_log, name, key) = (
+            job.news,
+            &job.replaced_log,
+            job.name.clone(),
+            job.key.clone(),
+        );
         // Replacements already happened even if the group failed later.
         if replaced_log.exists() {
-            for line in fs::read_to_string(&replaced_log)?.lines() {
+            for line in fs::read_to_string(replaced_log)?.lines() {
                 let v: Value = serde_json::from_str(line)?;
                 let path = v["path"].as_str().unwrap_or_default().to_string();
                 let day = Path::new(&path)

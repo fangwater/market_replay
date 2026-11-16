@@ -4,8 +4,7 @@
 //!   GET  /api/admin/log/{service|job}/{name}?bytes=   log tail (text)
 //!   POST /api/admin/jobs/{name}/run        queue a job now
 //!   POST /api/admin/services/{name}/restart
-//! POST requires a loopback client, or header `X-Admin-Token` equal to the
-//! `MARKET_REPLAY_ADMIN_TOKEN` environment variable when that is set.
+//! POST is open to every intranet client (user decision 2026-11-16: no token).
 
 use crate::manager::{recent_runs, Manager};
 use crate::process;
@@ -20,19 +19,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 type St = State<Arc<Manager>>;
-
-fn authorized(addr: &SocketAddr, headers: &HeaderMap) -> bool {
-    if addr.ip().is_loopback() {
-        return true;
-    }
-    match std::env::var("MARKET_REPLAY_ADMIN_TOKEN") {
-        Ok(t) if !t.is_empty() => headers
-            .get("x-admin-token")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v == t),
-        _ => false,
-    }
-}
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(json!({"error": msg.into()}))).into_response()
@@ -85,9 +71,7 @@ async fn run_job(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
-    if !authorized(&addr, &headers) {
-        return err(StatusCode::FORBIDDEN, "admin token required");
-    }
+    eprintln!("market-replay-server: admin run job {name} requested by {addr}");
     match m.enqueue(&name, "manual", None) {
         Ok(true) => Json(json!({"queued": name})).into_response(),
         Ok(false) => {
@@ -103,9 +87,7 @@ async fn restart_service(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
-    if !authorized(&addr, &headers) {
-        return err(StatusCode::FORBIDDEN, "admin token required");
-    }
+    eprintln!("market-replay-server: admin restart service {name} requested by {addr}");
     match m.restart_service(&name) {
         Ok(()) => Json(json!({"restarting": name})).into_response(),
         Err(e) => err(StatusCode::NOT_FOUND, e),

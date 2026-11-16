@@ -589,7 +589,6 @@ function renderContract(m, d, year) {
 
 // ---------------------------------------------------------------- admin (market-replay-server)
 let adminStatus = null, adminError = "", adminRuns = [], logTarget = null;
-const TOKEN_KEY = "market_replay_admin_token";
 async function loadAdmin(withRuns) {
   try {
     const r = await fetch(BASE + "api/admin/status");
@@ -614,8 +613,7 @@ function renderAdmin() {
     return;
   }
   const s = adminStatus;
-  let h = `<div class="panel"><h2>常驻服务 <span class="muted" style="font-weight:400;font-size:12px">服务器时间 ${localTime(s.now)}</span>
-    <span style="margin-left:auto;font-weight:400;font-size:12px">管理令牌 <input class="token" id="token" type="password" placeholder="本机访问无需填写" value="${esc(sessionStorage.getItem(TOKEN_KEY) || "")}"></span></h2>
+  let h = `<div class="panel"><h2>常驻服务 <span class="muted" style="font-weight:400;font-size:12px">服务器时间 ${localTime(s.now)}</span></h2>
     <table><tr><th>名称</th><th>说明</th><th>状态</th><th class="n">PID</th><th>启动时间</th><th class="n">重启次数</th><th>上次退出</th><th></th></tr>`;
   for (const v of s.services) {
     h += `<tr><td>${esc(v.name)}</td><td>${esc(v.description)}</td><td>${svcBadge(v)}</td><td class="n">${v.pid ?? "–"}</td><td>${localTime(v.started_at)}</td><td class="n">${v.restarts}</td>` +
@@ -638,7 +636,6 @@ function renderAdmin() {
       `<td><button class="btn" data-log="job/${esc(r.job)}">日志</button></td></tr>`;
   }
   $("admin").innerHTML = h + `</table></div></div>`;
-  $("token").oninput = () => sessionStorage.setItem(TOKEN_KEY, $("token").value);
   document.querySelectorAll("[data-log]").forEach((el) => el.onclick = () => showLog(el.dataset.log));
   document.querySelectorAll("[data-run]").forEach((el) => el.onclick = () => adminPost(`api/admin/jobs/${encodeURIComponent(el.dataset.run)}/run`, `立即运行任务 ${el.dataset.run}？`));
   document.querySelectorAll("[data-restart]").forEach((el) => el.onclick = () => adminPost(`api/admin/services/${encodeURIComponent(el.dataset.restart)}/restart`,
@@ -646,14 +643,10 @@ function renderAdmin() {
 }
 async function adminPost(path, question) {
   if (!confirm(question)) return;
-  const headers = {};
-  const t = sessionStorage.getItem(TOKEN_KEY) || ($("token") && $("token").value) || "";
-  if (t) headers["X-Admin-Token"] = t;
   try {
-    const r = await fetch(BASE + path, { method: "POST", headers });
+    const r = await fetch(BASE + path, { method: "POST" });
     const j = await r.json().catch(() => ({}));
-    if (r.status === 403) alert("被拒绝：非本机访问需要填写管理令牌（MARKET_REPLAY_ADMIN_TOKEN）。");
-    else if (!r.ok) alert("失败：" + (j.error || r.status));
+    if (!r.ok) alert("失败：" + (j.error || r.status));
     else alert(j.queued ? `已加入队列：${j.queued}` : j.restarting ? `正在重启：${j.restarting}` : (j.note === "already queued or running" ? "已在排队或运行中" : JSON.stringify(j)));
   } catch (e) { alert("请求失败：" + e.message); }
   await loadAdmin(true); renderAdmin();
