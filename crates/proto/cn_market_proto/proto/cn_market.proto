@@ -12,6 +12,43 @@ service CnFuturesMarket {
   rpc GetMinuteBars(GetMinuteBarsRequest) returns (GetMinuteBarsResponse);
   // Which trading days are available.
   rpc GetDataState(GetDataStateRequest) returns (DataState);
+  // Durable intraday MDL frames, in native channel order. A bounded replay
+  // ends at a fixed live watermark; clients overlap it with their ZMQ buffer.
+  rpc StreamIntradayFrames(GetIntradayFramesRequest) returns (stream IntradayFrameBatch);
+}
+
+message GetIntradayFramesRequest {
+  Exchange exchange = 1;
+  string contract = 2;
+  uint32 trading_day = 3;
+  // Last closed historical minute's end. Coverage must bridge this point.
+  int64 historical_end_ms = 4;
+  // Opaque native-order cursor returned by an earlier complete batch.
+  string after_cursor = 5;
+}
+
+message IntradayFrame {
+  // Exact `<topic> || <CSV original row>` bytes. No synthetic quotes.
+  bytes payload = 1;
+  string cursor = 2;
+  uint64 received_us = 3;
+}
+
+message IntradayCoverage {
+  bool ready = 1;
+  uint64 source_generation = 2;
+  uint64 connected_since_us = 3;
+  uint64 last_live_received_us = 4;
+  int64 disk_overlap_us = 5;
+  string reason = 6;
+}
+
+message IntradayFrameBatch {
+  repeated IntradayFrame frames = 1;
+  string next_cursor = 2;
+  // Final marker for this fixed snapshot. Required before any live handoff.
+  bool complete = 3;
+  IntradayCoverage coverage = 4;
 }
 
 enum Exchange {

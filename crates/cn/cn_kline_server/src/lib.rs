@@ -26,6 +26,7 @@ use std::sync::{Arc, RwLock};
 use tonic::{Request, Response, Status};
 
 pub mod dominant;
+pub mod intraday;
 
 /// A time-range request may span at most this many calendar days.
 const MAX_RANGE_DAYS: i64 = 31;
@@ -48,6 +49,8 @@ pub struct Config {
     /// Directory with `<exchange>_dominant.csv` from the daily roll replay.
     #[serde(default)]
     pub roll_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub intraday: Option<intraday::Config>,
 }
 
 impl Config {
@@ -241,8 +244,17 @@ struct Metadata {
 }
 
 struct Service {
+    intraday: Option<Arc<intraday::Cache>>,
     cfg: Config,
     meta: Arc<RwLock<Metadata>>,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        if let Some(cache) = &self.intraday {
+            cache.stop();
+        }
+    }
 }
 
 impl Service {
@@ -467,6 +479,20 @@ fn book5(b: &cn_futures_core::baseline_1min::Book5) -> cn_market_proto::Book5 {
 
 #[tonic::async_trait]
 impl CnFuturesMarket for Grpc {
+    type StreamIntradayFramesStream =
+        tokio_stream::wrappers::ReceiverStream<Result<cn_market_proto::IntradayFrameBatch, Status>>;
+    async fn stream_intraday_frames(
+        &self,
+        request: Request<cn_market_proto::GetIntradayFramesRequest>,
+    ) -> Result<Response<Self::StreamIntradayFramesStream>, Status> {
+        let cache = self
+            .0
+            .intraday
+            .clone()
+            .ok_or_else(|| Status::unavailable("intraday cache disabled"))?;
+        cache.stream(request.into_inner()).await.map(Response::new)
+    }
+
     async fn get_minute_bars(
         &self,
         request: Request<GetMinuteBarsRequest>,
@@ -541,7 +567,15 @@ pub async fn components(cfg: Config) -> Result<Components> {
         }
         None => None,
     };
-    let grpc = CnFuturesMarketServer::new(Grpc(Arc::new(Service { cfg, meta })));
+    let intraday = match cfg.intraday.clone() {
+        Some(config) => Some(intraday::Cache::start(config).await?),
+        None => None,
+    };
+    let grpc = CnFuturesMarketServer::new(Grpc(Arc::new(Service {
+        cfg,
+        meta,
+        intraday,
+    })));
     Ok(Components {
         grpc,
         http,
