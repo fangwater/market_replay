@@ -82,6 +82,63 @@ message MinuteBar {
   // the causal prior at open_time). Unset when the minute had no two-sided
   // book.
   optional double mid_price = 14;
+
+  // ---- Remaining baseline_data_1min columns (2026-11-16). Same values as the
+  // parquet; turnover is CNY with the multiplier, prices are quote units. All
+  // splits come from differencing adjacent snapshots' cumulative volume /
+  // turnover into one inferred interval trade; the side is the snapshot
+  // aggressor inference, unknown sides split 50/50.
+  // Last-print time-weighted price inside the minute.
+  optional double twap = 15;
+  double buy_volume_lots = 16;
+  double sell_volume_lots = 17;
+  double buy_turnover_cny = 18;
+  double sell_turnover_cny = 19;
+  optional double buy_vwap = 20;
+  optional double sell_vwap = 21;
+  // Snapshot intervals classified buy / sell (not real trade counts).
+  double buy_snapshot_trades = 22;
+  double sell_snapshot_trades = 23;
+  // turnover_cny / snapshot_trades.
+  double avg_interval_turnover_cny = 24;
+  double net_buy_turnover_cny = 25;
+  double net_buy_volume_lots = 26;
+  // net_buy_turnover_cny / turnover_cny.
+  optional double net_buy_pct = 27;
+  SizeBuckets size_buckets = 28;
+  // Last two-sided 5-level book inside the minute; unset if none.
+  optional Book5 book = 29;
+}
+
+// Interval-turnover classes, NOT real order sizes: each inferred interval
+// trade is classed by its turnover against the product's P50 / P90 of
+// interval turnover over the whole Shanghai calendar month (>= P90 large,
+// [P50, P90) medium, < P50 small). Thresholds use the full month, so in the
+// archive they are not causal for days before month end.
+message SizeBuckets {
+  double large_turnover_cny = 1;
+  double medium_turnover_cny = 2;
+  double small_turnover_cny = 3;
+  double large_buy_cny = 4;
+  double large_sell_cny = 5;
+  double medium_buy_cny = 6;
+  double medium_sell_cny = 7;
+  double small_buy_cny = 8;
+  double small_sell_cny = 9;
+  double net_buy_large_cny = 10;
+  double net_buy_medium_cny = 11;
+  double net_buy_small_cny = 12;
+}
+
+message BookLevel {
+  optional double price = 1;
+  optional double volume_lots = 2;
+}
+
+// Five levels each, index 0 = best.
+message Book5 {
+  repeated BookLevel bids = 1;
+  repeated BookLevel asks = 2;
 }
 
 message GetMinuteBarsResponse {

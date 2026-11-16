@@ -16,8 +16,8 @@ use cn_futures_l2::export_1min::read_day_parquet;
 use cn_futures_l2::multipliers::{load_multiplier_catalog, ProductMultiplier};
 use cn_market_proto::cn_futures_market_server::{CnFuturesMarket, CnFuturesMarketServer};
 use cn_market_proto::{
-    get_minute_bars_request::Range, Contract, DataState, Exchange, GetDataStateRequest,
-    GetMinuteBarsRequest, GetMinuteBarsResponse, MinuteBar,
+    get_minute_bars_request::Range, BookLevel, Contract, DataState, Exchange, GetDataStateRequest,
+    GetMinuteBarsRequest, GetMinuteBarsResponse, MinuteBar, SizeBuckets,
 };
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -371,7 +371,35 @@ impl Service {
                     vwap,
                     snapshot_trades: r.count.max(0.0) as u32,
                     widened,
-                    mid_price: r.mid_price.filter(|m| m.is_finite()),
+                    mid_price: finite(r.mid_price),
+                    twap: finite(r.twap),
+                    buy_volume_lots: r.buy_volume,
+                    sell_volume_lots: r.sell_volume,
+                    buy_turnover_cny: r.buy_amount,
+                    sell_turnover_cny: r.sell_amount,
+                    buy_vwap: finite(r.buy_vwap),
+                    sell_vwap: finite(r.sell_vwap),
+                    buy_snapshot_trades: r.buy_count,
+                    sell_snapshot_trades: r.sell_count,
+                    avg_interval_turnover_cny: r.avg_amount,
+                    net_buy_turnover_cny: r.net_buy_amount,
+                    net_buy_volume_lots: r.net_buy_volume,
+                    net_buy_pct: finite(r.net_buy_pct),
+                    size_buckets: Some(SizeBuckets {
+                        large_turnover_cny: r.large_order,
+                        medium_turnover_cny: r.medium_order,
+                        small_turnover_cny: r.small_order,
+                        large_buy_cny: r.large_buy,
+                        large_sell_cny: r.large_sell,
+                        medium_buy_cny: r.medium_buy,
+                        medium_sell_cny: r.medium_sell,
+                        small_buy_cny: r.small_buy,
+                        small_sell_cny: r.small_sell,
+                        net_buy_large_cny: r.net_buy_large,
+                        net_buy_medium_cny: r.net_buy_medium,
+                        net_buy_small_cny: r.net_buy_small,
+                    }),
+                    book: r.book.as_ref().map(book5),
                 });
             }
         }
@@ -391,6 +419,25 @@ impl Service {
 }
 
 struct Grpc(Arc<Service>);
+
+fn finite(v: Option<f64>) -> Option<f64> {
+    v.filter(|x| x.is_finite())
+}
+
+fn book5(b: &cn_futures_core::baseline_1min::Book5) -> cn_market_proto::Book5 {
+    let side = |p: &[Option<f64>; 5], v: &[Option<f64>; 5]| {
+        (0..5)
+            .map(|i| BookLevel {
+                price: finite(p[i]),
+                volume_lots: finite(v[i]),
+            })
+            .collect()
+    };
+    cn_market_proto::Book5 {
+        bids: side(&b.bid_prices, &b.bid_sizes),
+        asks: side(&b.ask_prices, &b.ask_sizes),
+    }
+}
 
 #[tonic::async_trait]
 impl CnFuturesMarket for Grpc {

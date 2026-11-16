@@ -14,6 +14,7 @@ axum = "0.8"
 chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive"] }
+cn_futures_core = { path = "../../core/cn_futures_core" }
 cn_futures_l2 = { path = "../cn_futures_l2" }
 cn_market_proto = { path = "../../proto/cn_market_proto" }
 csv = "1.3"
