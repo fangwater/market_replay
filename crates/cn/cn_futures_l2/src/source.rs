@@ -358,7 +358,7 @@ pub fn source_queue_files_for_day(
     Ok(files)
 }
 
-fn cell<'a>(record: &'a StringRecord, index: Option<usize>) -> &'a str {
+fn cell(record: &StringRecord, index: Option<usize>) -> &str {
     index.and_then(|value| record.get(value)).unwrap_or("")
 }
 

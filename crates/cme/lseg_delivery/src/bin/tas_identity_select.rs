@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             write!(output, "{number}:")?;
             output.write_all(&line)?;
         }
-        if number % 100_000_000 == 0 {
+        if number.is_multiple_of(100_000_000) {
             eprintln!("source_lines={number} source_bytes={bytes}");
         }
     }

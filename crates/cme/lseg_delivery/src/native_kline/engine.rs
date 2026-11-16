@@ -1233,7 +1233,7 @@ fn group(
                 status_rows += 1;
             }
             event.advance(i);
-            if status_rows > 0 && status_rows % 100_000_000 == 0 {
+            if status_rows > 0 && status_rows.is_multiple_of(100_000_000) {
                 eprintln!("{year}/{product}/{ric}: {status_rows} status messages streamed");
             }
         }
@@ -1410,13 +1410,13 @@ fn group(
                     decoded,
                     qualifiers: e.qualifiers.into(),
                 };
-                let (b, row) = reader.next()?.context("sample missing status row")?;
+                let (b, row) = reader.next_row()?.context("sample missing status row")?;
                 io::compare_status(b, row, product, &ric, &expected)?;
                 count += 1;
                 raw.advance(i)
             }
             ensure!(
-                reader.next()?.is_none() && count == file.rows,
+                reader.next_row()?.is_none() && count == file.rows,
                 "sample status row count mismatch"
             );
         }
@@ -1627,7 +1627,7 @@ pub fn check(
     let mut previous = State::Unknown;
     for file in &files {
         let mut read = io::Rows::new(&file.path)?;
-        while let Some((batch, row)) = read.next()? {
+        while let Some((batch, row)) = read.next_row()? {
             let i = source.next_index()?.context("sample lost source row")?;
             let raw = source.peek(i)?;
             let decoded = decoder.decode(raw.qualifiers, previous);

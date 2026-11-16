@@ -66,7 +66,7 @@ pub fn encode_source_order(part: u16, shard: u32, source_row: u64) -> Result<u64
 }
 
 pub fn encode_ll2_minute_key(key: &Ll2MinuteKey) -> Result<[u8; LL2_MINUTE_KEY_LEN]> {
-    if key.minute_utc_ns == 0 || key.minute_utc_ns % NS_PER_MINUTE != 0 {
+    if key.minute_utc_ns == 0 || !key.minute_utc_ns.is_multiple_of(NS_PER_MINUTE) {
         bail!("LL2 minute key timestamp must be a nonzero UTC minute in ns");
     }
     let mut out = [0u8; LL2_MINUTE_KEY_LEN];

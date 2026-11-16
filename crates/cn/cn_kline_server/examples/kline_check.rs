@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
     let (endpoint, root, day) = (a[1].clone(), a[2].clone(), a[3].parse::<u32>()?);
     let mut client = CnFuturesMarketClient::connect(endpoint).await?;
     let (mut contracts, mut bars, mut widened, mut bad, mut errors) = (0, 0, 0, 0, 0);
+    let (mut with_mid, mut without_mid, mut bad_mid) = (0u64, 0u64, 0u64);
     for (dir, ex) in [
         ("ccfx", Exchange::Cffex),
         ("xsge", Exchange::Shfe),
@@ -65,6 +66,20 @@ async fn main() -> anyhow::Result<()> {
                         && vw >= b.low - tol
                         && vw <= b.high + tol
                         && [b.open, b.high, b.low, b.close].iter().all(|p| on_tick(*p));
+                    match b.mid_price {
+                        Some(m) => {
+                            with_mid += 1;
+                            // Mid is a half-tick grid price, positive and finite.
+                            let t = 2.0 * m / c.price_tick;
+                            if !(m.is_finite()
+                                && m > 0.0
+                                && (t - t.round()).abs() <= t.abs().max(1.0) * 1e-9)
+                            {
+                                bad_mid += 1;
+                            }
+                        }
+                        None => without_mid += 1,
+                    }
                     if !ok {
                         bad += 1;
                         if bad <= 5 {
@@ -77,5 +92,6 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("day {day}: contracts {contracts} bars {bars} widened {widened} ({:.2}%) cta_check_failures {bad} rpc_errors {errors}",
              widened as f64 * 100.0 / bars.max(1) as f64);
+    println!("mid_price: set {with_mid} unset {without_mid} off_half_tick {bad_mid}");
     Ok(())
 }

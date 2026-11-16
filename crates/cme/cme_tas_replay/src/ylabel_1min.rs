@@ -135,7 +135,7 @@ impl Fenwick {
         let mut position = index + 1;
         while position < self.tree.len() {
             self.tree[position] = (self.tree[position] as i32 + delta) as u32;
-            position += position & position.wrapping_neg();
+            position += position.isolate_lowest_one();
         }
     }
 

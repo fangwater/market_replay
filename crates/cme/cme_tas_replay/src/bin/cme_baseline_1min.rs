@@ -57,7 +57,8 @@ const DEFAULT_TAS_SECONDARY: &str =
 const DEFAULT_LL2_SECONDARY: &str =
     "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_ll2_1min_rocksdb_all_products.baseline.secondary";
 const DEFAULT_PSQL: &str = "/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql";
-const DEFAULT_PG_SOCKET: &str = "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run";
+const DEFAULT_PG_SOCKET: &str =
+    "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run";
 const PERIOD_META_PREFIX: &str = "period:";
 const NS_PER_SEC: u64 = 1_000_000_000;
 const HALF_DAY_NS: u64 = 43_200 * NS_PER_SEC;
@@ -909,9 +910,9 @@ fn process_job(
             continue;
         }
         let (trades, _, trade_timing) =
-            scan_trades_audited(tas, &tas_cf, &grid, None, args.trade_time_basis)?;
+            scan_trades_audited(tas, &tas_cf, grid, None, args.trade_time_basis)?;
         let (specials, invalid_specials, _, special_timing) =
-            scan_specials(tas, &tas_cf, &grid, None, args.trade_time_basis)?;
+            scan_specials(tas, &tas_cf, grid, None, args.trade_time_basis)?;
         audit.trade_time_basis = args.trade_time_basis;
         audit.trade_timing.merge(trade_timing);
         audit.special_timing.merge(special_timing);

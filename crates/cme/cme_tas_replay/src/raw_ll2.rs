@@ -275,7 +275,11 @@ pub struct RawSnapshot {
 }
 impl RawSnapshot {
     pub fn key(&self) -> Result<[u8; 24]> {
-        if self.bucket_ns == 0 || self.bucket_ns % (u64::from(self.seconds) * 1_000_000_000) != 0 {
+        if self.bucket_ns == 0
+            || !self
+                .bucket_ns
+                .is_multiple_of(u64::from(self.seconds) * 1_000_000_000)
+        {
             bail!("invalid Raw LL2 bucket key");
         }
         let mut key = [0; 24];
@@ -378,7 +382,8 @@ impl Extractor {
         state.value.source_ts_utc_ns = message.ts;
         state.value.source_order = message.order;
         state.value.gmt_offset_minutes = message.offset;
-        for seconds in [self.frequency] {
+        {
+            let seconds = self.frequency;
             let ns = u64::from(seconds) * 1_000_000_000;
             let snapshot = RawSnapshot {
                 ric: message.ric.clone(),

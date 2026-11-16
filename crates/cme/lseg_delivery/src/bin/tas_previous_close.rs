@@ -78,7 +78,7 @@ fn main() -> Result<()> {
             ro.fill_cache(false);
             ro.set_verify_checksums(true);
             let mut it = db.raw_iterator_cf_opt(cf, ro);
-            it.seek_for_prev(&upper);
+            it.seek_for_prev(upper);
             if it.key().is_some_and(|key| key >= upper.as_slice()) {
                 it.prev();
             }

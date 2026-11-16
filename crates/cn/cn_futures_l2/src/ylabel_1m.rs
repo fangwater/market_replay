@@ -323,7 +323,7 @@ mod tests {
             },
         ];
         let prices = causal_prices_from_minutes(&rows);
-        assert!(prices.get(&60).is_some());
-        assert!(prices.get(&120).is_none());
+        assert!(prices.contains_key(&60));
+        assert!(!prices.contains_key(&120));
     }
 }

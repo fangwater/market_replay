@@ -643,10 +643,6 @@ impl RicStream {
         Ok(true)
     }
 
-    fn flush_day(&mut self) -> Result<()> {
-        self.flush_day_inner(false)
-    }
-
     fn flush_day_inner(&mut self, as_tail_sidecar: bool) -> Result<()> {
         let Some(mut day) = self.day.take() else {
             self.day_events.clear();
@@ -753,26 +749,6 @@ fn read_header(path: &Path) -> Result<StringRecord> {
         bail!("{} missing #RIC header", path.display());
     }
     Ok(headers)
-}
-
-fn load_active_rics(period: &str, data_root: &Path) -> Result<BTreeSet<String>> {
-    let path = period_dir(data_root, period).join("merged-Report.csv.gz");
-    let file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
-    let decoder = MultiGzDecoder::new(BufReader::new(file));
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(decoder);
-    let mut out = BTreeSet::new();
-    for rec in reader.deserialize::<BTreeMap<String, String>>() {
-        let rec = rec?;
-        let ric = rec.get("#RIC").map(|s| s.as_str()).unwrap_or("");
-        let status = rec.get("Status").map(|s| s.as_str()).unwrap_or("");
-        let count = rec.get("Count").map(|s| s.as_str()).unwrap_or("");
-        if !ric.is_empty() && status == "Active" && count != "" && count != "0" {
-            out.insert(ric.to_string());
-        }
-    }
-    Ok(out)
 }
 
 fn log_line(msg: &str) {
@@ -894,7 +870,7 @@ fn process_job(
             let volume = parse_f64(rec.get(idx.volume).unwrap_or("").trim());
             current.as_mut().unwrap().on_trade(ts_ns, price, volume)?;
         }
-        if progress_every > 0 && rows % progress_every == 0 {
+        if progress_every > 0 && rows.is_multiple_of(progress_every) {
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             log_line(&format!(
                 "progress period={} part={} rows={} ric={} rows_per_s={:.0}",

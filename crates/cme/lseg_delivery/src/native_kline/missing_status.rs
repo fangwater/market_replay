@@ -346,13 +346,13 @@ pub(super) fn group_status(
                     decoded,
                     qualifiers: event.qualifiers.into(),
                 };
-                let (batch, row) = reader.next()?.context("missing status-only row")?;
+                let (batch, row) = reader.next_row()?.context("missing status-only row")?;
                 io::compare_status(batch, row, product, &ric, &expected)?;
                 checked += 1;
                 raw.advance(i);
             }
             ensure!(
-                reader.next()?.is_none() && checked == file.rows,
+                reader.next_row()?.is_none() && checked == file.rows,
                 "status-only sample count mismatch"
             );
         }

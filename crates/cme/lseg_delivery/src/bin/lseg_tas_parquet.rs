@@ -602,12 +602,12 @@ fn export_cf(db: &DB, name: &str, a: &Args, progress: &AtomicU64) -> Result<CfRe
                         .unwrap()
                         .flush()?;
                 }
-                if !daily_sinks.contains_key(&day) {
+                if let std::collections::btree_map::Entry::Vacant(e) = daily_sinks.entry(day) {
                     let date = utc_date(row.ts_utc_ns)?;
                     if !date.starts_with(&a.year.to_string()) {
                         bail!("UTC day outside requested year");
                     }
-                    daily_sinks.insert(day, Sink::new(a, kind, row.ric.clone(), Some(date)));
+                    e.insert(Sink::new(a, kind, row.ric.clone(), Some(date)));
                 }
                 daily_sinks.get_mut(&day).unwrap().add(row, value)?;
                 previous_day = Some(day);

@@ -1438,7 +1438,7 @@ fn run(args: &Args) -> Result<()> {
                     );
                 }
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done % 25 == 0 || done == jobs.len() {
+                if done.is_multiple_of(25) || done == jobs.len() {
                     eprintln!(
                         "cme_tas_export_backtest_1s progress={done}/{} elapsed_s={:.1}",
                         jobs.len(),

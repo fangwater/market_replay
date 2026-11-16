@@ -402,14 +402,16 @@ pub fn extract(day: &Day) -> Result<Extract> {
         }
         let minute = (available / (60 * NS)) as i64 * 60;
         if let Some(prior) = current_minute {
-            if prior != minute && prior >= day.open_ts && prior < day.close_ts {
-                if invalid_since.is_none() {
-                    book.snapshot(
-                        &mut minutes[((prior - day.open_ts) / 60) as usize],
-                        last_available,
-                        source_row,
-                    );
-                }
+            if prior != minute
+                && prior >= day.open_ts
+                && prior < day.close_ts
+                && invalid_since.is_none()
+            {
+                book.snapshot(
+                    &mut minutes[((prior - day.open_ts) / 60) as usize],
+                    last_available,
+                    source_row,
+                );
             }
         }
         let has_gap = pending.iter().any(|r| r.flags & 4 != 0);
@@ -465,14 +467,12 @@ pub fn extract(day: &Day) -> Result<Extract> {
         "file ends inside an event within/before the session"
     );
     if let Some(prior) = current_minute {
-        if prior >= day.open_ts && prior < day.close_ts {
-            if invalid_since.is_none() {
-                book.snapshot(
-                    &mut minutes[((prior - day.open_ts) / 60) as usize],
-                    last_available,
-                    source_row,
-                );
-            }
+        if prior >= day.open_ts && prior < day.close_ts && invalid_since.is_none() {
+            book.snapshot(
+                &mut minutes[((prior - day.open_ts) / 60) as usize],
+                last_available,
+                source_row,
+            );
         }
     }
     if let Some(start) = invalid_since {

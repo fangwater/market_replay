@@ -401,8 +401,8 @@ fn state_before(
     cache: &mut BTreeMap<usize, Option<String>>,
 ) -> Result<Option<String>> {
     for i in (0..=index).rev() {
-        if !cache.contains_key(&i) {
-            cache.insert(i, last_state(&days[i].join("session_status.parquet"), ric)?);
+        if let std::collections::btree_map::Entry::Vacant(e) = cache.entry(i) {
+            e.insert(last_state(&days[i].join("session_status.parquet"), ric)?);
         }
         if let Some(state) = &cache[&i] {
             return Ok(Some(state.clone()));

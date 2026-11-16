@@ -354,6 +354,8 @@ const MISSING_FIELD_RANGE: FieldRange = FieldRange {
     end: MISSING_FIELD_OFFSET,
 };
 
+// Simple stays inline on purpose: boxing would allocate per parsed row.
+#[allow(clippy::large_enum_variant)]
 enum DataRecord {
     Simple {
         ranges: [FieldRange; PROJECTED_FIELD_CAPACITY],
@@ -601,12 +603,10 @@ impl UnparsedSink {
                 error!("cme_tas_replay_all further unparsed rows go only to the unparsed file");
             }
         }
-        if size >= UNPARSED_SIZE_ABORT {
-            if !abort.swap(true, Ordering::Relaxed) {
-                error!(
-                    "cme_tas_replay_all unparsed log reached {size} bytes; aborting at 2GiB for review"
-                );
-            }
+        if size >= UNPARSED_SIZE_ABORT && !abort.swap(true, Ordering::Relaxed) {
+            error!(
+                "cme_tas_replay_all unparsed log reached {size} bytes; aborting at 2GiB for review"
+            );
         }
     }
 }
@@ -956,7 +956,7 @@ fn flush_all_column_families(db: &AllDb, workers: usize) -> Result<usize> {
             db.flush_cf(&cf)
                 .with_context(|| format!("flush column family {name}"))?;
             let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % 100 == 0 || count as usize == names.len() {
+            if count.is_multiple_of(100) || count as usize == names.len() {
                 info!("flushed column families {count}/{}", names.len());
                 eprintln!("flushed column families {count}/{}", names.len());
             }

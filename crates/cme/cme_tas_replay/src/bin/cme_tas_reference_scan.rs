@@ -222,7 +222,7 @@ fn run(args: &Args) -> Result<()> {
             .map(|path| {
                 let result = scan_shard(path);
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % 100 == 0 || count == shards.len() {
+                if count.is_multiple_of(100) || count == shards.len() {
                     eprintln!("cme_tas_reference_scan shards={count}/{}", shards.len());
                 }
                 result

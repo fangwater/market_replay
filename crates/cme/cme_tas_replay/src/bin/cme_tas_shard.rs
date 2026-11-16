@@ -418,7 +418,7 @@ fn shard_source(job: &SourceJob, config: &ShardConfig) -> Result<SourceResult> {
                 None => parse_group(&line, job.group_columns)?,
             });
         }
-        if config.progress_every > 0 && total_rows % config.progress_every == 0 {
+        if config.progress_every > 0 && total_rows.is_multiple_of(config.progress_every) {
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             info!(
                 "cme_tas_shard progress period={} part={} rows={} data_gib={:.2} rows_per_s={:.0} elapsed_s={:.1}",

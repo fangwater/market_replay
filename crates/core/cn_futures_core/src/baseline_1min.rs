@@ -175,7 +175,7 @@ impl SizeBuckets {
 
 /// Linear-interpolated sample quantile, matching numpy.percentile default.
 pub fn linear_percentile(sorted: &[f64], p: f64) -> Option<f64> {
-    if sorted.is_empty() || !(p >= 0.0 && p <= 1.0) {
+    if sorted.is_empty() || !(0.0..=1.0).contains(&p) {
         return None;
     }
     if sorted.len() == 1 {

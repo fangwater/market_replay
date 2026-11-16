@@ -465,7 +465,7 @@ pub fn encode_raw_source_row(record: &StringRecord, expected_columns: usize) -> 
     let column_count = record.len().max(expected_columns);
     let column_count_u32 = u32::try_from(column_count)
         .map_err(|_| anyhow!("source row has too many columns: {column_count}"))?;
-    let bitmap_len = (column_count + 7) / 8;
+    let bitmap_len = column_count.div_ceil(8);
     let bitmap_len_u32 = u32::try_from(bitmap_len)
         .map_err(|_| anyhow!("source row bitmap is too large: {bitmap_len}"))?;
     let mut bitmap = vec![0_u8; bitmap_len];
@@ -500,7 +500,7 @@ pub fn decode_raw_source_row(value: &[u8]) -> Result<Vec<String>> {
     }
     let column_count = u32::from_le_bytes(value[2..6].try_into()?) as usize;
     let bitmap_len = u32::from_le_bytes(value[6..10].try_into()?) as usize;
-    let expected_bitmap_len = (column_count + 7) / 8;
+    let expected_bitmap_len = column_count.div_ceil(8);
     if bitmap_len != expected_bitmap_len {
         bail!("raw source-row bitmap length {bitmap_len} does not match {column_count} columns");
     }
@@ -1057,7 +1057,7 @@ fn replay_job(
                 "Quote" => census.written_quotes += 1,
                 "Correction" => census.written_corrections += 1,
                 "Mkt. Condition" => census.written_statuses += 1,
-                other if other.is_empty() => census.count("type_empty"),
+                "" => census.count("type_empty"),
                 other => census.count(&format!("type:{other}")),
             }
             let route = (|| -> Result<(String, u64)> {

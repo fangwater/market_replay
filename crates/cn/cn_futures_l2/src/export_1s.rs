@@ -82,7 +82,7 @@ pub struct OutRow {
     pub midp: f64,
 }
 
-fn last_depth_before<'a>(depths: &'a [SparseDepth], ts_sec: i64) -> Option<&'a SparseDepth> {
+fn last_depth_before(depths: &[SparseDepth], ts_sec: i64) -> Option<&SparseDepth> {
     let mut lo = 0usize;
     let mut hi = depths.len();
     while lo < hi {

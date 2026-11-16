@@ -793,6 +793,7 @@ fn load_or_build_size_audit(
     let lock_path = path.with_extension("json.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;
@@ -1429,7 +1430,7 @@ fn stream_derived_days(
             .cf_handle(name)
             .context("opened trade column family missing")?;
         let mut iterator = db.raw_iterator_cf(&cf);
-        iterator.seek(&start_key);
+        iterator.seek(start_key);
         let venue_name = if name == instrument_cf {
             String::new()
         } else {
@@ -1895,7 +1896,7 @@ fn main() -> Result<()> {
     ];
     add_l2_columns(&mut baseline_columns, &minute_l2);
     for (index, minute) in minute_data.iter().enumerate() {
-        if let Some(_) = size_thresholds {
+        if size_thresholds.is_some() {
             let (size_total, directional_total) = exact_size_totals(minute)?;
             let directional_amount = minute.exact_directional_amount()?;
             if size_total != minute.amount_nanos || directional_total != directional_amount {

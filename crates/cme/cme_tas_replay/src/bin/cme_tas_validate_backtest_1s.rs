@@ -266,7 +266,7 @@ fn run(args: &Args) -> Result<()> {
             .map(|job| {
                 let result = validate_file(job);
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done % 50 == 0 || done == jobs.len() {
+                if done.is_multiple_of(50) || done == jobs.len() {
                     eprintln!(
                         "cme_tas_validate_backtest_1s progress={done}/{} elapsed_s={:.1}",
                         jobs.len(),

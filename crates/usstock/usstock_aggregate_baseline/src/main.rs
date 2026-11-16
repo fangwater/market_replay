@@ -459,7 +459,7 @@ fn main() -> Result<()> {
                                 .with_context(|| format!("{}", jobs[i].input.display()))?;
                             results.lock().unwrap().push(result);
                             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                            if n % 1000 == 0 {
+                            if n.is_multiple_of(1000) {
                                 eprintln!("completed={n}/{}", jobs.len());
                             }
                         }

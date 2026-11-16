@@ -371,6 +371,7 @@ impl Service {
                     vwap,
                     snapshot_trades: r.count.max(0.0) as u32,
                     widened,
+                    mid_price: r.mid_price.filter(|m| m.is_finite()),
                 });
             }
         }

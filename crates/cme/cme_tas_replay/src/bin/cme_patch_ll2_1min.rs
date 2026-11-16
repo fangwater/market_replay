@@ -510,7 +510,7 @@ mod tests {
             let name = raw_cf(2026, &parse_product(&snapshot.ric).unwrap(), 15)?;
             if db.cf_handle(&name).is_none() {
                 db.create_cf(&name, &Options::default())?;
-                db.create_cf(&format!("q:{name}"), &Options::default())?;
+                db.create_cf(format!("q:{name}"), &Options::default())?;
             }
             let key = snapshot.key()?;
             db.put_cf(
@@ -538,7 +538,6 @@ mod tests {
             .unwrap();
         scanner.finish().unwrap();
         extractor.finish(&mut write).unwrap();
-        drop(write);
         let ts = NaiveDate::from_ymd_opt(2026, 1, 2)
             .unwrap()
             .and_hms_opt(0, 0, 0)
@@ -575,7 +574,7 @@ mod tests {
             let cf = raw_cf(2024, &parse_product(&s.ric).unwrap(), s.seconds)?;
             if db.cf_handle(&cf).is_none() {
                 db.create_cf(&cf, &Options::default())?;
-                db.create_cf(&format!("q:{cf}"), &Options::default())?;
+                db.create_cf(format!("q:{cf}"), &Options::default())?;
             }
             let key = s.key()?;
             db.put_cf(
@@ -600,7 +599,6 @@ mod tests {
             .unwrap();
         scanner.finish().unwrap();
         extractor.finish(&mut write).unwrap();
-        drop(write);
         let ts = 1_704_153_600i64;
         let source = Source {
             db,
@@ -635,7 +633,7 @@ mod tests {
         for i in 0..40 {
             series.push(Series::new(format!("trade_{i}").into(), vec![i as f64; 4]));
         }
-        let mut before = DataFrame::new(series.into_iter().map(Into::into).collect()).unwrap();
+        let mut before = DataFrame::new(series.into_iter().collect()).unwrap();
         ParquetWriter::new(File::create(&input).unwrap())
             .finish(&mut before)
             .unwrap();

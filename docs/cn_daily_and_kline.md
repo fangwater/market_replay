@@ -49,6 +49,7 @@ scripts/start_cn_services.sh   # PM2: cn-futures-kline + cn-futures-daily
 - `MinuteBar`：
   - `snapshot_high/low` 是 parquet 里的原值。
   - `high/low` 会在 tick 网格上扩展到包含 `vwap`：快照每秒 2 或 4 次，会漏掉快照之间的成交和大商所组合腿价成交，而真实成交区间一定包含 VWAP，并且落在 tick 网格上，所以扩展后的值不会超出真实范围。扩展过的 bar 带 `widened = true`。
+  - `mid_price`（2026-11-16 新增，proto 字段 14，optional）：取自 parquet 的 `mid_price`，等于这一分钟内最后一个双边五档快照的 `(bid0 + ask0) / 2`，也就是 bar 收盘时的中间价，不是 `open_time` 时刻的因果值。这一分钟没有双边盘口时不设值。20261116 全部 133,165 根 bar 都有值，并且都落在半 tick 网格上。
 - 元数据（乘数和最小变动价位）每小时刷新一次；刷新失败时保留旧数据。
 
 验证（2026-11-15）：用 `examples/kline_check.rs` 查询 20260826 全部 793 个合约，返回 135,515 根 bar，其中 1,666 根（1.23%）做了扩展。按 cn_futures_cta_manager 的 candle 规则逐根检查（OHLC 为正且有序、成交量与成交额一致、价格落在 tick 网格上、VWAP 在高低价之内），0 根不合格，RPC 错误也是 0。

@@ -22,7 +22,7 @@ impl UsStockSourceRowMsg {
         let column_count = record.len().max(expected_columns);
         let column_count_u32 = u32::try_from(column_count)
             .map_err(|_| anyhow!("source row has too many columns: {column_count}"))?;
-        let bitmap_len = (column_count + 7) / 8;
+        let bitmap_len = column_count.div_ceil(8);
         let bitmap_len_u32 = u32::try_from(bitmap_len)
             .map_err(|_| anyhow!("source row bitmap is too large: {bitmap_len}"))?;
         let mut bitmap = vec![0_u8; bitmap_len];
@@ -136,7 +136,7 @@ fn decode_cells(encoded: &[u8]) -> Result<Vec<String>> {
     }
     let column_count = u32::from_le_bytes(encoded[2..6].try_into()?) as usize;
     let bitmap_len = u32::from_le_bytes(encoded[6..10].try_into()?) as usize;
-    if bitmap_len != (column_count + 7) / 8 {
+    if bitmap_len != column_count.div_ceil(8) {
         bail!("source-row bitmap length does not match column count");
     }
     let mut offset = 10;

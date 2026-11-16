@@ -77,6 +77,11 @@ message MinuteBar {
   // Number of snapshot intervals with a volume increase (not real trade count).
   uint32 snapshot_trades = 12;
   bool widened = 13;
+  // (bid0 + ask0) / 2 of the last two-sided 5-level snapshot inside the
+  // minute (baseline_data_1min mid_price; i.e. the mid at the bar close, not
+  // the causal prior at open_time). Unset when the minute had no two-sided
+  // book.
+  optional double mid_price = 14;
 }
 
 message GetMinuteBarsResponse {

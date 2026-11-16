@@ -552,10 +552,9 @@ pub fn parse_exch_hms_ns(raw: &str) -> Result<u64> {
             .map_err(|err| anyhow!("unhandled Exch Time {raw:?}: {err}"))?
     };
     let secs = u64::from(time.num_seconds_from_midnight());
-    Ok(secs
-        .checked_mul(1_000_000_000)
+    secs.checked_mul(1_000_000_000)
         .and_then(|v| v.checked_add(frac_ns))
-        .ok_or_else(|| anyhow!("Exch Time {raw:?} overflowed"))?)
+        .ok_or_else(|| anyhow!("Exch Time {raw:?} overflowed"))
 }
 
 pub fn parse_price_e9(raw: &str) -> Result<i64> {

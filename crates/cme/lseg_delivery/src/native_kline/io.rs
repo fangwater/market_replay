@@ -96,7 +96,7 @@ impl Rows {
             at: 0,
         })
     }
-    pub fn next(&mut self) -> Result<Option<(&RecordBatch, usize)>> {
+    pub fn next_row(&mut self) -> Result<Option<(&RecordBatch, usize)>> {
         while self.batch.as_ref().is_none_or(|b| self.at >= b.num_rows()) {
             self.batch = self.reader.next().transpose()?;
             self.at = 0;
@@ -890,7 +890,7 @@ pub fn compare_status(
 pub fn verify_kline(path: &Path, expected: &RecordBatch) -> Result<()> {
     let mut actual = Rows::new(path)?;
     for row in 0..expected.num_rows() {
-        let (batch, i) = actual.next()?.context("sample missing kline")?;
+        let (batch, i) = actual.next_row()?.context("sample missing kline")?;
         for column in 0..expected.num_columns() {
             ensure!(
                 batch.column(column).slice(i, 1).to_data()
@@ -900,7 +900,7 @@ pub fn verify_kline(path: &Path, expected: &RecordBatch) -> Result<()> {
             )
         }
     }
-    ensure!(actual.next()?.is_none(), "sample extra kline rows");
+    ensure!(actual.next_row()?.is_none(), "sample extra kline rows");
     Ok(())
 }
 
@@ -1026,8 +1026,8 @@ pub fn compare(left: &Path, right: &Path) -> Result<()> {
     for (left, right) in &pairs {
         let mut a = Rows::new(left)?;
         let mut b = Rows::new(right)?;
-        while let Some((x, i)) = a.next()? {
-            let (y, j) = b.next()?.context("right side has fewer rows")?;
+        while let Some((x, i)) = a.next_row()? {
+            let (y, j) = b.next_row()?.context("right side has fewer rows")?;
             ensure!(x.num_columns() == y.num_columns(), "schema width mismatch");
             for column in 0..x.num_columns() {
                 ensure!(
@@ -1041,7 +1041,7 @@ pub fn compare(left: &Path, right: &Path) -> Result<()> {
             }
             count += 1;
         }
-        ensure!(b.next()?.is_none(), "right side has extra rows");
+        ensure!(b.next_row()?.is_none(), "right side has extra rows");
     }
     println!(
         "matched {count} rows across {} sampled Parquet file pairs",

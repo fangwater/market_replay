@@ -243,7 +243,7 @@ fn replay_staged(db: &mut DB, config: &Config, period: &str) -> Result<Value> {
         if batch.len() >= 16_384 || plan.contested.contains(&(s.seconds, key)) {
             db.write(std::mem::take(&mut batch))?;
         }
-        if processed % 5_000_000 == 0 {
+        if processed.is_multiple_of(5_000_000) {
             let free = raw_ll2_stage::free_bytes(&config.rocksdb_dir)?;
             if free < config.min_free_bytes {
                 bail!("disk reserve reached");
@@ -319,7 +319,6 @@ fn replay_staged(db: &mut DB, config: &Config, period: &str) -> Result<Value> {
         read_result?;
         Ok(())
     })?;
-    drop(output);
     if !batch.is_empty() {
         db.write(batch)?;
     }
@@ -653,7 +652,6 @@ fn run() -> Result<()> {
         scanner.finish()?;
         extractor.finish(&mut output)?;
         scanner.census.depth_messages = extractor.depth_messages;
-        drop(output);
         if let Some(db) = &db {
             if !batch.is_empty() {
                 db.write(std::mem::take(&mut batch))?;

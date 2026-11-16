@@ -256,7 +256,7 @@ fn main() -> Result<()> {
         );
         total += 1;
         volume += u64::from(row.volume);
-        if total % 10_000_000 == 0 {
+        if total.is_multiple_of(10_000_000) {
             eprintln!("{}: {} trades", args.job, total);
         }
         it.next();

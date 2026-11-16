@@ -87,10 +87,7 @@ fn main() -> Result<()> {
                     let mut it = db.raw_iterator_cf_opt(cf, ro);
                     it.seek(low);
                     let first = if let Some(key) = it.key() {
-                        if key.len() == 31
-                            && key[..17] == low[..17]
-                            && key.as_ref() < high.as_slice()
-                        {
+                        if key.len() == 31 && key[..17] == low[..17] && key < high.as_slice() {
                             Some((
                                 u64::from_be_bytes(key[17..25].try_into()?),
                                 u64::from_le_bytes(it.value().unwrap()[20..28].try_into()?),
@@ -111,7 +108,7 @@ fn main() -> Result<()> {
                     }
                     let key = it.key().context("last key")?;
                     ensure!(
-                        key.len() == 31 && key[..17] == low[..17] && key.as_ref() >= low.as_slice(),
+                        key.len() == 31 && key[..17] == low[..17] && key >= low.as_slice(),
                         "last key outside RIC"
                     );
                     let last = (

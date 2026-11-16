@@ -90,9 +90,9 @@ fn main() -> Result<()> {
             .context("date midnight")?
             .and_utc()
             .timestamp();
-        Ok(u64::try_from(seconds)?
+        u64::try_from(seconds)?
             .checked_mul(1_000_000_000)
-            .context("date overflow")?)
+            .context("date overflow")
     };
     let bounds = to_ns(start)?..to_ns(end)?;
     let names = tasdb::list_cfs(&a.db)?;

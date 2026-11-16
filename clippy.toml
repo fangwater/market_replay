@@ -1,0 +1,4 @@
+# Batch tools pass many explicit parameters and use nested result tuples on
+# purpose; keep clippy's other lints strict (`-D warnings`).
+too-many-arguments-threshold = 20
+type-complexity-threshold = 1000
