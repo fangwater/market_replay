@@ -1482,13 +1482,24 @@ fn group(
             let uncovered =
                 d1 <= start || d0 >= end || gap_ranges.iter().any(|&(a, b)| a <= d0 && d1 <= b);
             if uncovered {
-                ensure!(
-                    out.iter().all(|k| k.count == 0),
-                    "trades inside an uncovered UTC day: {ric} {}",
-                    io::date(day * DAY)?
-                );
-                withheld += 1;
-                continue;
+                let trades: u64 = out.iter().map(|k| k.count).sum();
+                if trades == 0 {
+                    withheld += 1;
+                    continue;
+                }
+                // Real trades are evidence: publish the day (late data may
+                // correct it later) and record that the source manifest does
+                // not cover it, e.g. a zero-byte daily placeholder whose
+                // trades arrived through another source, or prints stamped
+                // just past the last delivered day.
+                problems.record(
+                    &ric,
+                    "trades_on_uncovered_day",
+                    d0,
+                    d1,
+                    trades,
+                    "UTC day not covered by the delivered source manifest but has trades; published",
+                )?;
             }
             let batch = io::kline_batch(&ric, &out)?;
             let path = root.join(io::date(day * DAY)?).join("kline.parquet");

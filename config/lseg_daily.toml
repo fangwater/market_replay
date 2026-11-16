@@ -33,6 +33,7 @@ catalog = true
 catalog_prune_expired_status = false
 catalog_extra_args = []
 host_tag = "market_replay@30.38"
+dashboard_url = "http://172.16.30.38:18313/"
 dingtalk_webhook_env = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL"
 dingtalk_secret_env = "CN_FUTURES_DB_DINGTALK_SECRET"
 
