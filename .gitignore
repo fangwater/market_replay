@@ -8,4 +8,3 @@ reference_cme/.venv/
 reference_cme/.env
 target.old_home/
 target
-crates/cme/ly_cme_data/reports/*.xlsx
