@@ -75,3 +75,12 @@ cwd = "/home/fanghaizhou/cn_futures_db"
 command = "/home/fanghaizhou/cn_futures_db/scripts/run_ib_kline_daily.sh"
 schedule = { tz = "Asia/Shanghai", at = ["09:30"] }
 timeout_minutes = 120
+
+[[job]]
+name = "lseg-daily"
+description = "LSEG TAS 日包：下载 -> 回放/审计 -> trade/quote/status -> K线（晚到可补正替换）-> catalog（钉钉）"
+cwd = "/home/fanghaizhou/cn_futures_db"
+command = "/home/fanghaizhou/cn_futures_db/target/release/lseg-daily"
+args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml"]
+schedule = { tz = "Asia/Shanghai", at = ["11:00"] }
+timeout_minutes = 480
