@@ -2,9 +2,9 @@
 
 Code lives in the market_replay repo (scripts/lseg, config/lseg); run state,
 evidence and reports live on NVMe under DATA (artifacts/, reports/).
-Historical artifact JSON written before 2026-11-16 still names the old
-`/home/fanghaizhou/ly_cme_data/artifacts/...` prefix, which is now
-`DATA/artifacts/...`.
+Old ly_cme_data paths in artifacts were rewritten on 2026-11-16, except
+artifacts/lseg_full_rocksdb_20261112/plan.json (a kline source-identity
+record, kept byte-identical).
 """
 from pathlib import Path
 
