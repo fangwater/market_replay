@@ -57,7 +57,7 @@ const DEFAULT_TAS_SECONDARY: &str =
 const DEFAULT_LL2_SECONDARY: &str =
     "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_ll2_1min_rocksdb_all_products.baseline.secondary";
 const DEFAULT_PSQL: &str = "/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql";
-const DEFAULT_PG_SOCKET: &str = "/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run";
+const DEFAULT_PG_SOCKET: &str = "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run";
 const PERIOD_META_PREFIX: &str = "period:";
 const NS_PER_SEC: u64 = 1_000_000_000;
 const HALF_DAY_NS: u64 = 43_200 * NS_PER_SEC;

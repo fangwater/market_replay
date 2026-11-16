@@ -200,7 +200,7 @@ Databento UTC 午夜快照，以及只是在 `NO_CANCEL` 事件上重复携带�
 
 ```bash
 /mnt/nvme-raid0-28t/apps/pgsql16/bin/psql \
-  -h /mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run \
+  -h /mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run \
   -p 5433 -U u171 -d market_metadata \
   -f database/cme_six_product_trading_sessions.sql
 ```
@@ -234,7 +234,7 @@ TAS 状态行没有有效 `Exchange Time`，所以观测列只用于验证官方
 
 ```bash
 /mnt/nvme-raid0-28t/apps/pgsql16/bin/psql \
-  -h /mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run \
+  -h /mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run \
   -p 5433 -U u171 -d market_metadata \
   -f database/overseas_futures_broker_commission_reference.sql
 ```

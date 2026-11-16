@@ -287,6 +287,9 @@ fn parse_directory_day(name: &str) -> Option<NaiveDate> {
     compact_day(name).and_then(|value| NaiveDate::parse_from_str(&value, "%Y%m%d").ok())
 }
 
+/// CFFEX trades day sessions only; its quote file marks a full open-day directory.
+const MSG_OPEN_DAY_MARKER: &str = "mdl_21_1_0.csv";
+
 fn list_directories(
     root: &Path,
     start: NaiveDate,
@@ -369,7 +372,17 @@ fn source_files(
             .checked_sub_days(Days::new(args.lookback_days))
             .unwrap_or(msg_start);
         let expected = msg_stem(&args.exchange);
-        for (day, directory) in list_directories(root, lookup_start, end)? {
+        let mut dirs = list_directories(root, lookup_start, end)?;
+        // Rows of msg_start can only live in its own directory or back to the
+        // previous open day (CFFEX file present), where its night session
+        // opens; older lookback directories only multiply NFS reads.
+        if let Some(cut) = dirs
+            .iter()
+            .rposition(|(day, dir)| *day < msg_start && dir.join(MSG_OPEN_DAY_MARKER).is_file())
+        {
+            dirs.drain(..cut);
+        }
+        for (day, directory) in dirs {
             let path = directory.join(expected);
             if path.is_file() {
                 files.push(LocatedFile {

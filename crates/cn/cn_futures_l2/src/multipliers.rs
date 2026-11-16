@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub const DEFAULT_PSQL: &str = "/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql";
-pub const DEFAULT_SOCKET: &str = "/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run";
+pub const DEFAULT_SOCKET: &str = "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run";
 pub const DEFAULT_PORT: &str = "5433";
 pub const DEFAULT_DB: &str = "market_metadata";
 pub const DEFAULT_USER: &str = "u171";

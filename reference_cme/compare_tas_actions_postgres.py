@@ -32,7 +32,7 @@ DEFAULT_DEFINITION = (
 )
 DEFAULT_PSQL = Path("/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql")
 DEFAULT_PG_SOCKET = Path(
-    "/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run"
+    "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run"
 )
 DEFAULT_OUTPUT_PREFIX = PROJECT_ROOT / "reports/tas_action_pg_comparison"
 

@@ -193,7 +193,7 @@ MCP 开启 Host/Origin 校验；使用自定义域名访问时需将该域名加
 
 当前 PM2 配置额外允许 `172.16.30.38`；更换服务器 IP 时同步更新 `ecosystem.mcp.config.cjs`。
 
-网关复用 CN 8765 / CME 8770 的 GET API。CME 官方时段和佣金只读访问指定的 PostgreSQL 16：Unix socket `/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run`、5433、`market_metadata`、`u171` peer 认证；连接 DSN 固定，不接受调用者或环境变量改写实例。连接强制 `default_transaction_read_only=on` 并设置语句超时，不创建、写入或修改任何表。
+网关复用 CN 8765 / CME 8770 的 GET API。CME 官方时段和佣金只读访问指定的 PostgreSQL 16：Unix socket `/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run`、5433、`market_metadata`、`u171` peer 认证；连接 DSN 固定，不接受调用者或环境变量改写实例。连接强制 `default_transaction_read_only=on` 并设置语句超时，不创建、写入或修改任何表。
 
 `/health` 只表示网关存活；检查上游可用性用 `exchange_summary`，其中某一市场出现 `error` 时其他市场仍可查询。官方时段及佣金的数据库可用性需实际调用对应工具检查。
 

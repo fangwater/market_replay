@@ -9,7 +9,7 @@ from psycopg.rows import dict_row
 
 
 DATABASE_URL = (
-    "postgresql:///market_metadata?host=%2Fmnt%2Fnvme-raid0-28t%2Fpostgresql%2F"
+    "postgresql:///market_metadata?host=%2Fmnt%2Fnvme-raid0-28t%2Ffanghaizhou%2Fpostgresql%2F"
     "domestic_futures%2F16%2Frun&port=5433&user=u171"
 )
 

@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 UPSTREAMS = {
     "cn": os.environ.get("EXCHANGE_MCP_CN_URL", "http://127.0.0.1:8765").rstrip("/"),
     "cme": os.environ.get("EXCHANGE_MCP_CME_URL", "http://127.0.0.1:8770").rstrip("/"),
+    # market_replay cn-kline-server HTTP (Rust); dominant contracts from the daily roll replay.
+    "cnmarket": os.environ.get("EXCHANGE_MCP_CN_MARKET_URL", "http://127.0.0.1:18313").rstrip("/"),
 }
 for _url in UPSTREAMS.values():
     _parts = urlsplit(_url)
@@ -162,6 +164,18 @@ async def cn_trading_sessions(
 ) -> dict[str, Any]:
     """查询 Asia/Shanghai 连续竞价基础模板，含跨午夜字段。模板不能推断节假日及未采集的历史调整。"""
     return await get_json("cn", "trading-sessions", venue=venue, product=product, asOf=as_of)
+
+
+@tool("国内主力合约")
+async def cn_dominant_contracts(
+    product: Code | None = None, start: date | None = None, end: date | None = None,
+) -> dict[str, Any]:
+    """不填品种时返回每个品种最新交易日的主力合约与收盘后排给下一交易日的合约；填品种时返回该品种的逐日主力历史。规则为米筐 rule=0（持仓 1.1 倍、只向更远月切换、不切回），每日盘后由 market_replay 更新。"""
+    if product is None:
+        if start is not None or end is not None:
+            raise QueryError("start/end 只在指定 product 时可用")
+        return await get_json("cnmarket", "dominant")
+    return await get_json("cnmarket", f"dominant/{quote(product, safe='')}", start=start, end=end)
 
 
 @tool("国内交易所公告")

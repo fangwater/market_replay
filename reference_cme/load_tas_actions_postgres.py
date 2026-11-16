@@ -24,7 +24,7 @@ DEFAULT_EXPORTER = Path(
 )
 DEFAULT_PSQL = Path("/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql")
 DEFAULT_PG_SOCKET = Path(
-    "/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run"
+    "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run"
 )
 DEFAULT_DDL = PROJECT_ROOT / "database/cme_tas_action_events.sql"
 EXPORT_HEADER = "product\tric\tts_utc_ns\texch_hms_ns\tqualifiers"

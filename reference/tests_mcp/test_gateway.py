@@ -20,7 +20,7 @@ class HttpGatewayTests(unittest.TestCase):
 
     def test_catalog_and_readonly_surface(self):
         catalog = self.client.get("/api/tools").json()["tools"]
-        self.assertEqual(len(catalog), 12)
+        self.assertEqual(len(catalog), 13)
         for forbidden in ("sync", "import", "review", "http://localhost", "../sync"):
             self.assertNotEqual(self.client.get("/api/" + forbidden).status_code, 200)
         self.assertEqual(self.client.post("/api/cn_instruments", json={}).status_code, 405)
@@ -82,7 +82,7 @@ class HttpGatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("serverInfo", response.json()["result"])
         tools = rpc("tools/list", {}) .json()["result"]["tools"]
-        self.assertEqual(len(tools), 12)
+        self.assertEqual(len(tools), 13)
         self.assertTrue(all(tool["annotations"]["readOnlyHint"] for tool in tools))
         with patch.object(server, "get_json", new_callable=AsyncMock, return_value={"records": [], "total": 0}) as upstream:
             result = rpc("tools/call", {"name": "cme_definitions", "arguments": {"product": "ES"}}).json()["result"]

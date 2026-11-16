@@ -22,6 +22,8 @@ PARAMETERS = {
     "status": "规则审核状态：VERIFIED 已审核、PENDING 待审核、REJECTED 已驳回。默认 VERIFIED。",
     "start_date": "起始 Chicago 交易日，格式 YYYY-MM-DD，包含当天。",
     "end_date": "结束 Chicago 交易日，包含当天；总范围最多 366 天。",
+    "start": "国内主力历史的起始交易日 YYYY-MM-DD（含当天），只在指定 product 时使用。",
+    "end": "国内主力历史的结束交易日 YYYY-MM-DD（含当天），只在指定 product 时使用。",
     "exchange": "佣金参考表中的交易所代码，如 COMEX、NYMEX、CME、CBOT；省略表示全部。",
 }
 
@@ -69,6 +71,12 @@ TOOL_DOCS = {
         ("sessions[].time_begin / time_end", "本地时间", "该段开盘 / 收盘时间，格式 HH:MM:SS。"),
         ("sessions[].crosses_midnight / session_group", "布尔 / 字符串", "是否跨午夜 / DAY 日盘或 NIGHT 夜盘。"),
         ("sessions[].source_date / start_ts / update_ts", "日期 / UTC 时间", "模板来源日期、首次观测及最近确认。"),
+    ]},
+    "cn_dominant_contracts": {"group": "国内期货", "example": {"product": "RB", "start": "2026-11-01"}, "source": "market_replay 每日盘后按米筐 rule=0 从通联行情日终截面重算的主力合约表（2019-01-01 起）。", "fields": [
+        ("latest_trading_day / products[]", "日期 / 对象数组", "不填品种时：已处理的最新交易日，以及每个品种一行。"),
+        ("products[].dominant / scheduled_next", "字符串", "trading_day 当天生效的主力 / 当天收盘后排给下一交易日的主力。郑商所为四位年月。"),
+        ("products[].rolls_next_day / last_roll_day", "布尔 / 日期", "下一交易日是否换月 / 最近一次换月的交易日。"),
+        ("rows[]", "对象数组", "填品种时：trad_day、instrument_id、roll_flag、decision_open_int、scheduled_next、rule 的逐日历史。"),
     ]},
     "cn_announcements": {"group": "国内期货", "example": {"limit": 5}, "source": "已采集的交易所期货公告及已有分析结果；调用不触发刷新。", "fields": [
         ("announcements[]", "对象数组", "公告标题、交易所、原文地址及已有分析结果。"),

@@ -105,7 +105,7 @@
 
 以下规则原先在 mkt_signal `AGENTS.md`，2026-11-14 随代码迁到这里：
 
-- `cn_futures_l2` 只从只读 PostgreSQL 表 `market_metadata.public.domestic_future_product_multipliers` 读取 `volume_multiple` 及其 `verified` 状态（Unix socket `/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run`，端口 `5433`）。不得恢复代码里的品种映射，不得调用 DataGateway 或交易所接口，不得从成交额反推乘数，也不得默认取 `1`。载入的目录里缺少某个品种时，必须带着能定位问题的上下文直接 panic；这是批处理工具的明确例外。不得写入这个元数据实例，也不得用 `5432` 端口的只读热备库。
+- `cn_futures_l2` 只从只读 PostgreSQL 表 `market_metadata.public.domestic_future_product_multipliers` 读取 `volume_multiple` 及其 `verified` 状态（Unix socket `/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run`，端口 `5433`）。不得恢复代码里的品种映射，不得调用 DataGateway 或交易所接口，不得从成交额反推乘数，也不得默认取 `1`。载入的目录里缺少某个品种时，必须带着能定位问题的上下文直接 panic；这是批处理工具的明确例外。不得写入这个元数据实例，也不得用 `5432` 端口的只读热备库。
 - 以前的根二进制 `tonglian_baseline_replay` 及其 ClickHouse staging 配置已经退役，不得恢复。
 - 用法文档见 [docs/cn_futures_l2.md](docs/cn_futures_l2.md)。
 
@@ -141,3 +141,12 @@
 - **不进 git 的内容：** Databento 原始下载 `batch_downloads/`（约 2 GB）、解析结果 `parsed/`（服务读取的 parquet）、`*.dbn`、日志和 `.env`（含 Databento key），按它自己的 `.gitignore` 处理，只留在本机磁盘上。
 - **venv：** 按 `requirements.lock`（搬迁前冻结，24 个包）在新路径重建，版本逐个一致。
 - **PM2：** 从 `reference_cme/ecosystem.config.cjs` 启动。搬迁前后共比对 10 个接口（8770 的首页、health、summary、definitions、status，以及 8780 MCP 的 4 个 CME 工具），响应逐字节一致。
+
+## 国内期货元数据 PostgreSQL（2026-11-16 起归 fanghaizhou）
+
+`market_metadata`（端口 5433，只监听 127.0.0.1）里有乘数表、竞价窗口、`cn_futures_reference` schema、CME 的 TAS 动作事件、复权因子等。原来是 u171 的实例，2026-11-16 用户要求废弃 u171、新功能的服务一律从 fanghaizhou 启动，于是迁了过来。
+
+- **数据目录：** `/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/main`；socket 在 `.../16/run`，日志在 `.../16/log`。以 fanghaizhou 身份停掉旧实例后，用 tar 流做物理拷贝，数据完全一致。旧目录和 u171 crontab 里对应的 `@reboot` 条目都已删除，crontab 的备份在 `/tmp/u171_crontab.bak.*`。u171 名下的另一个实例 `/mnt/nvme-raid0-28t/postgresql/16`（crypto NAV 热备，5432）不归本仓库管。
+- **进程管理：** PM2 进程 `pg-domestic-futures`，配置 `deploy/pm2/pg-domestic-futures.config.cjs`。入口脚本 `run-pg-domestic-futures.sh` 会等 RAID 挂载后再 `exec postgres`。PM2 停止时发 SIGINT，postgres 执行快速关闭；`kill_timeout` 设为 60 秒，不得调小，否则 PM2 会 SIGKILL postmaster。开机由 fanghaizhou 的 PM2 resurrect 拉起，不用 systemd。
+- **故障原因与修复：** 2026-11-16 整库不可连接，报错 `could not open shared memory segment "/PostgreSQL.*"`：u171 名下的 posix 动态共享内存段在 `/dev/shm` 里被删了。新实例设置 `dynamic_shared_memory_type = mmap`，共享内存段放在数据目录内。
+- **连接方式：** 数据库角色仍然是 `u171`，通过 peer 映射 `market_metadata_u171`（fanghaizhou → u171）连接，所有客户端的 `user=u171` 不需要改。连接串：`postgresql:///market_metadata?host=%2Fmnt%2Fnvme-raid0-28t%2Ffanghaizhou%2Fpostgresql%2Fdomestic_futures%2F16%2Frun&port=5433&user=u171`。引用旧 socket 路径的代码、配置、文档（本仓库、reference、reference_cme、preprocess 的当前文件）已全部改到新路径；`preprocess/database/` 下按日期归档的历史证据保持原样。

@@ -334,7 +334,7 @@ fn load_calendar(psql: &Path, start: NaiveDate, end: NaiveDate) -> Result<Sessio
     let output = Command::new(psql)
         .args([
             "-h",
-            "/mnt/nvme-raid0-28t/postgresql/domestic_futures/16/run",
+            "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run",
             "-p",
             "5433",
             "-U",

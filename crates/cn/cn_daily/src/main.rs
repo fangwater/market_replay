@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+mod roll;
+
 /// CFFEX trades day sessions only: its file marks a directory of an open day.
 const DAY_MARKER: &str = "mdl_21_1_0.csv";
 
@@ -55,6 +57,19 @@ struct Config {
     host_tag: String,
     dingtalk_webhook_env: String,
     dingtalk_secret_env: String,
+    /// Dominant-contract maintenance (see roll.rs); disabled when unset.
+    #[serde(default)]
+    roll_root: Option<PathBuf>,
+    #[serde(default = "d_roll_start")]
+    roll_start: String,
+    #[serde(default = "d_roll_rule")]
+    roll_rule: String,
+}
+fn d_roll_start() -> String {
+    "2019-01-01".into()
+}
+fn d_roll_rule() -> String {
+    "local_rqdata_rule0".into()
 }
 fn d_replay_workers() -> usize {
     32
@@ -290,6 +305,65 @@ fn steps(cfg: &Config, day: NaiveDate, overwrite: bool) -> Vec<Step> {
             args: trim,
         },
     ]
+    .into_iter()
+    .chain(roll_extract_steps(cfg, day))
+    .collect()
+}
+
+/// One EOD cross-section extraction per exchange for the dominant table.
+fn roll_extract_steps(cfg: &Config, day: NaiveDate) -> Vec<Step> {
+    let Some(root) = &cfg.roll_root else {
+        return Vec::new();
+    };
+    let d = day.format("%Y-%m-%d").to_string();
+    roll::EXCHANGES
+        .iter()
+        .map(|ex| Step {
+            name: "主力截面",
+            bin: "cn_futures_roll",
+            args: vec![
+                "--msg-root".into(),
+                cfg.msg_root.display().to_string(),
+                "--exchange".into(),
+                ex.to_string(),
+                "--start".into(),
+                d.clone(),
+                "--end".into(),
+                d.clone(),
+                "--workers".into(),
+                "6".into(),
+                "--output".into(),
+                roll::staging_file(root, day, ex).display().to_string(),
+            ],
+        })
+        .collect()
+}
+
+fn roll_replay_steps(cfg: &Config, root: &Path, end: NaiveDate) -> Vec<Step> {
+    roll::EXCHANGES
+        .iter()
+        .map(|ex| Step {
+            name: "主力重算",
+            bin: "cn_roll_replay",
+            args: vec![
+                "--eod-input".into(),
+                root.join("eod")
+                    .join(format!("{ex}_eod.csv"))
+                    .display()
+                    .to_string(),
+                "--exchange".into(),
+                ex.to_string(),
+                "--start".into(),
+                cfg.roll_start.clone(),
+                "--end".into(),
+                end.format("%Y-%m-%d").to_string(),
+                "--rule".into(),
+                cfg.roll_rule.clone(),
+                "--output-dir".into(),
+                root.join("result.new").display().to_string(),
+            ],
+        })
+        .collect()
 }
 
 /// Size buckets use whole-calendar-month thresholds: re-fill month-to-date
@@ -621,6 +695,9 @@ fn run(
             .log_dir
             .join(format!("cn_daily_{}.log", day.format("%Y%m%d")));
         let mut timings = Vec::new();
+        if let Some(root) = &cfg.roll_root {
+            fs::create_dir_all(roll::staging_file(root, day, "x").parent().expect("parent"))?;
+        }
         for step in steps(cfg, day, overwrite) {
             match run_step(&bins, &step, &log) {
                 Ok(secs) => timings.push((step.name, secs)),
@@ -653,6 +730,62 @@ fn run(
             Err(e) => return fail(&mut state, end, &step, e, &log, &done),
         }
     }
+    let mut roll_text = String::new();
+    if let (Some(root), Some(last)) = (&cfg.roll_root, days.last().copied()) {
+        let log = cfg
+            .log_dir
+            .join(format!("cn_daily_roll_{}.log", last.format("%Y%m%d")));
+        let t = Instant::now();
+        for day in &days {
+            let rows = roll::merge_day(root, *day).with_context(|| format!("merge EOD {day}"))?;
+            eprintln!("cn-daily: {day} merged {rows} EOD rows");
+        }
+        let new_dir = root.join("result.new");
+        if new_dir.exists() {
+            fs::remove_dir_all(&new_dir)?;
+        }
+        for step in roll_replay_steps(cfg, root, last) {
+            if let Err(e) = run_step(&bins, &step, &log) {
+                return fail(&mut state, last, &step, e, &log, &done);
+            }
+        }
+        let check = roll::check_history(&root.join("result"), &new_dir)
+            .and_then(|()| roll::report(&new_dir))
+            .and_then(|r| roll::publish(root, &new_dir).map(|()| r));
+        match check {
+            Ok(r) => {
+                roll_text = format!(
+                    "\n\n主力（{}，{} 个品种，{:.0}s）：今日换月 {}；明日换月 {}",
+                    r.through,
+                    r.products,
+                    t.elapsed().as_secs_f64(),
+                    if r.rolled_today.is_empty() {
+                        "无".to_string()
+                    } else {
+                        r.rolled_today.join("，")
+                    },
+                    if r.rolling_next.is_empty() {
+                        "无".to_string()
+                    } else {
+                        r.rolling_next.join("，")
+                    },
+                );
+                fs::write(
+                    cfg.log_dir
+                        .join(format!("cn_daily_roll_{}.json", last.format("%Y%m%d"))),
+                    serde_json::to_vec_pretty(&r)?,
+                )?;
+            }
+            Err(e) => {
+                let step = Step {
+                    name: "主力发布",
+                    bin: "cn_roll_replay",
+                    args: Vec::new(),
+                };
+                return fail(&mut state, last, &step, e, &log, &done);
+            }
+        }
+    }
     for (day, a, timings) in &done {
         let removed = remove_staging_day(&cfg.staging_root, *day)?;
         eprintln!("cn-daily: {day} done, staging files removed {removed}");
@@ -677,6 +810,7 @@ fn run(
     } else {
         summary_of(&done)
     };
+    let body = body + &roll_text;
     notify(cfg, notify_on, "成功", &body);
     Ok(())
 }
