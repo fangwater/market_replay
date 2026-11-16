@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tonic::{Request, Response, Status};
 
+mod dominant;
+
 /// A time-range request may span at most this many calendar days.
 const MAX_RANGE_DAYS: i64 = 31;
 
@@ -40,6 +42,12 @@ struct Config {
     session_as_of: String,
     #[serde(default = "d_refresh")]
     metadata_refresh_s: u64,
+    /// HTTP JSON endpoint for dominant-contract queries (not gRPC).
+    #[serde(default)]
+    http_listen: Option<String>,
+    /// Directory with `<exchange>_dominant.csv` from the daily roll replay.
+    #[serde(default)]
+    roll_dir: Option<PathBuf>,
 }
 fn d_refresh() -> u64 {
     3600
@@ -448,6 +456,23 @@ async fn main() -> Result<()> {
             }
         })
     };
+    let http = match (&cfg.http_listen, &cfg.roll_dir) {
+        (Some(listen), Some(dir)) => {
+            let store = Arc::new(dominant::DominantStore::new(dir.clone()));
+            store.refresh().context("load dominant tables")?;
+            let listener = tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("bind {listen}"))?;
+            eprintln!("cn-kline-server: dominant HTTP on {listen} from {dir:?}");
+            Some(tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, dominant::router(store)).await {
+                    eprintln!("cn-kline-server: HTTP server stopped: {e}");
+                }
+            }))
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("http_listen and roll_dir must be set together"),
+    };
     let addr = cfg.listen.parse().context("listen must be host:port")?;
     let svc = Grpc(Arc::new(Service { cfg, meta }));
     tonic::transport::Server::builder()
@@ -457,6 +482,9 @@ async fn main() -> Result<()> {
         })
         .await?;
     refresh.abort();
+    if let Some(h) = http {
+        h.abort();
+    }
     Ok(())
 }
 
