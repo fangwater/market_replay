@@ -52,8 +52,9 @@ session：XPUB socket，zmq_send(mmap 切片)，按原始节奏、N 倍速或不
 
 ```bash
 scripts/build-release.sh                 # cargo build --release --locked
-scripts/start_mdl_replay.sh              # PM2 + taskset，命名空间 cn_futures_db，进程名 mdl_replay
-scripts/stop_mdl_replay.sh
+# 运行：market-replay-server 的服务 mdl-replay（taskset -c 0-31）。
+# 在 config/market_replay_server.toml 设 enabled = true 后 pm2 restart market-replay-server；
+# 也可以在 /admin 页面重启该服务。
 ```
 
 配置文件 `config/mdl_replay.toml`。控制面和会话 socket 默认只绑定 `127.0.0.1`；对内网开放时把 `control_endpoint`、`bind_host`、`advertise_host` 改成本机内网地址。

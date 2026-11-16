@@ -54,7 +54,7 @@ set -a; . ./.env; set +a
 python cn_futures_ref.py refresh-announcements
 ```
 
-PM2 的每日任务同步 OpenCTP 手续费参考数据和连续竞价时段，不会拉取或分析公告。每次公告刷新均在 `announcement_refresh_runs` 中记录 `trigger_type=MANUAL`。
+每日任务同步 OpenCTP 手续费参考数据和连续竞价时段，不会拉取或分析公告。每次公告刷新均在 `announcement_refresh_runs` 中记录 `trigger_type=MANUAL`。
 
 分析服务直接读取当前用户的 `~/.codex/config.toml` 和 `~/.codex/auth.json`，使用其中的 model provider `base_url` 和 `OPENAI_API_KEY`。仓库及 `.env` 不保存或复制密钥。模型固定为 `gpt-5.6-sol`，Responses API 参数固定为 `reasoning.effort=high`，并关闭响应存储。可通过 `CN_FUTURES_REF_CODEX_HOME` 指向另一份同结构配置。
 
@@ -96,24 +96,9 @@ set -a; . ./.env; set +a
 "$PYTHON_BIN" scripts/migrate_sqlite_to_postgres.py --sqlite cn_futures_ref.db
 ```
 
-安装 PM2 后启动 API 和每日同步调度器：
+API（默认 `0.0.0.0:8765`）和每日同步调度器由 market_replay 的统一服务进程 `market-replay-server` 托管（服务 `cn-reference-api`、`cn-reference-daily-sync`，见仓库根目录 `docs/market_replay_server.md`），不再单独注册 PM2。日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/service/`，重启在 `http://127.0.0.1:18313/admin` 操作。
 
-```bash
-npm install --global pm2
-./scripts/pm2-start.sh
-pm2 status
-```
-
-API 默认监听 `0.0.0.0:8765`，进程管理命令：
-
-```bash
-./scripts/pm2-stop.sh
-./scripts/pm2-start.sh
-pm2 logs cn-futures-reference-api
-pm2 logs cn-futures-reference-daily-sync
-```
-
-每日 OpenCTP 手续费及交易时段任务在 `Asia/Shanghai` 时区的 18:15 运行。它使用 PostgreSQL advisory lock，重叠运行时只允许一个同步写入。公告人工刷新使用另一个 advisory lock。服务器重启后使用 `pm2 startup` 和 `pm2 save` 恢复进程。
+每日 OpenCTP 手续费及交易时段任务在 `Asia/Shanghai` 时区的 18:15 运行。它使用 PostgreSQL advisory lock，重叠运行时只允许一个同步写入。公告人工刷新使用另一个 advisory lock。整机重启后由 PM2 resurrect 拉起 `market-replay-server`，再由它拉起这两个服务。
 
 ## HTTP API
 
@@ -160,7 +145,6 @@ cn_futures_ref/
 scripts/
   migrate_sqlite_to_postgres.py  SQLite 快照到增量记录的迁移
   daily_sync.py                  单次手续费与连续竞价时段同步任务
-  daily_scheduler.py             PM2 常驻每日调度器
-  run-api.sh / run-daily-sync.sh PM2 运行包装
-  pm2-start.sh / pm2-stop.sh     PM2 运维命令
+  daily_scheduler.py             常驻每日调度器（market-replay-server 托管）
+  run-api.sh / run-daily-sync.sh 运行包装（market-replay-server 调用）
 ```

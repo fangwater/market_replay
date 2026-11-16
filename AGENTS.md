@@ -38,12 +38,21 @@
 
 文档：[docs/mdl_replay.md](docs/mdl_replay.md)。按交易日或自然日、品种或合约、频道，把 `tonglian_msg` 的行情回放成和公司内网实时转发逐字节一致的 ZMQ 帧（`<topic> || <原行>`）。mkt_signal 的 `cn-futures-pbs --zmq` 只改 endpoint 就能直接消费。
 
-- Release profile 和 mkt_signal 保持一致（`lto="thin"`、`codegen-units=4`、`strip`、`debug=0`）。用 `scripts/build-release.sh` 构建，`scripts/start_mdl_replay.sh` / `stop_mdl_replay.sh` 通过 PM2 启停（命名空间 `cn_futures_db`）。
+- Release profile 和 mkt_signal 保持一致（`lto="thin"`、`codegen-units=4`、`strip`、`debug=0`）。用 `scripts/build-release.sh` 构建。运行时作为 `market-replay-server` 的服务 `mdl-replay`（默认关闭；在 `config/market_replay_server.toml` 里设 `enabled = true` 后重启服务器）。
 - 控制面是 ZMQ REQ/ROUTER + JSON，默认 `tcp://127.0.0.1:13100`。每个回放会话一个 XPUB，默认无损（XPUB_NODROP）。
 - 分片缓存在 `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/mdl_replay_cache/v1/<自然日>/<频道>/`，每个自然日约 8 GB。按自然日 LRU 自动淘汰，上限是 `cache_max_gb`（默认 48，约 6 个交易日）：每次构建后和服务端每 10 分钟各检查一次，10 分钟内用过的日期不淘汰；也可以用 `mdl-replay cache` 或 `{"cmd":"cache"}` 手动触发。NFS 只读。
 - 帧必须原样透传。不得在回放链路里改写、补齐或过滤 CSV 内容；同一频道内保持源文件行序，不按 `LocalTime` 重排。
 - 会话发完后要保持连接（`hold_open_s`），否则 pbs 收到断开事件后会丢弃还没消费的尾部帧。
 - 改动后必须跑：`cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release`。改动解析或排序逻辑时，还要用真实日期做一次逐字节比对（方法见文档的"实测"一节）。
+
+## 统一服务进程 market-replay-server（2026-11-16 起）
+
+用户要求"集中到一个 server 来管理，不要 PM2 启动很多东西"。PM2 里属于本项目的只有 `market-replay-server` 和数据库 `pg-domestic-futures`。说明见 [docs/market_replay_server.md](docs/market_replay_server.md)。
+
+- **对外接口：** gRPC `cn_market.v1` 在 :18312；HTTP 在 :18313，提供主力合约 API、管理页 `/admin`、管理 API `/api/admin/*`，之后的数据看板也挂在这里。
+- **常驻服务：** 参考数据 API（:8765）、参考数据每日同步、CME 参考数据（:8770）、MCP（:8780），以及默认关闭的 `mdl-replay`，都是这个进程的子进程，退出后自动按退避重启。
+- **每日任务：** `cn-daily`（上海 16:30）和 `ib-kline-daily`（上海 09:30）由它按时排程，走同一个队列依次执行，各自发钉钉。以后新的任务（例如 lseg-daily）只在 `config/market_replay_server.toml` 里加 `[[job]]`，**不得再单独注册 PM2 进程**。
+- 切换前的 PM2 进程列表保存在 `/mnt/nvme-raid0-28t/fanghaizhou/pm2_jlist_before_unify_20261116.json`（权限 600，内含环境变量）。各项目自己的 `ecosystem*.cjs` 和 `pm2-start.sh` 已删除，以免重复启动。
 
 ## 已定范围（2026-11-14，用户确认）
 
@@ -56,7 +65,7 @@
 
 - 这是一个 Python 项目，自带 `reference/AGENTS.md`，改这个目录时遵守其中的规则：只写 PostgreSQL 独立 schema `cn_futures_reference`，不碰 `public` 下的乘数表和交易时段表。
 - 两个虚拟环境 `.venv` 和 `.venv-mcp` 按 `requirements.lock` / `requirements-mcp.lock` 重建（版本和搬迁前逐个一致）。它们不进版本控制。
-- PM2 进程（命名空间 default）：`cn-futures-reference-api`（:8765）、`cn-futures-reference-daily-sync`（上海时间 18:15）、`cn-cme-exchange-mcp`（0.0.0.0:8780，同机其他用户在用）。分别从 `reference/ecosystem.config.cjs` 和 `ecosystem.mcp.config.cjs` 启动。
+- 进程由 `market-replay-server` 托管（2026-11-16 起，不再单独注册 PM2）：服务 `cn-reference-api`（:8765）、`cn-reference-daily-sync`（上海时间 18:15）、`exchange-mcp`（0.0.0.0:8780，同机其他用户在用）。
 - 每日同步在 2026-10-12 到 2026-11-14 期间每天都失败，报错是 `Connection refused`（走的环境代理是 `127.0.0.1:10810`）。2026-11-14 手动同步成功，数据补到 2026-11-16。代理不可用时同步会失败，要看 `cn-futures-reference-daily-sync` 的错误日志。
 - 按品种的连续交易时段在 `cn_futures_reference.continuous_session_versions`，kline 服务判断收盘边界要用它。
 
@@ -83,7 +92,7 @@
 | `crates/usstock/*` | 从 mkt_signal `7b8d96de` 迁入：美股 6 个 crate（TAS/normalised、MBP、RAW、Raw LL2、Nasdaq baseline、聚合）。`usstock_features_1min_hfq` 依赖实盘因子公式，仍留在 mkt_signal 根 crate，等因子公式抽进 core 后再迁 |
 | `config/cme_*`、`config/usstock_*`、`scripts/*cme*`、`scripts/usstock_*`、`scripts/*ll2*`、`tests/scripts/test_cme_*` 等 | 随这些 crate 一起从 mkt_signal 迁入，共 85 个配置、脚本、Python 测试和文档。Python 测试从仓库根目录用 `python3 -m pytest tests/scripts` 运行；`tests/__init__.py` 必须保留，否则 `from scripts.x import ...` 会解析到 `tests/scripts` 上 |
 | `crates/cme/lseg_delivery` | 原 `ly_cme_data` 子项目（2026-11-16 解散并入，见下文"LSEG / CME TAS 交付"）：LSEG/CME TAS tick parquet 导出、只用 LSEG 数据的 K 线与交易状态、改撤回补、SQLite 目录。配套 `scripts/lseg`、`config/lseg`、`docs/lseg` |
-| `reference_cme/` | CME 参考数据服务，原 `cme_exchange_info_summary`（Python，PM2 `cme-exchange-info-summary`，0.0.0.0:8770），是 8780 MCP 的 CME 上游 |
+| `reference_cme/` | CME 参考数据服务，原 `cme_exchange_info_summary`（Python，`market-replay-server` 托管的服务 `cme-reference`，0.0.0.0:8770），是 8780 MCP 的 CME 上游 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
 
@@ -141,7 +150,7 @@
 
 - **不进 git 的内容：** Databento 原始下载 `batch_downloads/`（约 2 GB）、解析结果 `parsed/`（服务读取的 parquet）、`*.dbn`、日志和 `.env`（含 Databento key），按它自己的 `.gitignore` 处理，只留在本机磁盘上。
 - **venv：** 按 `requirements.lock`（搬迁前冻结，24 个包）在新路径重建，版本逐个一致。
-- **PM2：** 从 `reference_cme/ecosystem.config.cjs` 启动。搬迁前后共比对 10 个接口（8770 的首页、health、summary、definitions、status，以及 8780 MCP 的 4 个 CME 工具），响应逐字节一致。
+- **进程：** 由 `market-replay-server` 托管（服务 `cme-reference`）。搬迁前后共比对 10 个接口（8770 的首页、health、summary、definitions、status，以及 8780 MCP 的 4 个 CME 工具），响应逐字节一致。
 
 ## 国内期货元数据 PostgreSQL（2026-11-16 起归 fanghaizhou）
 
@@ -184,7 +193,7 @@
     - RocksDB 一律用 `tasdb::open_read_only` 打开：后台线程 1 个，打开文件线程 1 个，block cache 共享且有上限。
   - 不得按机器的 CPU 或内存自动扩张，也不得出现没有预算的多进程乘多线程。Python 里 DuckDB、Arrow、BLAS 的线程数显式设为 1。
   - 读取、解析、聚合、写入都必须流式、有界。不得把整段状态或控制消息先收集进 Vec、list 或 JSON 数组再处理。
-  - 原来的 `ly_cme_run` 监控器、资源锁和 `libly_cme_cpu_budget.so` 已退役。现在每日任务由 fanghaizhou 的 PM2 串行调度（不用 systemd），一次性回补用前台命令；独立的大任务不得并发运行。
+  - 原来的 `ly_cme_run` 监控器、资源锁和 `libly_cme_cpu_budget.so` 已退役。现在每日任务由 `market-replay-server` 的单一任务队列串行调度（不用 systemd，也不为单个任务注册 PM2），一次性回补用前台命令；独立的大任务不得并发运行。
 - **交付盘：**
   - 路径是 `/mnt/nfs/30.100_cta_data/lseg/`，也就是 `172.16.30.100:/mnt/FuturePool/CTA_Data/lseg`。
   - 目录布局是 `<交易所小写>/<UTC 年>/<原始 RIC>/<UTC YYYYMMDD>/{trade,quote,status,session_status,market_status,kline,kline_ib}.parquet`。RIC 保留大小写，用 `tasdb::component` 做可逆转义。

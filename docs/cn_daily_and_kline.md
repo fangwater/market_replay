@@ -4,7 +4,7 @@
 
 ## 每日任务 `cn-daily`
 
-代码在 `crates/cn/cn_daily`，配置在 `config/cn_daily.toml`。由 PM2 定时在上海时间 16:30（UTC 08:30）运行，进程名 `cn-futures-daily`。
+代码在 `crates/cn/cn_daily`，配置在 `config/cn_daily.toml`。由 `market-replay-server` 在上海时间 16:30（UTC 08:30）排程运行，任务名 `cn-daily`。
 
 每次运行会找出所有**已完成但还没处理**的交易日，按顺序处理：
 
@@ -30,12 +30,12 @@ target/release/cn-daily status --config config/cn_daily.toml
 target/release/cn-daily run --config config/cn_daily.toml --dry-run          # 只打印计划
 target/release/cn-daily run --config config/cn_daily.toml --start 2026-08-27  # 首次运行或补跑
 target/release/cn-daily audit --config config/cn_daily.toml --day 2026-11-13
-scripts/start_cn_services.sh   # PM2: cn-futures-kline + cn-futures-daily
+# 服务与调度：market-replay-server（docs/market_replay_server.md）；手动运行：/admin 页面或 POST /api/admin/jobs/cn-daily/run
 ```
 
 ## gRPC kline：`cn_market.v1.CnFuturesMarket`
 
-契约在 `crates/proto/cn_market_proto/proto/cn_market.proto`，服务端在 `crates/cn/cn_kline_server`，默认监听 `0.0.0.0:18312`（内网可访问），PM2 进程名 `cn-futures-kline`。
+契约在 `crates/proto/cn_market_proto/proto/cn_market.proto`，服务端在 `crates/cn/cn_kline_server`，默认监听 `0.0.0.0:18312`（内网可访问），由 `market-replay-server` 提供。
 
 这里**不做 Binance 兼容**，字段直接用期货的口径和单位：交易日、单边手数、含乘数的人民币成交额、合约乘数、最小变动价位、郑商所三位码和四位码。kline 数据也不单独维护，每次请求直接读生产 `baseline_data_1min` 的日文件。
 

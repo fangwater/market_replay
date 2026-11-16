@@ -249,20 +249,6 @@ NYBOT、ICE、IPE、LME、EUREX、SGX 和 OSE 共 51 条关联代码。表分开
 不能当作 CME 历史交易所费用或账户历史精确费用。后续新增带有效期和账户证据的版本时，
 使用新 `schedule_version`，不得覆盖原始参考版本。
 
-### PM2 后台运行
+### 后台运行
 
-```bash
-npm install --global --prefix /home/fanghaizhou/.local pm2
-./scripts/pm2-start.sh
-pm2 status
-pm2 logs cme-exchange-info-summary
-```
-
-更新代码后再次运行 `./scripts/pm2-start.sh` 即可重载。停止并移除服务：
-
-```bash
-./scripts/pm2-stop.sh
-```
-
-`pm2 save` 会保存当前进程列表。本机已配置用户级 cron，在整机重启后执行
-`pm2 resurrect` 自动恢复已保存的 PM2 服务。
+由 market_replay 的统一服务进程 `market-replay-server` 托管（服务 `cme-reference`，`0.0.0.0:8770`，见仓库根目录 `docs/market_replay_server.md`），不再单独注册 PM2。日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/service/cme-reference.log`。更新代码后在 `http://127.0.0.1:18313/admin` 重启该服务即可重载。

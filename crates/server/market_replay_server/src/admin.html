@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>market_replay 服务与任务</title>
+<style>
+body{font-family:system-ui,"PingFang SC","Microsoft YaHei",sans-serif;margin:24px;color:#1d2521;background:#f6f7f5}
+h1{font-size:20px}h2{font-size:16px;margin-top:28px}
+table{border-collapse:collapse;width:100%;background:#fff}
+th,td{border-bottom:1px solid #e3e6e1;padding:6px 8px;text-align:left;font-size:13px;vertical-align:top}
+th{background:#eef1ec}
+.ok{color:#1f7a3f}.bad{color:#b3261e}.muted{color:#6b736d}
+button{font-size:12px;padding:2px 8px;cursor:pointer}
+pre{background:#11161a;color:#d6dde3;padding:10px;max-height:420px;overflow:auto;font-size:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h1>market_replay 服务与任务 <span id="now" class="muted"></span></h1>
+<h2>常驻服务</h2>
+<table id="svc"><thead><tr><th>名称</th><th>说明</th><th>状态</th><th>PID</th><th>启动时间</th><th>重启次数</th><th>上次退出</th><th></th></tr></thead><tbody></tbody></table>
+<h2>定时任务（单队列，依次执行）</h2>
+<table id="job"><thead><tr><th>名称</th><th>说明</th><th>计划</th><th>下次运行</th><th>当前</th><th>上次结果</th><th></th></tr></thead><tbody></tbody></table>
+<h2>日志 <span id="logname" class="muted"></span></h2>
+<pre id="log">点击"日志"查看</pre>
+<script>
+const t=s=>s?new Date(s).toLocaleString('zh-CN',{hour12:false}):'';
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function post(u){const r=await fetch(u,{method:'POST'});const j=await r.json();alert(JSON.stringify(j));load();}
+async function showLog(kind,name){document.getElementById('logname').textContent=kind+'/'+name;
+ const r=await fetch(`api/admin/log/${kind}/${name}?bytes=65536`);const p=document.getElementById('log');p.textContent=await r.text();p.scrollTop=p.scrollHeight;}
+async function load(){
+ const s=await (await fetch('api/admin/status')).json();
+ document.getElementById('now').textContent=t(s.now);
+ document.querySelector('#svc tbody').innerHTML=s.services.map(v=>`<tr><td>${esc(v.name)}</td><td>${esc(v.description)}</td>
+  <td class="${v.status=='running'?'ok':(v.status=='disabled'?'muted':'bad')}">${esc(v.status)}</td><td>${v.pid??''}</td><td>${t(v.started_at)}</td>
+  <td>${v.restarts}</td><td>${esc(v.last_exit??'')} ${t(v.last_exit_at)}</td>
+  <td><button onclick="showLog('service','${v.name}')">日志</button> <button onclick="post('api/admin/services/${v.name}/restart')">重启</button></td></tr>`).join('');
+ document.querySelector('#job tbody').innerHTML=s.jobs.map(v=>{const l=v.last;
+  return `<tr><td>${esc(v.name)}</td><td>${esc(v.description)}</td><td>${esc(v.schedule)}</td><td>${t(v.next_run)}</td>
+  <td>${v.running?'<span class="ok">运行中</span> '+t(v.running.started_at):(v.queued?'排队中':'')}</td>
+  <td>${l?`<span class="${l.ok?'ok':'bad'}">${esc(l.result)}</span> ${t(l.finished_at)} <span class="muted">${esc(l.trigger)}</span>`:''}</td>
+  <td><button onclick="showLog('job','${v.name}')">日志</button> <button onclick="post('api/admin/jobs/${v.name}/run')">立即运行</button></td></tr>`}).join('');
+}
+load();setInterval(load,10000);
+</script>
+</body>
+</html>

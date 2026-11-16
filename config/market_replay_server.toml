@@ -1,0 +1,77 @@
+# market-replay-server: the single long-running process of market_replay.
+# PM2 runs only this (plus pg-domestic-futures). Services below are
+# supervised children; jobs run on schedule through one queue.
+state_dir = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server"
+env_file = "/home/fanghaizhou/.config/market_replay/env"
+
+[http]
+# Dominant-contract API (/api/v1/dominant), admin page (/admin) and the
+# dashboard share this port.
+listen = "0.0.0.0:18313"
+
+[cn_market]
+# gRPC cn_market.v1 listens on this config's `listen` (0.0.0.0:18312).
+config = "/home/fanghaizhou/cn_futures_db/config/cn_kline_server.toml"
+
+# ---- supervised services ----
+[[service]]
+name = "cn-reference-api"
+description = "国内期货参考数据 HTTP（:8765，Python）"
+cwd = "/home/fanghaizhou/cn_futures_db/reference"
+command = "/home/fanghaizhou/cn_futures_db/reference/scripts/run-api.sh"
+stop_timeout_s = 10
+env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
+
+[[service]]
+name = "cn-reference-daily-sync"
+description = "国内期货参考数据每日同步（自带调度，上海 18:15）"
+cwd = "/home/fanghaizhou/cn_futures_db/reference"
+command = "/home/fanghaizhou/cn_futures_db/reference/scripts/run-daily-sync.sh"
+stop_timeout_s = 30
+env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
+
+[[service]]
+name = "cme-reference"
+description = "CME 参考数据服务（:8770，Python）"
+cwd = "/home/fanghaizhou/cn_futures_db/reference_cme"
+command = "/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python"
+args = ["-m", "cme_reference.server"]
+stop_timeout_s = 10
+env = { CME_REFERENCE_HOST = "0.0.0.0", CME_REFERENCE_PORT = "8770", PYTHONUNBUFFERED = "1", TZ = "UTC" }
+
+[[service]]
+name = "exchange-mcp"
+description = "交易所 MCP（:8780，同机其他用户在用）"
+cwd = "/home/fanghaizhou/cn_futures_db/reference"
+command = "/bin/sh"
+args = ["scripts/run-mcp.sh"]
+stop_timeout_s = 10
+env = { EXCHANGE_MCP_HOST = "0.0.0.0", EXCHANGE_MCP_PORT = "8780", EXCHANGE_MCP_ALLOWED_HOSTS = "172.16.30.38", PYTHONUNBUFFERED = "1", TZ = "UTC" }
+
+[[service]]
+name = "mdl-replay"
+description = "MDL 单日回放（ZMQ :13100，按需启用）"
+enabled = false
+cwd = "/home/fanghaizhou/cn_futures_db"
+# Pinned to cores 0-31 as before (taskset); enable here and restart the server.
+command = "/usr/bin/taskset"
+args = ["-c", "0-31", "/home/fanghaizhou/cn_futures_db/target/release/mdl-replay", "serve", "--config", "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"]
+stop_timeout_s = 10
+
+# ---- scheduled jobs (serial) ----
+[[job]]
+name = "cn-daily"
+description = "国内期货：RocksDB 回放、1 分钟导出、裁剪、分桶、主力（钉钉）"
+cwd = "/home/fanghaizhou/cn_futures_db"
+command = "/home/fanghaizhou/cn_futures_db/target/release/cn-daily"
+args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/cn_daily.toml"]
+schedule = { tz = "Asia/Shanghai", at = ["16:30"] }
+timeout_minutes = 600
+
+[[job]]
+name = "ib-kline-daily"
+description = "IB 分钟线：MySQL 增量 -> kline_ib.parquet + catalog（钉钉）"
+cwd = "/home/fanghaizhou/cn_futures_db"
+command = "/home/fanghaizhou/cn_futures_db/scripts/run_ib_kline_daily.sh"
+schedule = { tz = "Asia/Shanghai", at = ["09:30"] }
+timeout_minutes = 120
