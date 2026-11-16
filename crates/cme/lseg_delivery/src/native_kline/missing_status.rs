@@ -248,6 +248,7 @@ pub(super) fn group_status(
         let mut previous = State::Unknown;
         let mut writer =
             io::StatusWriter::new_with_pool(root, product, &ric, cfg.publisher.clone())?;
+        writer.set_policy(cfg.replace.clone(), 0);
         let mut events = Events::new(&sources, &dbs, &ric, lo, hi, 13)?;
         let mut rows = 0u64;
         let mut first = hi;

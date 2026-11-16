@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core/cn_futures_core",
     "crates/common/dingtalk",
+    "crates/common/safe_replace",
     "crates/proto/cn_market_proto",
     "crates/cn/cn_daily",
     "crates/cn/cn_kline_server",
@@ -15,6 +16,7 @@ members = [
     "crates/cme/cme_tas_replay",
     "crates/cme/lseg_delivery",
     "crates/cme/ib_kline_export",
+    "crates/cme/lseg_daily",
     "crates/usstock/usstock_replay",
     "crates/usstock/usstock_lseg_mbp_replay",
     "crates/usstock/usstock_lseg_raw_replay",

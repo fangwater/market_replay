@@ -586,6 +586,7 @@ pub async fn build(a: Build) -> Result<()> {
         ric: None,
         workers: 1,
         publisher: None,
+        replace: None,
     };
     let meta = Metadata::load(&cfg)?;
     let plan = io::read_json(&a.plan)?;

@@ -1,0 +1,47 @@
+# Daily LSEG TAS delivery job (lseg-daily). See docs/lseg/lseg_daily.md.
+# Writes the PRODUCTION delivery root; only problems go to meta/problems.
+remote_root = "http://10.61.20.12/public/users/u158/public/lseg_data/future_daily/normalised/"
+# Raw daily gzip archive (same directory as the 2026-11-09 batch; never overwritten).
+raw_root = "/mnt/hdd-raid5-72t/liang_torch/lseg_data/future_daily/normalised"
+work_root = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/lseg_daily"
+db_root = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_tas_daily"
+export_root = "/mnt/hdd-raid5-72t/liang_torch/lseg_data/tas_tick_parquet/lseg_daily"
+delivery_root = "/mnt/nfs/30.100_cta_data/lseg"
+production = true
+state_file = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/lseg_daily/state.json"
+project = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data"
+column_rules = "/home/fanghaizhou/cn_futures_db/config/lseg/tas_daily_column_rules.json"
+# First run only: dates and RIC owners already delivered by the Python batch.
+bootstrap_runs = ["/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_daily_ingest_20261109"]
+approved_exchanges = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_status_20261109/plan.json"
+hrd = [
+    "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_causal_roll_inputs_20261023/hrd.csv",
+    "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/ib_tas_all_futures_20261103/supplement_hrd.csv",
+]
+kline_base_plan = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_full_rocksdb_20261112/plan.json"
+kline_cache = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/lseg_full_rocksdb_20261112/extract"
+bin_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay/release"
+# Remote files modified less than this long ago wait for the next run.
+settle_minutes = 60
+# A newer date waits this long for an earlier missing day (then: source gap).
+hole_wait_hours = 72
+max_new_files = 0
+nice = 10
+catalog = true
+# Production was built with --prune-expired-status (removes later UTC dates that
+# hold only redundant post-expiry status files). Off until approved; see docs.
+catalog_prune_expired_status = false
+catalog_extra_args = []
+host_tag = "market_replay@30.38"
+dingtalk_webhook_env = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL"
+dingtalk_secret_env = "CN_FUTURES_DB_DINGTALK_SECRET"
+
+# Fixed pools (64 GiB / 32 threads total; steps run one at a time).
+[workers]
+download = 4
+stage = 4
+replay = 8
+parse = 8
+export = 2
+status = 3
+kline = 2

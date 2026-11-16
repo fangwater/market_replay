@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -126,6 +126,9 @@ pub struct Config {
     pub ric: Option<String>,
     pub workers: usize,
     pub publisher: Option<Arc<io::PublicationPool>>,
+    /// Compare existing kline / session_status day files and replace
+    /// differing ones (with a local backup); `None` keeps them untouched.
+    pub replace: Option<Arc<io::Replace>>,
 }
 impl Config {
     pub fn run_dir(&self) -> PathBuf {
@@ -745,6 +748,9 @@ pub struct Metadata {
     reported: HashMap<(i32, String), u64>,
     references: HashMap<String, Vec<Reference>>,
     daily: HashMap<String, Vec<(u64, u64)>>,
+    /// Per-job daily coverage from the plan (`coverage_days`), used by
+    /// lseg-daily batches instead of the pinned 20261109 manifests.
+    job_daily: HashMap<String, Vec<(u64, u64)>>,
     protected: HashMap<String, Value>,
 }
 impl Metadata {
@@ -787,6 +793,7 @@ impl Metadata {
                 BTreeSet::from([v.as_str().context("venue")?.into()]),
             );
         }
+        m.load_plan_overlays(cfg, &approved["exchanges"])?;
         let paths = [
             PathBuf::from(
                 "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_causal_roll_inputs_20261023/hrd.csv",
@@ -874,6 +881,44 @@ impl Metadata {
         }
         Ok(m)
     }
+    /// Plan jobs written by lseg-daily carry their own coverage days and the
+    /// exchange map used for their trade/quote/status files. RICs already in
+    /// the approved 2026 map keep that venue; the map only adds new RICs.
+    fn load_plan_overlays(&mut self, cfg: &Config, approved: &Value) -> Result<()> {
+        let plan = io::read_json(&cfg.plan)?;
+        let mut maps = BTreeSet::new();
+        for job in plan["jobs"].as_array().context("plan jobs")? {
+            let id = job["id"].as_str().context("job id")?;
+            if let Some(days) = job.get("coverage_days").and_then(Value::as_array) {
+                let mut ranges = Vec::with_capacity(days.len());
+                for day in days {
+                    let at = day
+                        .as_str()
+                        .and_then(io::parse_ns)
+                        .with_context(|| format!("coverage day in {id}"))?;
+                    ranges.push((at, at + DAY));
+                }
+                self.job_daily.insert(id.into(), ranges);
+            }
+            if let Some(path) = job.get("exchange_map").and_then(Value::as_str) {
+                let year = i32::try_from(job["year"].as_i64().context("job year")?)?;
+                maps.insert((year, PathBuf::from(path)));
+            }
+        }
+        for (year, path) in maps {
+            let map = io::read_json(&path)?;
+            for (ric, v) in map.as_object().context("exchange map object")? {
+                let venue = v.as_str().context("exchange map venue")?.to_lowercase();
+                if year == 2026 && approved.get(ric).is_some() {
+                    continue;
+                }
+                let entry = self.venues.entry((year, ric.clone())).or_default();
+                entry.clear();
+                entry.insert(venue);
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn venue(&self, year: i32, ric: &str) -> String {
         let candidates = self.venues.get(&(year, ric.into()));
         match candidates {
@@ -897,7 +942,9 @@ fn coverage(
         if s.job.year != year {
             continue;
         }
-        if s.job.source == "daily" {
+        if let Some(days) = metadata.job_daily.get(&s.job.id) {
+            ranges.extend(days.iter().copied())
+        } else if s.job.source == "daily" {
             ranges.extend(metadata.daily.get(product).into_iter().flatten().copied())
         } else {
             let (a, b) = s.job.period.split_once('_').context("source period")?;
@@ -999,12 +1046,14 @@ fn group(
             .project
             .join("artifacts/lseg_full_rocksdb_20261112/groups")
             .join(format!("{key}.json"));
-        if prior.exists() {
-            let p = io::read_json(&prior)?;
-            ensure!(
-                p["input_signature"] == signature,
-                "legacy group source identity changed: {year}/{product}"
-            );
+        // A legacy group whose sources have since grown (a new daily batch)
+        // is recomputed; existing files are never overwritten by the sinks.
+        let legacy = if prior.exists() {
+            Some(io::read_json(&prior)?)
+        } else {
+            None
+        };
+        if let Some(p) = legacy.filter(|p| p["input_signature"] == signature) {
             let stats: Stats = serde_json::from_value(p)?;
             io::save(
                 &checkpoint,
@@ -1063,13 +1112,58 @@ fn group(
             total.add(&s);
             continue;
         }
-        if cfg.formal() && year == 2026 {
-            if let Some(p) = meta.protected.get(&ric) {
+        // Corrected RICs (correction_policy_version=1) keep their revised
+        // files: unchanged sources are reused as a whole; with new trades only
+        // days from the protected end on are generated, earlier existing
+        // files are never compared or replaced.
+        let mut frozen_before = 0u64;
+        let mut protected_late = None;
+        if (cfg.formal() || cfg.replace.is_some()) && year == 2026 {
+            if let Some(p) = meta.protected.get(&ric).filter(|p| {
+                p["source_trade_rows"].as_u64() != Some(n)
+                    || p["source_volume"].as_u64() != Some(volume)
+            }) {
+                let end = p["end_ns"].as_u64().context("protected end_ns")?;
+                // The revision was built from the base-plan sources only; they
+                // must be unchanged. Newer (daily-batch) sources may add trades.
+                // The revision was built from the base-plan sources only. Trades
+                // on UTC days delivered later by lseg-daily batches (their
+                // `coverage_days`; no other source covers those days) are new;
+                // everything else must be exactly what was revised.
+                let new_days: HashSet<u64> = sources
+                    .iter()
+                    .filter_map(|s| meta.job_daily.get(&s.job.id))
+                    .flatten()
+                    .map(|(a, _)| a / DAY)
+                    .collect();
+                let (mut pn, mut pv, mut ln, mut lv) = (0u64, 0u64, 0u64, 0u64);
+                for (at, x) in data.bars.range(..end) {
+                    if new_days.contains(&(at / DAY)) {
+                        ln += x.count;
+                        lv += x.volume;
+                    } else {
+                        pn += x.count;
+                        pv += x.volume;
+                    }
+                }
+                let after = data
+                    .bars
+                    .range(end..)
+                    .filter(|(at, _)| !new_days.contains(&(*at / DAY)))
+                    .count();
                 ensure!(
-                    p["source_trade_rows"].as_u64() == Some(n)
-                        && p["source_volume"].as_u64() == Some(volume),
-                    "protected revised RIC gross quantity mismatch: {ric}"
+                    p["source_trade_rows"].as_u64() == Some(pn)
+                        && p["source_volume"].as_u64() == Some(pv)
+                        && after == 0,
+                    "protected revised RIC: its original sources changed: {ric} (now {pn}/{pv}, revised from {}/{})",
+                    p["source_trade_rows"],
+                    p["source_volume"]
                 );
+                if ln > 0 {
+                    protected_late = Some((end, ln, lv));
+                }
+                frozen_before = end;
+            } else if let Some(p) = meta.protected.get(&ric) {
                 let s = Stats {
                     rics: 1,
                     reused_rics: 1,
@@ -1106,6 +1200,18 @@ fn group(
                 .join(&key)
                 .join(format!("{}.csv", component(&ric))),
         );
+        if let Some((end, count, volume)) = protected_late {
+            problems.record(
+                &ric,
+                "protected_late_trades_not_applied",
+                0,
+                end,
+                count,
+                &format!(
+                    "{count} late trades / volume {volume} before the protected end; revised files kept (correction_policy_version=1 netting is not in the native engine)"
+                ),
+            )?
+        }
         if venue == "review" {
             problems.record(
                 &ric,
@@ -1129,6 +1235,8 @@ fn group(
         let first = data.bars.values().map(|b| b.first.0).min().unwrap();
         let last = data.bars.values().map(|b| b.last.0).max().unwrap();
         let (start, end, gaps) = coverage(&sources, meta, year, product, first, last)?;
+        let gap_ranges = gaps.clone();
+        let mut withheld = 0u64;
         let refs: Vec<_> = meta
             .references
             .get(&ric)
@@ -1176,6 +1284,7 @@ fn group(
         );
         let mut writer =
             io::StatusWriter::new_with_pool(root.clone(), product, &ric, cfg.publisher.clone())?;
+        writer.set_policy(cfg.replace.clone(), frozen_before);
         let mut event = Events::new(
             &sources,
             &dbs,
@@ -1295,9 +1404,9 @@ fn group(
                 0,
                 0,
                 1,
-                "padding bounded by last observed LSEG evidence",
+                "padding through the last UTC day with LSEG evidence, within source coverage",
             )?;
-            end.min((last_status / MINUTE + 1) * MINUTE)
+            end.min((last_status / DAY + 1) * DAY)
         }
         .max((last / MINUTE + 1) * MINUTE);
         if expiry.is_some_and(|t| last >= t) {
@@ -1365,6 +1474,22 @@ fn group(
                 });
                 at += MINUTE;
             }
+            // Never publish a UTC day the delivered sources do not fully cover.
+            // Real source periods and daily files are UTC-day aligned, so a day
+            // is either fully covered or fully outside / inside a gap; the
+            // trailing edge is handled by the day-aligned grid end above.
+            let (d0, d1) = (day * DAY, (day + 1) * DAY);
+            let uncovered =
+                d1 <= start || d0 >= end || gap_ranges.iter().any(|&(a, b)| a <= d0 && d1 <= b);
+            if uncovered {
+                ensure!(
+                    out.iter().all(|k| k.count == 0),
+                    "trades inside an uncovered UTC day: {ric} {}",
+                    io::date(day * DAY)?
+                );
+                withheld += 1;
+                continue;
+            }
             let batch = io::kline_batch(&ric, &out)?;
             let path = root.join(io::date(day * DAY)?).join("kline.parquet");
             io::write_kline(
@@ -1373,11 +1498,16 @@ fn group(
                 &mut directories,
                 &mut pending,
                 selected.contains_key(&(files as usize)),
+                cfg.replace.clone(),
+                day * DAY < frozen_before,
             )?;
             files += 1;
             rows += out.len() as u64;
         }
         pending.finish()?;
+        if withheld > 0 {
+            eprintln!("{year}/{product}/{ric}: {withheld} UTC days not fully covered by delivered sources withheld");
+        }
         ensure!(
             (written_count, written_volume) == (n, volume),
             "minute quantity conservation failed"
@@ -1788,6 +1918,7 @@ mod tests {
             ric: None,
             workers: 1,
             publisher: Some(io::PublicationPool::new(2).unwrap()),
+            replace: None,
         };
         let formal = Config {
             output: PathBuf::from("/mnt/nfs/30.100_cta_data/lseg"),

@@ -413,78 +413,262 @@ impl DayDirectories {
     }
 }
 
+/// Replacement of already-delivered kline / session_status day files.
+/// Without it (the default) an existing file is only footer-checked.
+pub struct Replace {
+    pub delivery_root: PathBuf,
+    pub backup_root: PathBuf,
+    /// Existing files of earlier UTC days are only footer-checked.
+    pub compare_from: u64,
+    log: std::sync::Mutex<File>,
+}
+impl Replace {
+    pub fn new(
+        delivery_root: PathBuf,
+        backup_root: PathBuf,
+        compare_from: u64,
+        log: &Path,
+    ) -> Result<Arc<Self>> {
+        ensure!(
+            !backup_root.starts_with(&delivery_root) && !log.starts_with(&delivery_root),
+            "backups and the replacement log must not be on the delivery disk"
+        );
+        fs::create_dir_all(log.parent().context("log parent")?)?;
+        let log = File::options().create(true).append(true).open(log)?;
+        Ok(Arc::new(Self {
+            delivery_root,
+            backup_root,
+            compare_from,
+            log: std::sync::Mutex::new(log),
+        }))
+    }
+    fn record(&self, value: serde_json::Value) -> Result<()> {
+        use std::io::Write;
+        let mut f = self.log.lock().unwrap();
+        writeln!(f, "{value}")?;
+        f.sync_data()?;
+        Ok(())
+    }
+}
+
+/// UTC day start of `<...>/<YYYYMMDD>/<file>`.
+fn day_of(path: &Path) -> Option<u64> {
+    let d = path.parent()?.file_name()?.to_str()?;
+    let date = chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok()?;
+    u64::try_from(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp_nanos_opt()?).ok()
+}
+
+pub fn read_all(path: &Path) -> Result<RecordBatch> {
+    let b = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
+    let schema = b.schema().clone();
+    let batches = b
+        .with_batch_size(BATCH)
+        .build()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(arrow_select::concat::concat_batches(&schema, &batches)?)
+}
+
+/// Same columns (name, type) and values; file/schema metadata is ignored,
+/// since delivered files may carry descriptive keys added later.
+pub fn same_values(a: &RecordBatch, b: &RecordBatch) -> bool {
+    a.num_rows() == b.num_rows()
+        && a.num_columns() == b.num_columns()
+        && a.schema()
+            .fields()
+            .iter()
+            .zip(b.schema().fields())
+            .all(|(x, y)| x.name() == y.name() && x.data_type() == y.data_type())
+        && (0..a.num_columns()).all(|i| a.column(i).to_data() == b.column(i).to_data())
+}
+
+/// Rows kept in memory to compare one existing day file (far above any
+/// observed day: 1440 minutes, or a few thousand status messages).
+const COMPARE_ROWS: u64 = 4_000_000;
+
+#[derive(PartialEq)]
+enum Mode {
+    /// New file: temp + footer check + no-overwrite hard link.
+    Create,
+    /// Existing file: footer check only.
+    Keep,
+    /// Existing protected (corrected) file: never touched.
+    Frozen,
+    /// Existing file: compare values; replace with backup if different.
+    Compare,
+}
+
 pub struct Sink {
     pub path: PathBuf,
     temporary: Option<PathBuf>,
     writer: Option<ArrowWriter<File>>,
     schema: Arc<Schema>,
     pub rows: u64,
+    mode: Mode,
+    policy: Option<Arc<Replace>>,
+    buffered: Vec<RecordBatch>,
+}
+fn writer_properties() -> Result<WriterProperties> {
+    Ok(WriterProperties::builder()
+        .set_max_row_group_size(BATCH)
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
+        .build())
+}
+fn open_temp(path: &Path, parent_known: bool) -> Result<(PathBuf, File)> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    if !parent_known {
+        fs::create_dir_all(path.parent().context("output parent")?)?;
+    }
+    let p = path.with_file_name(format!(
+        ".{}.{}.{}.partial",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let create = || {
+        File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&p)
+    };
+    let file = match create() {
+        Ok(file) => file,
+        // Another process may remove an empty date directory after
+        // enumeration. Recover without weakening no-overwrite publish.
+        Err(e) if parent_known && e.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path.parent().context("output parent")?)?;
+            create()?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok((p, file))
 }
 impl Sink {
     pub fn new(path: PathBuf, schema: Arc<Schema>) -> Result<Self> {
-        Self::new_impl(path, schema, false)
+        Self::new_impl(path, schema, false, None, false)
     }
     pub fn new_in(
         path: PathBuf,
         schema: Arc<Schema>,
         directories: &mut DayDirectories,
     ) -> Result<Self> {
-        let known = directories.plan(&path)?;
-        Self::new_impl(path, schema, known)
+        Self::new_with(path, schema, directories, None, false)
     }
-    fn new_impl(path: PathBuf, schema: Arc<Schema>, parent_known: bool) -> Result<Self> {
-        static SERIAL: AtomicU64 = AtomicU64::new(0);
+    pub fn new_with(
+        path: PathBuf,
+        schema: Arc<Schema>,
+        directories: &mut DayDirectories,
+        policy: Option<Arc<Replace>>,
+        frozen: bool,
+    ) -> Result<Self> {
+        let known = directories.plan(&path)?;
+        Self::new_impl(path, schema, known, policy, frozen)
+    }
+    fn new_impl(
+        path: PathBuf,
+        schema: Arc<Schema>,
+        parent_known: bool,
+        policy: Option<Arc<Replace>>,
+        frozen: bool,
+    ) -> Result<Self> {
         let mut out = Self {
             path,
             temporary: None,
             writer: None,
             schema,
             rows: 0,
+            mode: Mode::Create,
+            policy,
+            buffered: Vec::new(),
         };
-        if !out.path.exists() {
-            if !parent_known {
-                fs::create_dir_all(out.path.parent().context("output parent")?)?;
-            }
-            let p = out.path.with_file_name(format!(
-                ".{}.{}.{}.partial",
-                out.path.file_name().unwrap().to_string_lossy(),
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ));
-            let props = WriterProperties::builder()
-                .set_max_row_group_size(BATCH)
-                .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
-                .build();
-            let create = || {
-                File::options()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .open(&p)
+        if out.path.exists() {
+            out.mode = if frozen {
+                Mode::Frozen
+            } else if out
+                .policy
+                .as_ref()
+                .is_some_and(|p| day_of(&out.path).is_some_and(|d| d >= p.compare_from))
+            {
+                Mode::Compare
+            } else {
+                Mode::Keep
             };
-            let file = match create() {
-                Ok(file) => file,
-                // Another process may remove an empty date directory after
-                // enumeration. Recover without weakening no-overwrite publish.
-                Err(e) if parent_known && e.kind() == std::io::ErrorKind::NotFound => {
-                    fs::create_dir_all(out.path.parent().context("output parent")?)?;
-                    create()?
-                }
-                Err(e) => return Err(e.into()),
-            };
-            out.writer = Some(ArrowWriter::try_new(file, out.schema.clone(), Some(props))?);
-            out.temporary = Some(p)
+            return Ok(out);
         }
+        let (p, file) = open_temp(&out.path, parent_known)?;
+        out.writer = Some(ArrowWriter::try_new(
+            file,
+            out.schema.clone(),
+            Some(writer_properties()?),
+        )?);
+        out.temporary = Some(p);
         Ok(out)
     }
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         if let Some(w) = &mut self.writer {
             w.write(batch)?
         }
+        if self.mode == Mode::Compare {
+            ensure!(
+                self.rows + batch.num_rows() as u64 <= COMPARE_ROWS,
+                "day file too large to compare in memory: {}",
+                self.path.display()
+            );
+            self.buffered.push(batch.clone());
+        }
         self.rows += batch.num_rows() as u64;
         Ok(())
     }
+    /// Existing file differs: new temp file (footer checked), byte-verified
+    /// local backup of the old one, then rename over it.
+    fn compare_replace(&mut self) -> Result<()> {
+        let policy = self.policy.clone().context("replace policy")?;
+        let new = arrow_select::concat::concat_batches(&self.schema, &self.buffered)?;
+        let old = read_all(&self.path)
+            .with_context(|| format!("reading existing {}", self.path.display()))?;
+        if same_values(&old, &new) {
+            return light(&self.path, &self.schema, self.rows);
+        }
+        let prefix =
+            old.num_rows() < new.num_rows() && same_values(&old, &new.slice(0, old.num_rows()));
+        let (temp, file) = open_temp(&self.path, true)?;
+        self.temporary = Some(temp.clone());
+        let mut w = ArrowWriter::try_new(file, self.schema.clone(), Some(writer_properties()?))?;
+        w.write(&new)?;
+        w.finish()?;
+        w.inner().sync_all()?;
+        light_file(w.inner().try_clone()?, &self.path, &self.schema, self.rows)?;
+        drop(w);
+        let backup = safe_replace::replace_with_backup(
+            &temp,
+            &self.path,
+            &policy.delivery_root,
+            &policy.backup_root,
+        )?;
+        self.temporary = None;
+        light(&self.path, &self.schema, self.rows)?;
+        ensure!(
+            same_values(&read_all(&self.path)?, &new),
+            "replaced file readback differs: {}",
+            self.path.display()
+        );
+        policy.record(serde_json::json!({
+            "path": self.path.strip_prefix(&policy.delivery_root).unwrap_or(&self.path),
+            "backup": backup,
+            "old_rows": old.num_rows(),
+            "new_rows": new.num_rows(),
+            "old_is_prefix": prefix,
+        }))
+    }
     pub fn finish(mut self) -> Result<PathBuf> {
+        match self.mode {
+            Mode::Frozen => return Ok(self.path.clone()),
+            Mode::Compare => {
+                self.compare_replace()?;
+                return Ok(self.path.clone());
+            }
+            Mode::Keep | Mode::Create => {}
+        }
         if let Some(mut w) = self.writer.take() {
             w.finish()?;
             w.inner().sync_all()?;
@@ -542,8 +726,16 @@ pub struct StatusWriter {
     pub files: Vec<StatusFile>,
     directories: DayDirectories,
     pending: PendingFiles,
+    policy: Option<Arc<Replace>>,
+    frozen_before: u64,
 }
 impl StatusWriter {
+    /// Existing day files: compare/replace under `policy`; days before
+    /// `frozen_before` (protected corrected RICs) are never touched.
+    pub fn set_policy(&mut self, policy: Option<Arc<Replace>>, frozen_before: u64) {
+        self.policy = policy;
+        self.frozen_before = frozen_before;
+    }
     pub fn new(root: PathBuf, product: &str, ric: &str) -> Result<Self> {
         Self::new_with_pool(root, product, ric, None)
     }
@@ -565,6 +757,8 @@ impl StatusWriter {
             files: Vec::new(),
             directories,
             pending: PendingFiles::new(pool),
+            policy: None,
+            frozen_before: 0,
         })
     }
     fn flush(&mut self) -> Result<()> {
@@ -598,12 +792,14 @@ impl StatusWriter {
             self.close()?;
             self.day = day;
             self.before = row.before;
-            self.sink = Some(Sink::new_in(
+            self.sink = Some(Sink::new_with(
                 self.root
                     .join(date(day * DAY)?)
                     .join("session_status.parquet"),
                 status_schema(),
                 &mut self.directories,
+                self.policy.clone(),
+                day * DAY < self.frozen_before,
             )?)
         }
         self.buffer.push(row);
@@ -628,13 +824,17 @@ pub fn write_kline(
     directories: &mut DayDirectories,
     pending: &mut PendingFiles,
     sample: bool,
+    policy: Option<Arc<Replace>>,
+    frozen: bool,
 ) -> Result<()> {
     let known = directories.plan(&path)?;
     pending.execute(move || {
-        let mut sink = Sink::new_impl(path.clone(), kline_schema(), known)?;
+        let mut sink = Sink::new_impl(path.clone(), kline_schema(), known, policy, frozen)?;
+        let frozen_kept = sink.mode == Mode::Frozen;
         sink.write(&batch)?;
         sink.finish()?;
-        if sample {
+        // Frozen (protected, revised) files keep their revised values.
+        if sample && !frozen_kept {
             verify_kline(&path, &batch)?;
         }
         Ok(path)
@@ -806,6 +1006,8 @@ mod performance_tests {
                                 &mut directories,
                                 &mut pending,
                                 [0, 16, 31].contains(&day),
+                                None,
+                                false,
                             )?;
                         }
                         pending.finish()
@@ -1048,4 +1250,76 @@ pub fn compare(left: &Path, right: &Path) -> Result<()> {
         pairs.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    fn day(minutes: u64, close: i64) -> RecordBatch {
+        let start = 1_794_009_600_000_000_000u64; // 2026-11-07 00:00 UTC
+        let rows: Vec<Kline> = (0..minutes)
+            .map(|i| Kline {
+                at: start + i * crate::native_kline::MINUTE,
+                prices: [Some(close); 4],
+                volume: 0,
+                count: 0,
+                ffill: true,
+                status: "UNKNOWN",
+            })
+            .collect();
+        kline_batch("X", &rows).unwrap()
+    }
+
+    fn sink(path: &Path, policy: Option<Arc<Replace>>, frozen: bool) -> Sink {
+        let ric_dir = path.parent().unwrap().parent().unwrap();
+        let mut d = DayDirectories::new(ric_dir.into()).unwrap();
+        Sink::new_with(path.into(), kline_schema(), &mut d, policy, frozen).unwrap()
+    }
+
+    fn write(path: &Path, b: &RecordBatch, policy: Option<Arc<Replace>>, frozen: bool) {
+        let mut s = sink(path, policy, frozen);
+        s.write(b).unwrap();
+        s.finish().unwrap();
+    }
+
+    #[test]
+    fn differing_existing_day_is_backed_up_and_replaced() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("delivery");
+        let path = root.join("review/2026/X/20261107/kline.parquet");
+        write(&path, &day(601, 1), None, false);
+        let original = fs::read(&path).unwrap();
+        // Without a policy an existing file is kept (row-count check fails).
+        let mut keep = sink(&path, None, false);
+        keep.write(&day(1440, 1)).unwrap();
+        assert!(keep.finish().is_err());
+        let log = t.path().join("replaced.jsonl");
+        let policy = Replace::new(root.clone(), t.path().join("backup"), 0, &log).unwrap();
+        // Frozen (protected) days are never touched.
+        write(&path, &day(1440, 1), Some(policy.clone()), true);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        // Identical values: untouched, nothing logged.
+        write(&path, &day(601, 1), Some(policy.clone()), false);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "");
+        // Tail completion: replaced, old bytes kept in the backup.
+        write(&path, &day(1440, 1), Some(policy.clone()), false);
+        assert!(same_values(&read_all(&path).unwrap(), &day(1440, 1)));
+        let backup = t.path().join("backup/review/2026/X/20261107/kline.parquet");
+        assert_eq!(fs::read(backup).unwrap(), original);
+        let line: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&log).unwrap().trim()).unwrap();
+        assert_eq!(line["old_rows"], 601);
+        assert_eq!(line["new_rows"], 1440);
+        assert_eq!(line["old_is_prefix"], true);
+        // A value correction with the same row count is also replaced.
+        let p2 = Replace::new(root.clone(), t.path().join("backup2"), 0, &log).unwrap();
+        write(&path, &day(1440, 2), Some(p2), false);
+        assert!(same_values(&read_all(&path).unwrap(), &day(1440, 2)));
+        // Days before compare_from are only footer-checked, never replaced.
+        let later = Replace::new(root, t.path().join("backup3"), u64::MAX, &log).unwrap();
+        write(&path, &day(1440, 3), Some(later), false);
+        assert!(same_values(&read_all(&path).unwrap(), &day(1440, 2)));
+    }
 }

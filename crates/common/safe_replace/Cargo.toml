@@ -1,0 +1,11 @@
+[package]
+name = "safe_replace"
+version.workspace = true
+edition.workspace = true
+description = "Replace an already-delivered file: byte-verified local backup first, then rename a checked temp file over it"
+
+[dependencies]
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -17,10 +17,10 @@ use parquet::{
     basic::{Compression, ZstdLevel},
     file::{properties::WriterProperties, statistics::Statistics},
 };
+use safe_replace::sync_dir;
 use std::{
     collections::VecDeque,
     fs::{self, File},
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -241,20 +241,6 @@ impl Drop for Temp {
     }
 }
 
-fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
-    let (mut x, mut y) = (Vec::new(), Vec::new());
-    File::open(a)?.read_to_end(&mut x)?;
-    File::open(b)?.read_to_end(&mut y)?;
-    Ok(x == y)
-}
-
-fn sync_dir(path: &Path) {
-    // Directory fsync is best effort on NFS.
-    if let Ok(d) = File::open(path) {
-        let _ = d.sync_all();
-    }
-}
-
 impl Publisher {
     pub fn publish(&self, f: &DayFile) -> Result<Outcome> {
         let rows = f.batch.num_rows() as u64;
@@ -326,37 +312,12 @@ impl Publisher {
             }
             Outcome::Created
         } else {
-            let relative = f.path.strip_prefix(&self.delivery_root).with_context(|| {
-                format!(
-                    "{} is outside delivery root {}",
-                    f.path.display(),
-                    self.delivery_root.display()
-                )
-            })?;
-            let backup = self.backup_root.join(relative);
-            fs::create_dir_all(backup.parent().unwrap())?;
-            {
-                let mut src = File::open(&f.path)?;
-                let mut dst = File::options()
-                    .write(true)
-                    .create_new(true)
-                    .open(&backup)
-                    .with_context(|| {
-                        format!(
-                            "backup already exists (one replacement per file per run): {}",
-                            backup.display()
-                        )
-                    })?;
-                std::io::copy(&mut src, &mut dst)?;
-                dst.sync_all()?;
-            }
-            sync_dir(backup.parent().unwrap());
-            ensure!(
-                same_bytes(&f.path, &backup)?,
-                "backup differs from original: {}",
-                backup.display()
-            );
-            fs::rename(&temp_path, &f.path)?;
+            safe_replace::replace_with_backup(
+                &temp_path,
+                &f.path,
+                &self.delivery_root,
+                &self.backup_root,
+            )?;
             temp.0 = None;
             Outcome::Replaced
         };

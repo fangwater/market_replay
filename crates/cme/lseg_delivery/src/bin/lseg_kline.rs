@@ -1,5 +1,5 @@
 //! Standalone Rust direct RocksDB -> daily Parquet tool.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use lseg_delivery::native_kline::engine::{self, Config};
 use std::path::PathBuf;
@@ -78,9 +78,21 @@ struct RunArgs {
     ric: Option<String>,
     #[arg(long, default_value_t = 2)]
     workers: usize,
+    /// Compare existing kline/session_status day files and replace differing
+    /// ones; the old file is first copied here (local NVMe, not the delivery disk).
+    #[arg(long)]
+    backup_root: Option<PathBuf>,
+    /// With --backup-root: existing files of earlier UTC days (YYYY-MM-DD) are
+    /// only footer-checked. Default: compare every regenerated day.
+    #[arg(long, requires = "backup_root")]
+    compare_from: Option<String>,
+    /// With --backup-root: JSON lines, one per replaced file.
+    #[arg(long, requires = "backup_root")]
+    replaced_log: Option<PathBuf>,
 }
-impl From<RunArgs> for Config {
-    fn from(args: RunArgs) -> Self {
+impl TryFrom<RunArgs> for Config {
+    type Error = anyhow::Error;
+    fn try_from(args: RunArgs) -> Result<Self> {
         let RunArgs {
             project,
             plan,
@@ -91,8 +103,28 @@ impl From<RunArgs> for Config {
             product,
             ric,
             workers,
+            backup_root,
+            compare_from,
+            replaced_log,
         } = args;
-        Config {
+        let replace = match backup_root {
+            None => None,
+            Some(backup) => {
+                let from = match compare_from {
+                    Some(d) => lseg_delivery::native_kline::io::parse_ns(&d)
+                        .with_context(|| format!("--compare-from {d}"))?,
+                    None => 0,
+                };
+                let log = replaced_log.unwrap_or_else(|| work.join("replaced.jsonl"));
+                Some(lseg_delivery::native_kline::io::Replace::new(
+                    output.clone(),
+                    backup,
+                    from,
+                    &log,
+                )?)
+            }
+        };
+        Ok(Config {
             project,
             plan,
             cache,
@@ -103,7 +135,8 @@ impl From<RunArgs> for Config {
             ric,
             workers,
             publisher: None,
-        }
+            replace,
+        })
     }
 }
 fn main() -> Result<()> {
@@ -113,7 +146,7 @@ fn main() -> Result<()> {
         Command::Compare { left, right } => lseg_delivery::native_kline::io::compare(&left, &right),
         Command::CheckPlan { plan } => engine::check_plan(&plan),
         Command::Run(args) | Command::StatusOnly(args) => {
-            let config = Config::from(args);
+            let config = Config::try_from(args)?;
             let state = config.run_dir().join(if status_only {
                 "status_only_state.json"
             } else {
