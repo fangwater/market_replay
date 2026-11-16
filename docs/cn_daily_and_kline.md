@@ -35,7 +35,7 @@ scripts/start_cn_services.sh   # PM2: cn-futures-kline + cn-futures-daily
 
 ## gRPC kline：`cn_market.v1.CnFuturesMarket`
 
-契约在 `crates/proto/cn_market_proto/proto/cn_market.proto`，服务端在 `crates/cn/cn_kline_server`，默认监听 `127.0.0.1:18312`，PM2 进程名 `cn-futures-kline`。
+契约在 `crates/proto/cn_market_proto/proto/cn_market.proto`，服务端在 `crates/cn/cn_kline_server`，默认监听 `0.0.0.0:18312`（内网可访问），PM2 进程名 `cn-futures-kline`。
 
 这里**不做 Binance 兼容**，字段直接用期货的口径和单位：交易日、单边手数、含乘数的人民币成交额、合约乘数、最小变动价位、郑商所三位码和四位码。kline 数据也不单独维护，每次请求直接读生产 `baseline_data_1min` 的日文件。
 
@@ -59,3 +59,17 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 ```
 
 客户端用 git + rev 依赖 `cn_market_proto`，方式和 mkt_signal 依赖 core 一样。
+
+## 主力合约（2026-11-16 上线）
+
+- **计算：** 全部用 Rust（`crates/cn/cn_futures_roll`）。`cn_futures_roll` 从通联行情提取日终截面，只读到上一个开市日的目录；`cn_roll_replay` 是 preprocess `cn_futures.roll_replay` 的 Rust 移植，默认规则 `local_rqdata_rule0`：持仓超过当前主力 1.1 倍、只切到更远的交割月、不切回。2019-01-01 到 2026-08-26 的 36 个历史输出文件与 Python 逐字节一致，两种规则都验证过。
+- **数据：** `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/`
+  - `eod/<ex>_eod.csv`：2019-01-01 起的累积原始截面。
+  - `result/`：已发布的主力、复权因子、连续价格、连续性数据。
+  - `result.prev/`：上一次发布。
+- **每日：** `cn-daily` 先对每个交易日、每个交易所提取截面（工序名"主力截面"），并入累积截面后，从 `roll_start` 全量重算到最新交易日（"主力重算"，约 5 秒）。新结果里所有已发布的主力行都必须保持不变，才会原子替换 `result/`，否则停止并发钉钉。钉钉消息里会列出"今日换月"和"明日换月"。
+- **查询（HTTP JSON，不用 gRPC，内网可访问）：** 由 `cn-kline-server` 提供，监听 `0.0.0.0:18313`。
+  - `GET http://172.16.30.38:18313/api/v1/dominant`：每个品种在最新交易日的 `dominant`（当天生效）、`scheduled_next`（收盘后排给下一交易日）、`rolls_next_day`、`last_roll_day`。
+  - `GET http://172.16.30.38:18313/api/v1/dominant/{品种}?start=YYYY-MM-DD&end=YYYY-MM-DD`：逐日历史。
+  - MCP（8780）工具 `cn_dominant_contracts`，HTTP 调用形式是 `/api/cn_dominant_contracts?product=RB`。
+- **初始化（2026-11-16）：** 以 `cn_roll_replay/2019_20260826` 的原始截面加上 08-27 到 11-13 的缺口截面为输入，重算到 2026-11-13，08-26 及以前已发布的主力行逐行未变。

@@ -19,3 +19,8 @@ ready_after = "16:00"
 host_tag = "market_replay@30.38"
 dingtalk_webhook_env = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL"
 dingtalk_secret_env = "CN_FUTURES_DB_DINGTALK_SECRET"
+
+# Dominant-contract (主力) maintenance: per-day EOD extraction + full replay since roll_start.
+roll_root = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll"
+roll_start = "2019-01-01"
+roll_rule = "local_rqdata_rule0"

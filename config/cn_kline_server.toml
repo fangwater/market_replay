@@ -5,3 +5,6 @@ daily_state_file = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_daily_sta
 reference_api = "http://127.0.0.1:8765"
 session_as_of = "2026-11-15"
 metadata_refresh_s = 3600
+# HTTP JSON dominant-contract lookup (not gRPC), intranet.
+http_listen = "0.0.0.0:18313"
+roll_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/result"
