@@ -84,11 +84,20 @@ fn slots_path(cfg: &Config) -> PathBuf {
 }
 
 fn schedule_text(j: &Job) -> String {
-    let days = if j.schedule.weekdays.is_empty() {
+    let mut days = if j.schedule.weekdays.is_empty() {
         "每天".to_string()
     } else {
         j.schedule.weekdays.join(",")
     };
+    if !j.schedule.month_days.is_empty() {
+        let d: Vec<String> = j
+            .schedule
+            .month_days
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        days = format!("每月 {} 日", d.join(","));
+    }
     format!("{days} {} ({})", j.schedule.at.join(", "), j.schedule.tz)
 }
 
@@ -105,7 +114,9 @@ pub fn slots_between(job: &Job, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<D
     let mut d = from.with_timezone(&tz).date_naive() - CDuration::days(1);
     let last = to.with_timezone(&tz).date_naive();
     while d <= last {
-        if days.is_empty() || days.contains(&d.weekday()) {
+        let month_day =
+            job.schedule.month_days.is_empty() || job.schedule.month_days.contains(&d.day());
+        if month_day && (days.is_empty() || days.contains(&d.weekday())) {
             for t in &times {
                 if let Some(local) = tz.from_local_datetime(&d.and_time(*t)).earliest() {
                     let u = local.with_timezone(&Utc);
@@ -122,7 +133,12 @@ pub fn slots_between(job: &Job, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<D
 }
 
 fn next_slot(job: &Job, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    slots_between(job, now, now + CDuration::days(8))
+    let horizon = if job.schedule.month_days.is_empty() {
+        8
+    } else {
+        32
+    };
+    slots_between(job, now, now + CDuration::days(horizon))
         .into_iter()
         .next()
 }
@@ -488,6 +504,7 @@ mod tests {
                 tz: tz.into(),
                 at: at.iter().map(|s| s.to_string()).collect(),
                 weekdays: weekdays.iter().map(|s| s.to_string()).collect(),
+                month_days: vec![],
             },
             timeout_minutes: 1,
             stop_timeout_s: 1,
@@ -519,5 +536,20 @@ mod tests {
         assert!(slots_between(&j, at, at).is_empty());
         assert_eq!(slots_between(&j, at - CDuration::seconds(1), at), vec![at]);
         assert_eq!(next_slot(&j, at), Some(at + CDuration::days(1)));
+    }
+
+    #[test]
+    fn monthly_slots() {
+        let mut j = job("Asia/Shanghai", &["13:00"], &[]);
+        j.schedule.month_days = vec![2];
+        let from = Utc.with_ymd_and_hms(2026, 11, 16, 0, 0, 0).unwrap();
+        // 2026-12-02 13:00 Shanghai = 05:00 UTC; next one is 2027-01-02.
+        let first = Utc.with_ymd_and_hms(2026, 12, 2, 5, 0, 0).unwrap();
+        assert_eq!(next_slot(&j, from), Some(first));
+        assert_eq!(
+            slots_between(&j, from, first + CDuration::days(40)),
+            vec![first, Utc.with_ymd_and_hms(2027, 1, 2, 5, 0, 0).unwrap()]
+        );
+        assert!(schedule_text(&j).starts_with("每月 2 日"));
     }
 }

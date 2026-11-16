@@ -3,6 +3,9 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use lseg_delivery::native_kline::engine::{self, Config};
 use std::path::PathBuf;
+
+const DEFAULT_WITNESSES: &str =
+    "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_trade_witnesses_20261110";
 #[derive(Parser)]
 #[command(
     about = "Direct LSEG RocksDB to session status and continuous 1min Parquet; no Python or event JSON"
@@ -30,6 +33,44 @@ enum Command {
             default_value = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_full_rocksdb_20261112/plan.json"
         )]
         plan: PathBuf,
+    },
+    /// Import the raw source witnesses of completed identity recovery
+    /// (scripts/lseg/extract_revision_identity.py) into a per-RIC store
+    /// for trade-correction netting. Never overwrites an existing store.
+    WitnessImport {
+        /// identity_jobs_*.json lists (all jobs must be done).
+        #[arg(long, value_delimiter = ',', required = true)]
+        jobs: Vec<PathBuf>,
+        #[arg(
+            long,
+            default_value = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/trade_correction_work/identities"
+        )]
+        identities: PathBuf,
+        /// JSON whose top-level keys (object) or items (array) are the RICs
+        /// whose ledgers this recovery evidences.
+        #[arg(long)]
+        rics: PathBuf,
+        #[arg(long, default_value_t = 2026)]
+        year: i32,
+        #[arg(long, default_value = DEFAULT_WITNESSES)]
+        output: PathBuf,
+    },
+    /// Append the raw-CSV correction evidence of one daily batch (all
+    /// Correction rows, plus same-RIC trades with a corrected payload) as an
+    /// immutable store segment. Idempotent by segment name.
+    WitnessAppend {
+        #[arg(long, default_value = DEFAULT_WITNESSES)]
+        store: PathBuf,
+        #[arg(long)]
+        segment: String,
+        #[arg(long)]
+        year: i32,
+        /// Downloaded daily CSV files (.csv.gz / .csv.zst / .csv).
+        #[arg(long, value_delimiter = ',', required = true)]
+        files: Vec<PathBuf>,
+        /// Files decoded in parallel (fixed pool, 1..8).
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
     },
     Check {
         #[arg(
@@ -89,6 +130,14 @@ struct RunArgs {
     /// With --backup-root: JSON lines, one per replaced file.
     #[arg(long, requires = "backup_root")]
     replaced_log: Option<PathBuf>,
+    /// Raw source witness store for trade-correction netting
+    /// (correction_policy_version=1); see `witness-import`.
+    #[arg(long, default_value = DEFAULT_WITNESSES)]
+    witnesses: PathBuf,
+    /// Aggregate raw prints only (no witness store). Refused for the RICs
+    /// revised by the original ledger.
+    #[arg(long)]
+    no_witnesses: bool,
 }
 impl TryFrom<RunArgs> for Config {
     type Error = anyhow::Error;
@@ -106,6 +155,8 @@ impl TryFrom<RunArgs> for Config {
             backup_root,
             compare_from,
             replaced_log,
+            witnesses,
+            no_witnesses,
         } = args;
         let replace = match backup_root {
             None => None,
@@ -124,6 +175,14 @@ impl TryFrom<RunArgs> for Config {
                 )?)
             }
         };
+        let witnesses = if no_witnesses {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                lseg_delivery::native_kline::netting::WitnessStore::open(&witnesses)
+                    .with_context(|| format!("witness store {}", witnesses.display()))?,
+            ))
+        };
         Ok(Config {
             project,
             plan,
@@ -136,6 +195,7 @@ impl TryFrom<RunArgs> for Config {
             workers,
             publisher: None,
             replace,
+            witnesses,
         })
     }
 }
@@ -145,6 +205,59 @@ fn main() -> Result<()> {
     match args.command {
         Command::Compare { left, right } => lseg_delivery::native_kline::io::compare(&left, &right),
         Command::CheckPlan { plan } => engine::check_plan(&plan),
+        Command::WitnessAppend {
+            store,
+            segment,
+            year,
+            files,
+            workers,
+        } => {
+            let (added, corrections, rows) =
+                lseg_delivery::native_kline::netting::append_daily_witnesses(
+                    &store, &segment, year, &files, workers,
+                )?;
+            println!(
+                "witness segment {segment}: {corrections} corrections, {rows} rows, {}",
+                if added {
+                    "added"
+                } else if rows == 0 {
+                    "nothing to add"
+                } else {
+                    "already present"
+                }
+            );
+            Ok(())
+        }
+        Command::WitnessImport {
+            jobs,
+            identities,
+            rics,
+            year,
+            output,
+        } => {
+            let list = lseg_delivery::native_kline::io::read_json(&rics)?;
+            let rics: std::collections::BTreeSet<String> = match &list {
+                serde_json::Value::Object(m) => m.keys().cloned().collect(),
+                serde_json::Value::Array(v) => v
+                    .iter()
+                    .map(|r| r.as_str().map(str::to_owned).context("RIC string"))
+                    .collect::<Result<_>>()?,
+                _ => anyhow::bail!("--rics must be a JSON object or array"),
+            };
+            lseg_delivery::native_kline::netting::import_witnesses(
+                &jobs,
+                &identities,
+                &rics,
+                year,
+                &output,
+            )?;
+            println!(
+                "imported witnesses for {} RICs into {}",
+                rics.len(),
+                output.display()
+            );
+            Ok(())
+        }
         Command::Run(args) | Command::StatusOnly(args) => {
             let config = Config::try_from(args)?;
             let state = config.run_dir().join(if status_only {

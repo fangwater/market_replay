@@ -177,10 +177,7 @@ pub(super) fn group_status(
         return Ok(serde_json::from_value(record["stats"].clone())?);
     }
     let completed = main_contracts(cfg, &key, &signature)?;
-    let dbs = sources
-        .iter()
-        .map(|s| open(&s.job))
-        .collect::<Result<Vec<_>>>()?;
+    let dbs = open_all(&sources)?;
     for source in &sources {
         ensure!(
             source.identity["current"] == fs::read_to_string(source.job.db.join("CURRENT"))?,
@@ -248,7 +245,7 @@ pub(super) fn group_status(
         let mut previous = State::Unknown;
         let mut writer =
             io::StatusWriter::new_with_pool(root, product, &ric, cfg.publisher.clone())?;
-        writer.set_policy(cfg.replace.clone(), 0);
+        writer.set_policy(cfg.replace.clone());
         let mut events = Events::new(&sources, &dbs, &ric, lo, hi, 13)?;
         let mut rows = 0u64;
         let mut first = hi;
@@ -284,7 +281,7 @@ pub(super) fn group_status(
             rows += 1;
             events.advance(i);
         }
-        let files = writer.finish()?;
+        let (files, _, skipped) = writer.finish_with_directories()?;
         let mut corrections = 0u64;
         for (source, db) in sources.iter().zip(&dbs) {
             let cf = db.cf_handle(&source.job.cf).context("correction CF")?;
@@ -391,6 +388,7 @@ pub(super) fn group_status(
             status_only_rics: 1,
             status_rows: rows,
             status_files: files.len() as u64,
+            status_days_skipped: skipped,
             ..Stats::default()
         };
         io::save(

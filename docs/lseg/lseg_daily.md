@@ -20,7 +20,7 @@
    - 交易所目录：driver 以前分配过的 > `tas_status_20261109/plan.json` 的已核定表 > HRD MIC/交易所代码 > `review`。
    - `lseg_tas_parquet --layout ric-day --readback sampled`，全量核对 footer、文件集合和总数，再逐文件发布：临时文件 + fsync + footer 核对 + 不覆盖的硬链接；每个 CF/类型首中末 3 个文件比对整文件 SHA256。原始文件（trade/quote/status）不一致时报错、不替换。
    - `tas_status_parquet`。
-4. **K 线**：计划 = 基础计划（原样）+ 每个已交付 CF 一个 `daily` 作业（带 `coverage_days`、`exchange_map`）。先 `lseg_kline check-plan`，再对受影响的每个 (年份, 品种) 组跑 `lseg_kline run --year --product --backup-root ... --replaced-log ...`。
+4. **K 线**：计划 = 基础计划（原样）+ 每个已交付 CF 一个 `daily` 作业（带 `coverage_days`、`exchange_map`）。先 `lseg_kline check-plan`，再对每个新批次／品种跑 `lseg_kline witness-append`（日包改撤见证追加到 `kline_witnesses`，见 [成交改撤](tas_trade_revisions.md)），再对受影响的每个 (年份, 品种) 组跑 `lseg_kline run --year --product --backup-root ... --replaced-log ...`。
    - 某组第一次跑时比对当年每一天，一次性补全以前被截短的尾日；以后只比对从（本批最早日期与上次已交付末日中较早者）前一天开始的日期。
    - 替换记录写到 `meta/problems/lseg_daily/replaced.csv`，原因分 `late_day` / `tail_completion` / `correction` / `other`。旧文件备份在 `runtime/lseg_daily/backups/<运行时刻>/`，与原文件逐字节比对过。
 5. **目录**：本次没有任何失败时 `lseg_catalog build`（生产会导入 IB 清单）。`catalog_prune_expired_status` 默认关闭。
@@ -38,7 +38,7 @@
   2. 旧文件拷到本机备份，逐字节比对；
   3. rename 覆盖。
   这套流程和 `ib_kline_export` 共用 `crates/common/safe_replace`。
-- 237 个改撤保护 RIC：原生引擎没有 `correction_policy_version=1` 的冲销逻辑，所以保护期（`end_ns`）之前的已有文件一律不动。引擎会核对原基础来源的成交量与改撤记录一致；保护期内后来补到的成交记为 `protected_late_trades_not_applied`，问题文件在 `meta/problems/native_kline/`。保护期之后的新日期正常生成。
+- 改撤冲销（`correction_policy_version=1`）在原生引擎里，见 [成交改撤](tas_trade_revisions.md)。原 237 个改撤 RIC 和其它 RIC 一样重算，迟到的成交和改撤会经比对窗口替换。比对窗口以外的旧文件（原 Python 生成）原样保留，不做行数核对（其中 21 个 RIC 的预热价／有效期口径与原生引擎不同）。没有见证库时这些 RIC 拒绝重算。
 
 ## 命令
 
@@ -53,8 +53,29 @@ $R/lseg-daily test-notify --config config/lseg_daily.toml
 
 状态文件在 `runtime/lseg_daily/state.json`。第一次运行时从 `bootstrap_runs` 读取 20261109 批次已交付的日期和 RIC 归属。
 
+## 月度合并（`lseg-daily merge`）
+
+每天约新增 120 个日包库；K 线一组要同时打开该品种的全部来源。每月 2 日把上月的日包库按品种合并成一个库：
+
+```bash
+$R/lseg-daily merge --config config/lseg_daily.toml --month previous --dry-run   # 只列来源和目标
+$R/lseg-daily merge --config config/lseg_daily.toml --month 2026-11              # 合并 + 校验 + 切换
+$R/lseg-daily merge --config config/lseg_daily.toml --month 2026-11 --delete-sources  # 删除已停用的旧库
+```
+
+- **来源：** lseg-daily 状态里已完成的日包库（`Done` + `kline_done`，且 `catalog_dirty` 为假；否则整次不合并）。**20261109 批次不合并**：它在基础计划里（基础计划原样使用，作业 JSON 是提取缓存的身份），而且已经是每品种一个库。
+- **月份归属：** 一个日包库整体归到它第一个交付日所在的 UTC 月份，不按键时间拆分：键不会丢也不会重复；盘口键是事件时间的秒桶，可能落在发布时间所在日/月的另一侧，必须跟着来源走；`coverage_days` 原样合并。合并后又补到的晚到日期，再跑一次同月合并：已有的月库作为来源之一并入新的 `attempt_N`，旧月库停用。
+- **合并（`tas_db_merge merge`）：** 每个品种 CF 按键做流式 k 路归并，写到 `<monthly_db_root>/<YYYY-MM>/<品种>/attempt_N`（默认 `cme_tas_monthly`，与 `cme_tas_daily` 同级），CF 名和 `quote_last` 合并算子不变；关闭自动压缩，写完后全量手动压缩（bottommost=Force），后台线程 `workers.merge_compaction`（默认 2）。一次只处理一个品种。
+  - 两个来源有同一个键：失败。例外是盘口（kind 3）：它的键是零 part/seq 的秒桶，按 `quote_last` 折叠（与单次回放这两天的结果相同），并计数。
+  - 两个来源有同类型、同 RIC、同时钟（键前 25 字节）的记录：失败（引擎靠来源顺序打破这种平局，合并后没有了）。
+  - `replay_meta`：各来源条目的并集（冲突失败、`period:*` 必须是 done），加上 `period:<合并周期>`=done 和 `merged_from`。
+- **校验一（记录数）：** 每个 CF、每种 kind：各来源读到的数 = 它的审计数；合并库只读重开后的数 = 来源合计 − 折叠的盘口；读回的键值流 SHA256 与写入的完全一致，键严格递增。
+- **校验二（K 线）：** 用换成月库的计划先 `lseg_kline check-plan`；每个（年份, CF 品种）组，把交付盘上从首个合并日前一天起的 kline/session_status 拷到本机暂存根（交付盘只读），在暂存根上 `lseg_kline run --backup-root --compare-from` 重算：不得有替换、新增或任何字节变化（`tas_db_merge check-staging`）；组统计（成交数、量、行数、文件数）必须等于该组最近一次生产运行。
+- **切换：** 两项都通过才改状态：月库记入 `state.merged`（`merged_from`、`coverage_days`、新的 `source_index`），来源记 `merged_into`，旁边写 `<库>.retired.json`；计划里只剩月库。旧库默认保留；`--delete-sources` 只删本月已通过校验的月库的来源，且逐个确认：在 `db_root`/`monthly_db_root` 之下、`CURRENT` 与合并时一致、计划不再读它。失败的品种保持原样（仍用日库），它新建的库删除，日志留在 `runtime/lseg_daily/merge/`。
+- **钉钉：** 每次一条（【LSEG 月度合并】），几行：库数/SST/占用的前后对比、校验结果、旧库处理、失败品种。
+
 ## 已知限制
 
-- 原生 K 线写出的元数据键比生产 kline.parquet 少（生产文件上后来又加过键）。替换后的文件用的是引擎自己的元数据。
-- 合约到期后只含状态的日期：每次重算都会重新生成，`--prune-expired-status` 又会删掉。
-- 每天新增约 120 个日包库。
+- 原生 K 线写出与生产相同的 17 个元数据键（冲销过的 RIC 另加 4 个）。替换只比数值，所以旧文件只有在数值变化被替换时才换成新元数据。
+- 合约明确到期（EXPIRE）之后、全部是 EXPIRED/NO_CHANGE、目录里只有 status/session_status 的日期，引擎不再写 session_status（与 `--prune-expired-status` 同一规则）。
+- 每天新增约 120 个日包库，由月度合并收拢（见上）。

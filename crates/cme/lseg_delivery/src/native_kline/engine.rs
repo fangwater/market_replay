@@ -1,6 +1,7 @@
 use super::{
     component,
     io::{self, Kline, Problems, Stats, StatusRow},
+    netting,
     session::{self, Decoder, State, Timeline},
     DAY, MINUTE,
 };
@@ -129,6 +130,9 @@ pub struct Config {
     /// Compare existing kline / session_status day files and replace
     /// differing ones (with a local backup); `None` keeps them untouched.
     pub replace: Option<Arc<io::Replace>>,
+    /// Raw source witnesses for trade-correction netting
+    /// (`correction_policy_version=1`); `None` keeps raw prints only.
+    pub witnesses: Option<Arc<netting::WitnessStore>>,
 }
 impl Config {
     pub fn run_dir(&self) -> PathBuf {
@@ -151,6 +155,14 @@ struct Source {
 }
 fn open(job: &Job) -> Result<DB> {
     tasdb::open_read_only(&job.db, ["default", &job.cf], Tuning::default())
+}
+/// Every source of a group at once, sharing one bounded block cache.
+fn open_all(sources: &[&Source]) -> Result<Vec<DB>> {
+    let cache = tasdb::SharedCache::new(tasdb::GROUP_TUNING);
+    sources
+        .iter()
+        .map(|s| cache.open(&s.job.db, ["default", s.job.cf.as_str()]))
+        .collect()
 }
 fn upper_ric(kind: u8, ric: &str) -> Result<Vec<u8>> {
     let key = encode_all_key(kind, ric, 0, 0, 0)?;
@@ -431,7 +443,7 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Bar {
     open: i64,
     high: i64,
@@ -601,35 +613,7 @@ fn trades(sources: &[&Source], dbs: &[DB], ric: &str, year: i32) -> Result<Trade
                 out.owners.push((index, count, volume))
             }
             // Indexed reverse seed search; do not scan the full prior tick year.
-            let mut ro = ReadOptions::default();
-            ro.fill_cache(false);
-            let mut back = db.raw_iterator_cf_opt(cf, ro);
-            back.seek_for_prev(encode_all_key(1, ric, start + DAY / 2, 0, 0)?);
-            while let Some(key) = back.key() {
-                if key[0] != 1 || key_ric(key)? != ric {
-                    break;
-                }
-                let published = key_time(key);
-                if out
-                    .prior
-                    .is_some_and(|p| published.saturating_add(DAY / 2) < p.last.0)
-                {
-                    break;
-                }
-                let r = decode_cme_trade(back.value().unwrap())?;
-                let event = session::event_time(r.ts_utc_ns, r.exch_hms_ns)?;
-                let clock = (event, published, source_index, order(key));
-                if event < start && out.prior.is_none_or(|p| clock > p.last) {
-                    out.prior = Some(Bar {
-                        close: r.price,
-                        count: 1,
-                        last: clock,
-                        ..Bar::default()
-                    })
-                }
-                back.prev()
-            }
-            back.status()?;
+            seed_search(db, &source.job.cf, ric, start, source_index, &mut out.prior)?;
         }
     }
     ensure!(
@@ -637,6 +621,95 @@ fn trades(sources: &[&Source], dbs: &[DB], ric: &str, year: i32) -> Result<Trade
         "more than a UTC year of minute buckets"
     );
     Ok(out)
+}
+
+/// The RIC's last print before `start` in one source (reverse seek; never a
+/// full scan of the earlier year).
+fn seed_search(
+    db: &DB,
+    cf: &str,
+    ric: &str,
+    start: u64,
+    source_index: u32,
+    prior: &mut Option<Bar>,
+) -> Result<()> {
+    let cf = db.cf_handle(cf).context("seed CF")?;
+    let mut ro = ReadOptions::default();
+    ro.fill_cache(false);
+    let mut back = db.raw_iterator_cf_opt(cf, ro);
+    back.seek_for_prev(encode_all_key(1, ric, start + DAY / 2, 0, 0)?);
+    while let Some(key) = back.key() {
+        if key[0] != 1 || key_ric(key)? != ric {
+            break;
+        }
+        let published = key_time(key);
+        if prior.is_some_and(|p| published.saturating_add(DAY / 2) < p.last.0) {
+            break;
+        }
+        let r = decode_cme_trade(back.value().unwrap())?;
+        let event = session::event_time(r.ts_utc_ns, r.exch_hms_ns)?;
+        let clock = (event, published, source_index, order(key));
+        if event < start && prior.is_none_or(|p| clock > p.last) {
+            *prior = Some(Bar {
+                close: r.price,
+                count: 1,
+                last: clock,
+                ..Bar::default()
+            })
+        }
+        back.prev()
+    }
+    back.status()?;
+    Ok(())
+}
+
+/// Seed from the RIC's own last print in any earlier year of the product
+/// (newest year with a print wins), when the group's own sources have none.
+/// Sources are opened lazily and kept for the group.
+struct OlderSeeds<'a> {
+    sources: Vec<&'a Source>,
+    dbs: Vec<Option<DB>>,
+}
+impl<'a> OlderSeeds<'a> {
+    fn new(all: &'a [Arc<Source>], group: &[&Source], product: &str, year: i32) -> Self {
+        let mut sources: Vec<&Source> = all
+            .iter()
+            .map(Arc::as_ref)
+            .filter(|s| {
+                s.job.product == product
+                    && s.job.year < year
+                    && !group.iter().any(|g| g.job.id == s.job.id)
+            })
+            .collect();
+        sources.sort_by_key(|s| (std::cmp::Reverse(s.job.year), s.job.source_index));
+        let dbs = sources.iter().map(|_| None).collect();
+        Self { sources, dbs }
+    }
+    fn seed(&mut self, ric: &str, start: u64) -> Result<Option<Bar>> {
+        let mut prior = None;
+        let mut found_year = None;
+        for i in 0..self.sources.len() {
+            let s = self.sources[i];
+            if found_year.is_some_and(|y| s.job.year < y) {
+                break;
+            }
+            if self.dbs[i].is_none() {
+                self.dbs[i] = Some(open(&s.job)?);
+            }
+            seed_search(
+                self.dbs[i].as_ref().unwrap(),
+                &s.job.cf,
+                ric,
+                start,
+                s.job.source_index,
+                &mut prior,
+            )?;
+            if prior.is_some() {
+                found_year = Some(s.job.year);
+            }
+        }
+        Ok(prior)
+    }
 }
 
 struct Cursor<'a> {
@@ -919,6 +992,19 @@ impl Metadata {
         }
         Ok(())
     }
+    /// The single resolved venue of a product-year, used to decode the
+    /// status of its RICs whose own venue is unresolved ("review").
+    pub(crate) fn product_venue<'a>(
+        &self,
+        year: i32,
+        rics: impl Iterator<Item = &'a String>,
+    ) -> Option<String> {
+        let venues: BTreeSet<String> = rics
+            .map(|r| self.venue(year, r))
+            .filter(|v| v != "review")
+            .collect();
+        (venues.len() == 1).then(|| venues.into_iter().next().unwrap())
+    }
     pub(crate) fn venue(&self, year: i32, ric: &str) -> String {
         let candidates = self.venues.get(&(year, ric.into()));
         match candidates {
@@ -1010,6 +1096,352 @@ fn signature(sources: &[&Source]) -> String {
     )
 }
 
+/// CME Group native phase codes apply to LSEG-verified CME Group venues; an
+/// unresolved RIC uses its product's single resolved venue.
+pub(crate) fn is_cme(venue: &str, product_venue: Option<&str>) -> bool {
+    const CME: [&str; 4] = ["cme", "cbot", "comex", "nymex"];
+    CME.contains(&venue) || (venue == "review" && product_venue.is_some_and(|v| CME.contains(&v)))
+}
+
+/// Most kind=12 rows one RIC-year may hold before the run fails loudly.
+const CONTROL_LIMIT: usize = 1_000_000;
+/// Most revision candidates (trades with a corrected payload) per RIC-year.
+const CANDIDATE_LIMIT: usize = 5_000_000;
+
+/// The RIC's archived kind=12 rows in this year's own sources.
+fn control_rows(
+    sources: &[&Source],
+    dbs: &[DB],
+    ric: &str,
+    year: i32,
+) -> Result<Vec<netting::ControlRow>> {
+    use cme_tas_replay::{MISSING_PRICE, MISSING_VOLUME};
+    let mut out = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if source.job.year != year {
+            continue;
+        }
+        let db = &dbs[index];
+        let cf = db.cf_handle(&source.job.cf).unwrap();
+        let mut ro = ReadOptions::default();
+        ro.fill_cache(false);
+        ro.set_iterate_upper_bound(upper_ric(12, ric)?);
+        let mut it = db.raw_iterator_cf_opt(cf, ro);
+        it.seek(encode_all_key(12, ric, 0, 0, 0)?);
+        while let Some(key) = it.key() {
+            if key[0] != 12 || key_ric(key)? != ric {
+                break;
+            }
+            let row = decode_cme_correction(it.value().unwrap())?;
+            ensure!(
+                out.len() < CONTROL_LIMIT,
+                "more than {CONTROL_LIMIT} kind=12 rows for {ric} in {year}"
+            );
+            let price = |p: i64| (p != MISSING_PRICE).then_some(p);
+            let volume = |v: u32| (v != MISSING_VOLUME).then_some(i64::from(v));
+            out.push(netting::ControlRow {
+                published_ns: row.ts_utc_ns,
+                price: price(row.price),
+                volume: volume(row.volume),
+                original_price: price(row.original_price),
+                original_volume: volume(row.original_volume),
+                qualifiers: row.qualifiers,
+                origin: format!(
+                    "{} {} order={}",
+                    source.job.db.display(),
+                    source.job.cf,
+                    order(key)
+                ),
+            });
+            it.next()
+        }
+        it.status()?;
+    }
+    Ok(out)
+}
+
+/// Netting result for one RIC-year (`correction_policy_version=1`).
+struct Netted {
+    ledger: netting::Ledger,
+    witness_sha256: String,
+    plan_sha256: String,
+    count_delta: i64,
+    volume_delta: i64,
+    changed_minutes: usize,
+}
+
+/// Python `prepare_trade_revisions.candidates`: physical prints of this
+/// year's own sources whose (price, volume) equals the original or new
+/// payload of a kind=12 row, published no later than the last such row.
+fn revision_candidates(
+    sources: &[&Source],
+    dbs: &[DB],
+    ric: &str,
+    year: i32,
+    controls: &[netting::ControlRow],
+) -> Result<Vec<netting::Candidate>> {
+    let mut pairs = HashSet::new();
+    for c in controls {
+        for pair in [(c.original_price, c.original_volume), (c.price, c.volume)] {
+            if let (Some(p), Some(v)) = pair {
+                pairs.insert((p, v));
+            }
+        }
+    }
+    let Some(last) = controls.iter().map(|c| c.published_ns).max() else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if source.job.year != year {
+            continue;
+        }
+        let db = &dbs[index];
+        let cf = db.cf_handle(&source.job.cf).unwrap();
+        let mut ro = ReadOptions::default();
+        ro.fill_cache(false);
+        ro.set_iterate_upper_bound(upper_ric(1, ric)?);
+        let mut it = db.raw_iterator_cf_opt(cf, ro);
+        it.seek(encode_all_key(1, ric, 0, 0, 0)?);
+        while let Some(key) = it.key() {
+            if key[0] != 1 || key_ric(key)? != ric {
+                break;
+            }
+            let published = key_time(key);
+            if published > last {
+                break;
+            }
+            let r = decode_cme_trade(it.value().context("trade value")?)?;
+            let v = i64::from(r.volume);
+            if pairs.contains(&(r.price, v)) {
+                ensure!(
+                    out.len() < CANDIDATE_LIMIT,
+                    "more than {CANDIDATE_LIMIT} revision candidates for {ric}"
+                );
+                out.push(netting::Candidate {
+                    id: (source.job.source_index, published, order(key)),
+                    published_ns: published,
+                    event_ns: session::event_time(published, r.exch_hms_ns)?,
+                    exch_hms_ns: r.exch_hms_ns,
+                    price: r.price,
+                    volume: v,
+                });
+            }
+            it.next()
+        }
+        it.status()?;
+    }
+    out.sort_by_key(|c| (c.published_ns, c.id));
+    Ok(out)
+}
+
+/// Rebuild only the minutes touched by the ledger from raw prints of every
+/// group source; the gross rebuild must equal the aggregated bar first.
+fn rebuild_minutes(
+    sources: &[&Source],
+    dbs: &[DB],
+    ric: &str,
+    year: i32,
+    ledger: &netting::Ledger,
+    data: &mut Trades,
+) -> Result<usize> {
+    let start = io::year_start(year)?;
+    let end = io::year_start(year + 1)?;
+    let inside = |t: u64| start <= t && t < end;
+    let patches: HashMap<netting::TradeId, &netting::Patch> = ledger
+        .patches
+        .iter()
+        .filter(|p| inside(p.event_ns))
+        .map(|p| (p.id, p))
+        .collect();
+    let insertions: Vec<_> = ledger
+        .insertions
+        .iter()
+        .filter(|i| inside(i.event_ns))
+        .collect();
+    let impacted: BTreeSet<u64> = patches
+        .values()
+        .map(|p| p.event_ns)
+        .chain(insertions.iter().map(|i| i.event_ns))
+        .map(|t| t / MINUTE * MINUTE)
+        .collect();
+    if impacted.is_empty() {
+        return Ok(0);
+    }
+    // Event clocks lie within half a day of publication.
+    let mut windows: Vec<(u64, u64)> = Vec::new();
+    for m in &impacted {
+        let (lo, hi) = (m.saturating_sub(DAY / 2), m + MINUTE + DAY / 2 + 1);
+        match windows.last_mut() {
+            Some(w) if lo <= w.1 => w.1 = w.1.max(hi),
+            _ => windows.push((lo, hi)),
+        }
+    }
+    let mut gross: BTreeMap<u64, Bar> = BTreeMap::new();
+    let mut net: BTreeMap<u64, Bar> = BTreeMap::new();
+    let mut found = HashSet::new();
+    for (index, source) in sources.iter().enumerate() {
+        let db = &dbs[index];
+        let cf = db.cf_handle(&source.job.cf).unwrap();
+        let owner = source.job.year == year;
+        for &(lo, hi) in &windows {
+            let (lo, hi) = if owner {
+                (lo, hi)
+            } else {
+                (lo.max(start.saturating_sub(DAY / 2)), hi.min(end + DAY / 2))
+            };
+            if lo >= hi {
+                continue;
+            }
+            let mut ro = ReadOptions::default();
+            ro.fill_cache(false);
+            ro.set_iterate_upper_bound(upper_ric(1, ric)?);
+            let mut it = db.raw_iterator_cf_opt(cf, ro);
+            it.seek(encode_all_key(1, ric, lo, 0, 0)?);
+            while let Some(key) = it.key() {
+                if key[0] != 1 || key_ric(key)? != ric {
+                    break;
+                }
+                let published = key_time(key);
+                if published >= hi {
+                    break;
+                }
+                let r = decode_cme_trade(it.value().context("trade value")?)?;
+                let event = session::event_time(published, r.exch_hms_ns)?;
+                let at = event / MINUTE * MINUTE;
+                if impacted.contains(&at) {
+                    let clock = (event, published, source.job.source_index, order(key));
+                    let bar = |price: i64, volume: u64| Bar {
+                        open: price,
+                        high: price,
+                        low: price,
+                        close: price,
+                        volume,
+                        count: 1,
+                        first: clock,
+                        last: clock,
+                    };
+                    gross
+                        .entry(at)
+                        .or_default()
+                        .add(bar(r.price, u64::from(r.volume)))?;
+                    let id = (source.job.source_index, published, order(key));
+                    match patches.get(&id) {
+                        Some(p) => {
+                            ensure!(
+                                found.insert(id)
+                                    && p.original_price == r.price
+                                    && p.original_volume == i64::from(r.volume),
+                                "source revision mismatch for {ric} at {published}"
+                            );
+                            if p.action == netting::PatchAction::Replace {
+                                net.entry(at)
+                                    .or_default()
+                                    .add(bar(p.price, u64::try_from(p.volume)?))?
+                            }
+                        }
+                        None => net
+                            .entry(at)
+                            .or_default()
+                            .add(bar(r.price, u64::from(r.volume)))?,
+                    }
+                }
+                it.next()
+            }
+            it.status()?;
+        }
+    }
+    ensure!(
+        found.len() == patches.len(),
+        "{ric}: {} of {} revised prints not found in the sources",
+        patches.len() - found.len(),
+        patches.len()
+    );
+    for (n, i) in insertions.iter().enumerate() {
+        // Inserted prints sort after physical prints of the same instant.
+        let clock = (i.event_ns, i.published_ns, u32::MAX, n as u64);
+        net.entry(i.event_ns / MINUTE * MINUTE)
+            .or_default()
+            .add(Bar {
+                open: i.price,
+                high: i.price,
+                low: i.price,
+                close: i.price,
+                volume: u64::try_from(i.volume)?,
+                count: 1,
+                first: clock,
+                last: clock,
+            })?
+    }
+    let mut changed = 0;
+    for m in &impacted {
+        ensure!(
+            gross.get(m) == data.bars.get(m),
+            "{ric}: raw rebuild of minute {m} differs from the aggregated sources"
+        );
+        let after = net.get(m).copied();
+        if after.as_ref() != data.bars.get(m) {
+            changed += 1
+        }
+        match after {
+            Some(b) => data.bars.insert(*m, b),
+            None => data.bars.remove(m),
+        };
+    }
+    Ok(changed)
+}
+
+fn apply_netting(
+    cfg: &Config,
+    sources: &[&Source],
+    dbs: &[DB],
+    ric: &str,
+    year: i32,
+    controls: &[netting::ControlRow],
+    data: &mut Trades,
+) -> Result<Option<Netted>> {
+    let Some(store) = &cfg.witnesses else {
+        return Ok(None);
+    };
+    let Some((witnesses, witness_sha256)) = store.load(year, ric)? else {
+        return Ok(None);
+    };
+    let candidates = revision_candidates(sources, dbs, ric, year, controls)?;
+    let mut ledger = netting::resolve(&candidates, &witnesses);
+    ledger
+        .unresolved
+        .extend(netting::pending(controls, &witnesses));
+    let plan = json!({
+        "version": netting::VERSION,
+        "ric": ric,
+        "year": year,
+        "witness_sha256": witness_sha256,
+        "candidates": candidates.len(),
+        "ledger": ledger,
+    });
+    let plan_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&plan)?));
+    let changed_minutes = rebuild_minutes(sources, dbs, ric, year, &ledger, data)?;
+    let (count_delta, volume_delta) =
+        ledger.delta(io::year_start(year)?, io::year_start(year + 1)?);
+    // Local audit record only (never on the delivery disk).
+    io::save(
+        &cfg.run_dir()
+            .join("netting")
+            .join(year.to_string())
+            .join(format!("{}.json", component(ric))),
+        &json!({"plan_sha256": plan_sha256, "count_delta": count_delta,
+            "volume_delta": volume_delta, "changed_minutes": changed_minutes, "plan": plan}),
+    )?;
+    Ok(Some(Netted {
+        ledger,
+        witness_sha256,
+        plan_sha256,
+        count_delta,
+        volume_delta,
+        changed_minutes,
+    }))
+}
+
 fn group(
     cfg: &Config,
     all: &[Arc<Source>],
@@ -1062,10 +1494,7 @@ fn group(
             return Ok(stats);
         }
     }
-    let dbs = sources
-        .iter()
-        .map(|s| open(&s.job))
-        .collect::<Result<Vec<_>>>()?;
+    let dbs = open_all(&sources)?;
     for s in &sources {
         ensure!(
             s.identity["current"] == fs::read_to_string(s.job.db.join("CURRENT"))?,
@@ -1079,6 +1508,8 @@ fn group(
         .filter(|r| cfg.ric.as_ref().is_none_or(|v| v == *r))
         .cloned()
         .collect();
+    let product_venue = meta.product_venue(year, sources.iter().flat_map(|s| s.rics.iter()));
+    let mut older = OlderSeeds::new(all, &sources, product, year);
     let mut total = Stats::default();
     let mut owners: HashMap<usize, (u64, u64)> = HashMap::new();
     for ric in rics {
@@ -1109,77 +1540,34 @@ fn group(
                 s.trades == n && s.volume == volume,
                 "RIC cached raw quantity changed"
             );
-            total.add(&s);
-            continue;
-        }
-        // Corrected RICs (correction_policy_version=1) keep their revised
-        // files: unchanged sources are reused as a whole; with new trades only
-        // days from the protected end on are generated, earlier existing
-        // files are never compared or replaced.
-        let mut frozen_before = 0u64;
-        let mut protected_late = None;
-        if (cfg.formal() || cfg.replace.is_some()) && year == 2026 {
-            if let Some(p) = meta.protected.get(&ric).filter(|p| {
-                p["source_trade_rows"].as_u64() != Some(n)
-                    || p["source_volume"].as_u64() != Some(volume)
-            }) {
-                let end = p["end_ns"].as_u64().context("protected end_ns")?;
-                // The revision was built from the base-plan sources only; they
-                // must be unchanged. Newer (daily-batch) sources may add trades.
-                // The revision was built from the base-plan sources only. Trades
-                // on UTC days delivered later by lseg-daily batches (their
-                // `coverage_days`; no other source covers those days) are new;
-                // everything else must be exactly what was revised.
-                let new_days: HashSet<u64> = sources
-                    .iter()
-                    .filter_map(|s| meta.job_daily.get(&s.job.id))
-                    .flatten()
-                    .map(|(a, _)| a / DAY)
-                    .collect();
-                let (mut pn, mut pv, mut ln, mut lv) = (0u64, 0u64, 0u64, 0u64);
-                for (at, x) in data.bars.range(..end) {
-                    if new_days.contains(&(at / DAY)) {
-                        ln += x.count;
-                        lv += x.volume;
-                    } else {
-                        pn += x.count;
-                        pv += x.volume;
-                    }
-                }
-                let after = data
-                    .bars
-                    .range(end..)
-                    .filter(|(at, _)| !new_days.contains(&(*at / DAY)))
-                    .count();
-                ensure!(
-                    p["source_trade_rows"].as_u64() == Some(pn)
-                        && p["source_volume"].as_u64() == Some(pv)
-                        && after == 0,
-                    "protected revised RIC: its original sources changed: {ric} (now {pn}/{pv}, revised from {}/{})",
-                    p["source_trade_rows"],
-                    p["source_volume"]
-                );
-                if ln > 0 {
-                    protected_late = Some((end, ln, lv));
-                }
-                frozen_before = end;
-            } else if let Some(p) = meta.protected.get(&ric) {
-                let s = Stats {
-                    rics: 1,
-                    reused_rics: 1,
-                    trades: n,
-                    volume,
-                    kline_rows: p["kline_rows"].as_u64().unwrap_or(0),
-                    ..Stats::default()
-                };
-                io::save(
-                    &rc,
-                    &json!({"signature":signature,"output":cfg.output,"stats":s,"protected":true}),
-                )?;
+            // New correction evidence recomputes the RIC.
+            if p["witness_sha256"].as_str()
+                == cfg.witnesses.as_ref().and_then(|w| w.hash(year, &ric))
+            {
                 total.add(&s);
                 continue;
             }
         }
+        let gross_first = data.bars.values().map(|b| b.first.0).min().unwrap();
+        let gross_last = data.bars.values().map(|b| b.last.0).max().unwrap();
+        // Trade-correction netting (correction_policy_version=1): witnessed
+        // cancels / corrections / inserts are applied to the affected minutes;
+        // everything else keeps the raw prints and is reported.
+        let controls = control_rows(&sources, &dbs, &ric, year)?;
+        let mut data = data;
+        let net = apply_netting(cfg, &sources, &dbs, &ric, year, &controls, &mut data)?;
+        // Guard: the 2026 RICs revised by the original ledger must never be
+        // recomputed from raw prints alone.
+        ensure!(
+            net.is_some() || year != 2026 || !meta.protected.contains_key(&ric),
+            "revised RIC {ric} requires the trade-correction witness store (correction_policy_version=1)"
+        );
+        let (count_delta, volume_delta) = net
+            .as_ref()
+            .map_or((0, 0), |n| (n.count_delta, n.volume_delta));
+        let pending_count = net
+            .as_ref()
+            .map_or(controls.len(), |n| n.ledger.unresolved.len());
         let venue = meta.venue(year, &ric);
         ensure!(
             !venue.is_empty()
@@ -1188,7 +1576,18 @@ fn group(
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
             "invalid exchange directory"
         );
+        // The 237 RICs revised by the original Python ledger keep its kline
+        // rules (user decision 2026-11-16): any-earlier-year price seed,
+        // warm-up despite conflicting reference end dates, and product-venue
+        // phase decoding of unresolved venues for the kline timeline. Their
+        // detailed session_status keeps the venue decoding, as delivered.
+        let revised = year == 2026 && meta.protected.contains_key(&ric);
         let cme = ["cme", "cbot", "comex", "nymex"].contains(&venue.as_str());
+        let kline_cme = if revised {
+            is_cme(&venue, product_venue.as_deref())
+        } else {
+            cme
+        };
         let root = cfg
             .output
             .join(&venue)
@@ -1200,18 +1599,6 @@ fn group(
                 .join(&key)
                 .join(format!("{}.csv", component(&ric))),
         );
-        if let Some((end, count, volume)) = protected_late {
-            problems.record(
-                &ric,
-                "protected_late_trades_not_applied",
-                0,
-                end,
-                count,
-                &format!(
-                    "{count} late trades / volume {volume} before the protected end; revised files kept (correction_policy_version=1 netting is not in the native engine)"
-                ),
-            )?
-        }
         if venue == "review" {
             problems.record(
                 &ric,
@@ -1232,8 +1619,19 @@ fn group(
                 "only explicit H/N interpreted for this venue",
             )?
         }
-        let first = data.bars.values().map(|b| b.first.0).min().unwrap();
-        let last = data.bars.values().map(|b| b.last.0).max().unwrap();
+        // Lifetime uses effective prints; gross ones if every print was cancelled.
+        let first = data
+            .bars
+            .values()
+            .map(|b| b.first.0)
+            .min()
+            .unwrap_or(gross_first);
+        let last = data
+            .bars
+            .values()
+            .map(|b| b.last.0)
+            .max()
+            .unwrap_or(gross_last);
         let (start, end, gaps) = coverage(&sources, meta, year, product, first, last)?;
         let gap_ranges = gaps.clone();
         let mut withheld = 0u64;
@@ -1249,7 +1647,12 @@ fn group(
             })
             .collect();
         let expiries: BTreeSet<_> = refs.iter().filter_map(|r| r.expiry).collect();
-        let trusted = expiries.len() == 1
+        let ends_ok = if revised {
+            !expiries.is_empty() && expiries.iter().all(|t| *t > start)
+        } else {
+            expiries.len() == 1
+        };
+        let trusted = ends_ok
             && refs.iter().any(|r| {
                 r.first.is_some_and(|t| i128::from(t) < i128::from(start))
                     && r.expiry.is_some_and(|t| start < t)
@@ -1276,6 +1679,7 @@ fn group(
         let mut prior_phase = false;
         let mut last_status = last;
         let mut decoder = Decoder::new(cme);
+        let mut kline_decoder = Decoder::new(kline_cme);
         let mut public_previous = State::Unknown;
         let mut timeline = Timeline::new(
             start.min(first / MINUTE * MINUTE),
@@ -1284,7 +1688,8 @@ fn group(
         );
         let mut writer =
             io::StatusWriter::new_with_pool(root.clone(), product, &ric, cfg.publisher.clone())?;
-        writer.set_policy(cfg.replace.clone(), frozen_before);
+        writer.set_policy(cfg.replace.clone());
+        writer.set_kline_last_day(Some(last / DAY));
         let mut event = Events::new(
             &sources,
             &dbs,
@@ -1297,7 +1702,7 @@ fn group(
         let mut status_rows = 0u64;
         while let Some(i) = event.next_index()? {
             let e = event.peek(i)?;
-            let baseline = decoder.decode(e.qualifiers, State::Unknown);
+            let baseline = kline_decoder.decode(e.qualifiers, State::Unknown);
             if matches!(
                 baseline.action,
                 "OPEN" | "PRE_OPEN" | "CLOSE" | "HALT" | "NOT_AVAILABLE" | "EXPIRE"
@@ -1315,7 +1720,7 @@ fn group(
                 last_status = last_status.max(e.at)
             }
             timeline.before(e.at)?;
-            let r = decoder.decode(e.qualifiers, timeline.previous);
+            let r = kline_decoder.decode(e.qualifiers, timeline.previous);
             timeline.apply(&r);
             let r = decoder.decode(e.qualifiers, public_previous);
             let before = public_previous;
@@ -1347,44 +1752,58 @@ fn group(
             }
         }
         let intervals = timeline.finish()?;
-        let (status_files, mut directories) = writer.finish_with_directories()?;
+        let (status_files, mut directories, status_skipped) = writer.finish_with_directories()?;
         for ((issue, q), (a, b, count)) in issues {
             problems.record(&ric, &issue, a, b, count, &q)?
         }
-        for (index, source) in sources
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.job.year == year)
-        {
-            let db = &dbs[index];
-            let cf = db.cf_handle(&source.job.cf).unwrap();
-            let mut ro = ReadOptions::default();
-            ro.fill_cache(false);
-            ro.set_iterate_upper_bound(upper_ric(12, &ric)?);
-            let mut it = db.raw_iterator_cf_opt(cf, ro);
-            it.seek(encode_all_key(12, &ric, 0, 0, 0)?);
-            while let Some(key) = it.key() {
-                if key[0] != 12 || key_ric(key)? != ric {
-                    break;
+        match &net {
+            // Unlinked controls keep the raw prints and are only reported.
+            Some(n) => {
+                for u in &n.ledger.unresolved {
+                    let witnesses = u
+                        .witnesses
+                        .iter()
+                        .map(|(s, l)| {
+                            if *l > 0 {
+                                format!("{s}:{l}")
+                            } else {
+                                s.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    problems.record(
+                        &ric,
+                        u.reason,
+                        u.published_ns,
+                        u.published_ns,
+                        u.candidates.unwrap_or(1) as u64,
+                        &format!(
+                            "{} {}; original={:?}/{:?} uid={:?} seq={:?}; {}; {}",
+                            u.event_id.as_deref().unwrap_or("-"),
+                            u.action,
+                            u.original_price,
+                            u.original_volume,
+                            u.original_uid,
+                            u.original_seq,
+                            witnesses,
+                            u.qualifiers
+                        ),
+                    )?
                 }
-                let row = decode_cme_correction(it.value().unwrap())?;
-                problems.record(
-                    &ric,
-                    "source_witness_pending",
-                    row.ts_utc_ns,
-                    row.ts_utc_ns,
-                    1,
-                    &format!(
-                        "{} {} order={}; {}",
-                        source.job.db.display(),
-                        source.job.cf,
-                        order(key),
-                        row.qualifiers
-                    ),
-                )?;
-                it.next()
             }
-            it.status()?;
+            None => {
+                for c in &controls {
+                    problems.record(
+                        &ric,
+                        "source_witness_pending",
+                        c.published_ns,
+                        c.published_ns,
+                        1,
+                        &format!("{}; {}", c.origin, c.qualifiers),
+                    )?
+                }
+            }
         }
         let lo = if mature || prior_phase {
             start
@@ -1432,6 +1851,9 @@ fn group(
                 )?
             }
         }
+        if revised && trusted && data.prior.is_none() {
+            data.prior = older.seed(&ric, start)?;
+        }
         let mut previous = if trusted {
             data.prior.map(|p| p.close)
         } else {
@@ -1443,6 +1865,13 @@ fn group(
             0
         };
         let selected = io::sample_indices(days);
+        // Files of the original Python revision outside the compare window.
+        let legacy = year == 2026 && meta.protected.contains_key(&ric);
+        let schema = io::kline_schema_for(&io::KlineInfo {
+            input_signature: signature.clone(),
+            correction_pending_count: pending_count,
+            correction_plan_sha256: net.as_ref().map(|n| n.plan_sha256.clone()),
+        });
         let mut files = 0;
         let mut rows = 0;
         let mut written_count = 0;
@@ -1501,7 +1930,7 @@ fn group(
                     "UTC day not covered by the delivered source manifest but has trades; published",
                 )?;
             }
-            let batch = io::kline_batch(&ric, &out)?;
+            let batch = io::kline_batch_with(schema.clone(), &ric, &out)?;
             let path = root.join(io::date(day * DAY)?).join("kline.parquet");
             io::write_kline(
                 path,
@@ -1510,7 +1939,7 @@ fn group(
                 &mut pending,
                 selected.contains_key(&(files as usize)),
                 cfg.replace.clone(),
-                day * DAY < frozen_before,
+                legacy,
             )?;
             files += 1;
             rows += out.len() as u64;
@@ -1519,8 +1948,13 @@ fn group(
         if withheld > 0 {
             eprintln!("{year}/{product}/{ric}: {withheld} UTC days not fully covered by delivered sources withheld");
         }
+        // Gross prints plus the exact netting difference.
         ensure!(
-            (written_count, written_volume) == (n, volume),
+            (i128::from(written_count), i128::from(written_volume))
+                == (
+                    i128::from(n) + i128::from(count_delta),
+                    i128::from(volume) + i128::from(volume_delta)
+                ),
             "minute quantity conservation failed"
         );
         for (i, _) in io::sample_indices(status_files.len()) {
@@ -1570,11 +2004,17 @@ fn group(
             files,
             status_files: status_files.len() as u64,
             status_rows,
+            status_days_skipped: status_skipped,
             ..Stats::default()
         };
         io::save(
             &rc,
-            &json!({"signature":signature,"output":cfg.output,"stats":s}),
+            &json!({"signature":signature,"output":cfg.output,"stats":s,
+                "witness_sha256":net.as_ref().map(|n| n.witness_sha256.clone()),
+                "netting":net.as_ref().map(|n| json!({"plan_sha256":n.plan_sha256,
+                    "count_delta":n.count_delta,"volume_delta":n.volume_delta,
+                    "changed_minutes":n.changed_minutes,"patches":n.ledger.patches.len(),
+                    "insertions":n.ledger.insertions.len(),"unresolved":n.ledger.unresolved.len()}))}),
         )?;
         total.add(&s);
         eprintln!(
@@ -1930,6 +2370,7 @@ mod tests {
             workers: 1,
             publisher: Some(io::PublicationPool::new(2).unwrap()),
             replace: None,
+            witnesses: None,
         };
         let formal = Config {
             output: PathBuf::from("/mnt/nfs/30.100_cta_data/lseg"),
@@ -1938,7 +2379,7 @@ mod tests {
         };
         assert!(
             formal.formal(),
-            "RIC filters must preserve revised-data protection"
+            "RIC filters keep the formal delivery identity"
         );
         assert!(!cfg.formal());
         let make = |year, period: &str, index| Job {
@@ -2033,7 +2474,7 @@ mod tests {
         let cache_day = cache_root.join("20260101");
         fs::create_dir_all(&cache_day).unwrap();
         let empty_status = io::StatusWriter::new(cache_root.clone(), "X", "X").unwrap();
-        let (_, mut directories) = empty_status.finish_with_directories().unwrap();
+        let (_, mut directories, _) = empty_status.finish_with_directories().unwrap();
         fs::remove_dir(&cache_day).unwrap();
         let recovered = cache_day.join("kline.parquet");
         let mut recovered_writer =
@@ -2115,5 +2556,197 @@ mod tests {
         assert_eq!(resumed_source.control_range, sources[1].control_range);
         drop(sources);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn witnessed_cancel_is_netted_and_unwitnessed_control_reported() {
+        use arrow_array::{Array, BooleanArray, Float64Array};
+        use cme_tas_replay::{encode_cme_correction, encode_cme_trade, SlimCorrection, SlimTrade};
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().to_path_buf();
+        let path = root.join("db");
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &opts,
+            &path,
+            ["default", "p:2026:N"]
+                .into_iter()
+                .map(|name| ColumnFamilyDescriptor::new(name, Options::default())),
+        )
+        .unwrap();
+        let cf = || db.cf_handle("p:2026:N").unwrap();
+        let day = io::year_start(2026).unwrap() + 10 * DAY;
+        let s = 1_000_000_000u64;
+        let at = |sec: u64| day + 3600 * s + sec * s;
+        // (published second, price, volume, seq): two prints in minute 0,
+        // one in minute 2; the 101 x 3 print is cancelled later.
+        for (sec, price, volume, seq) in
+            [(1u64, 100i64, 2u32, 0u32), (2, 101, 3, 1), (125, 102, 1, 2)]
+        {
+            let row = SlimTrade {
+                ric: "N".into(),
+                ts_utc_ns: at(sec),
+                exch_hms_ns: at(sec) - day,
+                price: price * s as i64,
+                volume,
+                bid: i64::MIN,
+                bid_size: u32::MAX,
+                ask: i64::MIN,
+                ask_size: u32::MAX,
+                aggressor: 0,
+            };
+            db.put_cf(
+                cf(),
+                encode_all_key(1, "N", at(sec), 0, seq).unwrap(),
+                encode_cme_trade(&row).unwrap(),
+            )
+            .unwrap();
+        }
+        for (sec, original_price, original_volume) in [(300u64, 101i64, 3u32), (400, 55, 9)] {
+            let row = SlimCorrection {
+                ric: "N".into(),
+                ts_utc_ns: at(sec),
+                exch_hms_ns: at(2) - day,
+                price: i64::MIN,
+                volume: u32::MAX,
+                acc_volume: u32::MAX,
+                original_price: original_price * s as i64,
+                original_volume,
+                original_seq: u64::MAX,
+                qualifiers: "2[CAN_COND_N]".into(),
+            };
+            db.put_cf(
+                cf(),
+                encode_all_key(12, "N", at(sec), 0, 0).unwrap(),
+                encode_cme_correction(&row).unwrap(),
+            )
+            .unwrap();
+        }
+        drop(db);
+        // Raw witnesses: the cancelled print and the first control only.
+        let stamp = |ns: u64| {
+            chrono::DateTime::from_timestamp_nanos(ns as i64)
+                .format("%Y-%m-%dT%H:%M:%S%.9fZ")
+                .to_string()
+        };
+        let clock = |ns: u64| {
+            let n = ns - day;
+            format!(
+                "{:02}:{:02}:{:02}.000000000",
+                n / 3600 / s,
+                n / 60 / s % 60,
+                n / s % 60
+            )
+        };
+        let identities = root.join("identities");
+        fs::create_dir_all(&identities).unwrap();
+        let lines = [
+            json!({"source":"raw","line":7,"fields":{"#RIC":"N","Date-Time":stamp(at(2)),"Type":"Trade",
+                "Price":"101","Volume":"3","Exch Time":clock(at(2)),"Date":"2026-01-11","Seq. No.":"5"}}),
+            json!({"source":"raw","line":9,"fields":{"#RIC":"N","Date-Time":stamp(at(300)),"Type":"Correction",
+                "Original Price":"101","Original Volume":"3","Exch Time":clock(at(2)),"Qualifiers":"2[CAN_COND_N]"}}),
+        ];
+        fs::write(
+            identities.join("j1.jsonl"),
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
+        fs::write(identities.join("j1.done.json"), "{}").unwrap();
+        let jobs = root.join("jobs.json");
+        fs::write(&jobs, r#"[{"id":"j1"}]"#).unwrap();
+        let store = root.join("witnesses");
+        netting::import_witnesses(
+            &[jobs],
+            &identities,
+            &BTreeSet::from(["N".to_owned()]),
+            2026,
+            &store,
+        )
+        .unwrap();
+        let mut cfg = Config {
+            project: root.clone(),
+            plan: root.join("plan.json"),
+            cache: root.join("no_cache"),
+            work: root.join("work"),
+            output: root.join("output"),
+            year: None,
+            product: None,
+            ric: None,
+            workers: 1,
+            publisher: Some(io::PublicationPool::new(2).unwrap()),
+            replace: None,
+            witnesses: None,
+        };
+        let job = Job {
+            id: "fixtureN".into(),
+            db: path.clone(),
+            cf: "p:2026:N".into(),
+            year: 2026,
+            product: "N".into(),
+            period: "2026-01-11_2026-01-12".into(),
+            source: "main".into(),
+            source_index: 0,
+            extra: BTreeMap::new(),
+        };
+        let sources = vec![Arc::new(source(&cfg, job).unwrap())];
+        let mut meta = Metadata::default();
+        meta.venues
+            .insert((2026, "N".into()), BTreeSet::from(["cme".into()]));
+        meta.protected.insert("N".into(), json!({}));
+        // A revised RIC must not be recomputed from raw prints alone.
+        let refused = group(&cfg, &sources, &meta, 2026, "N").unwrap_err();
+        assert!(format!("{refused:#}").contains("witness store"));
+        cfg.witnesses = Some(Arc::new(netting::WitnessStore::open(&store).unwrap()));
+        let stats = group(&cfg, &sources, &meta, 2026, "N").unwrap();
+        assert_eq!((stats.trades, stats.volume), (3, 6));
+        let file = cfg.output.join("cme/2026/N/20260111/kline.parquet");
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&file).unwrap()).unwrap();
+        let md = reader.schema().metadata().clone();
+        let b = io::batches(&file).unwrap().next().unwrap().unwrap();
+        let m0 = (0..b.num_rows())
+            .position(|i| io::uint(&b, i, "ts_utc_ns").unwrap() == at(1) / MINUTE * MINUTE)
+            .unwrap();
+        let close = b
+            .column_by_name("close")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let fill = b
+            .column_by_name("is_ffill")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        // Minute 0 keeps only the 100 x 2 print; minute 1 fills from it.
+        assert_eq!(io::uint(&b, m0, "volume").unwrap(), 2);
+        assert_eq!(io::uint(&b, m0, "trade_count").unwrap(), 1);
+        assert_eq!(close.value(m0), 100.0);
+        assert!(fill.value(m0 + 1) && close.value(m0 + 1) == 100.0);
+        assert_eq!(io::uint(&b, m0 + 2, "volume").unwrap(), 1);
+        let total: u64 = (0..b.num_rows())
+            .map(|i| io::uint(&b, i, "volume").unwrap())
+            .sum();
+        assert_eq!(total, 3);
+        assert!(!close.is_null(m0));
+        assert_eq!(md["correction_policy_version"], "1");
+        assert_eq!(md["correction_pending_count"], "1");
+        assert_eq!(md["input_signature"], signature(&[sources[0].as_ref()]));
+        let problems =
+            fs::read_to_string(cfg.output.join("meta/problems/native_kline/2026%3AN/N.csv"))
+                .unwrap();
+        assert_eq!(problems.matches("source_witness_pending").count(), 1);
+        let ledger = io::read_json(&cfg.run_dir().join("netting/2026/N.json")).unwrap();
+        assert_eq!(ledger["count_delta"], -1);
+        assert_eq!(ledger["volume_delta"], -3);
+        assert_eq!(
+            ledger["plan"]["ledger"]["applied"][0]["basis"],
+            "unique_original_payload"
+        );
+        // Resume reuses the RIC checkpoint with the same witness identity.
+        let again = group(&cfg, &sources, &meta, 2026, "N").unwrap();
+        assert_eq!(again.kline_rows, stats.kline_rows);
     }
 }

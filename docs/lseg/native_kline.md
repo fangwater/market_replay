@@ -25,8 +25,13 @@ RocksDB iterator → 当前RIC的分钟聚合／状态机 → 按日Parquet writ
 已知日期不重复mkdir／stat，目录被外部删除时会重新创建。数据文件仍逐个同步和原子发布。
 当前NFS不支持`renameat2(RENAME_NOREPLACE)`（实测EINVAL），不能用会覆盖目标的普通rename替代硬链接发布。
 
-开发时须保留正式目标的逻辑身份：将`--output`直接改为NVMe临时目录会进入验证口径，
-不会复用正式盘237个已改撤RIC。新增传输方式应区分临时文件位置与正式目标，继续保护已有净额结果。
+改撤冲销在引擎内完成（`--witnesses`，默认 `artifacts/tas_trade_witnesses_20261110`，由 `lseg-kline witness-import` 一次性导入，日包由 `witness-append` 追加），见[成交改撤](tas_trade_revisions.md)。
+
+2026-11-16 用户决定，原 237 个改撤 RIC（2026）沿用原 Python 生产口径（其它 RIC 不变，避免改动已发布文件）：
+- 补价种子：本组来源没有本 RIC 年前成交时，按年份从新到旧查同品种更早年份的来源（反向 seek，不全扫）。
+- 参考有效期冲突（几个结束日期）但都晚于年初时，仍做 12 月价格／状态预热；到期截止仍按唯一参考／明确 EXPIRE。
+- 交易所未核定（review）的 RIC：K 线时段按本品种唯一已核定交易所解码（CME 集团即 CME 原生码），目录仍为 review；详细 session_status 仍按 review 只解释 H/N（与已交付文件一致）。
+- 源缺口里没有成交的 UTC 日不发布（与原 Python 不同，用户决定从源头处理）。
 
 ## 使用
 
@@ -97,7 +102,7 @@ lseg-kline check-plan
 详细状态保留原Qualifiers、原发布纳秒和重复消息，不设置静态日历或交易所时间回拨。
 交易所、合约有效期及缺包来自既有LSEG参考和源清单；CME原生阶段仅解释已核定CME集团市场。
 
-已完成的旧分组按源身份复用，原237个已核定改撤的2026 RIC核对gross量／笔数后保持原结果。
+已完成的旧分组按源身份复用。原237个已改撤的2026 RIC按见证库冲销后重算；比对窗口外的原文件不改。
 其它未取得可信关联的kind=12只写 `source_witness_pending` 问题，保留原成交打印。
 Trade、Quote、生产RocksDB和IB保持只读。既有交付文件按footer和抽样内容核对后复用，
 字段或抽样内容冲突时报错，避免覆盖可信历史结果。

@@ -74,6 +74,13 @@ pub struct ProductRun {
     pub prev_last: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Monthly merged DB (`Merged::id`) that replaced `db` in the plan; the
+    /// daily DB is retired from then on.
+    #[serde(default)]
+    pub merged_into: Option<String>,
+    /// The retired daily DB was deleted (`merge --delete-sources`).
+    #[serde(default)]
+    pub db_deleted: bool,
 }
 
 impl ProductRun {
@@ -98,6 +105,49 @@ impl Batch {
     }
 }
 
+/// One source of a monthly merged DB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergedFrom {
+    /// Daily: `daily<batch>_<product>`; an earlier merge: its `Merged::id`.
+    pub id: String,
+    pub db: PathBuf,
+    /// `CURRENT` of the source when it was merged.
+    pub current: String,
+    pub coverage_days: Vec<String>,
+    #[serde(default)]
+    pub batch: Option<String>,
+}
+
+/// A monthly merged TAS DB of one product directory (`lseg-daily merge`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Merged {
+    /// `<YYYY-MM>/<product>/attempt_<n>`.
+    pub id: String,
+    pub month: String,
+    pub product: String,
+    pub db: PathBuf,
+    /// Product CF -> persisted status (kind 13) rows (as `ProductRun::cfs`).
+    pub cfs: BTreeMap<String, u64>,
+    pub plan_index: u32,
+    pub period: String,
+    /// Union of the sources' delivered UTC days (unchanged by the merge).
+    pub coverage_days: Vec<String>,
+    pub exchange_map: PathBuf,
+    /// Merge + verification report.
+    pub report: PathBuf,
+    pub merged_from: Vec<MergedFrom>,
+    pub created_utc: String,
+    #[serde(default)]
+    pub trade_rows: u64,
+    #[serde(default)]
+    pub quote_rows: u64,
+    /// A later merge of the same month folded this DB in.
+    #[serde(default)]
+    pub retired_by: Option<String>,
+    #[serde(default)]
+    pub db_deleted: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub run: String,
@@ -106,7 +156,7 @@ pub struct RunRecord {
     pub detail: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub bootstrapped: bool,
@@ -133,6 +183,9 @@ pub struct State {
     pub kline_compared: BTreeSet<String>,
     #[serde(default)]
     pub history: Vec<RunRecord>,
+    /// Monthly merged DBs (active ones replace their sources in the plan).
+    #[serde(default)]
+    pub merged: Vec<Merged>,
 }
 
 impl State {

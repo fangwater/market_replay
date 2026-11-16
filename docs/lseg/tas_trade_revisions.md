@@ -54,3 +54,18 @@ python scripts/lseg/apply_kline_trade_revisions.py --workers 4
 再等待 `ly-cme-correction-identities-historical-fast.service` 完成年度大包回查，自动合并历史证据、
 从相同 gross 基线重算并刷新中文 IB 对照表。未关联问题会继续保留，不宣称全部记录都能净额化。
 项目断点与日志在 `artifacts/tas_trade_corrections_20261110/`；生产代码与历史数据在本机既定目录。
+
+## 原生引擎（2026-11-16 起）
+
+冲销逻辑已移植到 `crates/cme/lseg_delivery/src/native_kline/netting.rs`（`trade_revision_ledger.py` 的逐条移植，测试覆盖原 Python 全部用例）。
+
+- 见证库（版本 2）：`manifest.json` 按追加顺序列出不可变的段，每段有年份和每 RIC 一个 jsonl（带 sha256）。
+  `base` 段由 `lseg-kline witness-import --jobs <identity_jobs_daily.json>,<identity_jobs_historical.json> --rics <correction_plans.json>`
+  一次性导入（按 Python 编译顺序；237 个 RIC，56,488 笔 Trade、1,638 条 Correction）。
+- 日包：`lseg-daily` 在 K 线前对每个新批次/品种跑 `lseg-kline witness-append`，从下载的日包 CSV 两遍流式提取：
+  全部 Correction 行，以及同 RIC、价量等于某条 Correction 原价量或新价量的 Trade 行，作为段 `daily<批次>_<品种>` 追加（按名字幂等，有锁，清单原子替换）。
+  以后这些 RIC 的日包改撤按同一账本冲销；原成交在更早文件里的改撤仍可能因缺见证而未关联。
+- 候选成交：本年源中价量等于某条 kind=12 原价量或新价量、发布时间不晚于最后一条 kind=12 的成交（RocksDB 直读）。
+- 账本：只对受影响分钟从原始打印重建（先核对 gross 重建等于聚合结果），再算后续补价；量和笔数按 gross 加精确差额守恒。
+- 没有原始见证的 kind=12 记为 `source_witness_pending`；其余未关联原因同 Python。问题写在 `meta/problems/native_kline/`，
+  本地账本在 `<work>/checkpoints/netting/<年>/<RIC>.json`。

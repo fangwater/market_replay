@@ -89,3 +89,12 @@ command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg
 args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml"]
 schedule = { tz = "Asia/Shanghai", at = ["11:00"] }
 timeout_minutes = 480
+
+[[job]]
+name = "lseg-monthly-merge"
+description = "LSEG 日包库月度合并（上月）：合并 -> 记录数/K线校验 -> 切换计划 -> 删除旧小库（钉钉）"
+cwd = "/home/fanghaizhou/cn_futures_db"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg-daily"
+args = ["merge", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml", "--month", "previous", "--delete-sources"]
+schedule = { tz = "Asia/Shanghai", at = ["14:00"], month_days = [2] }
+timeout_minutes = 600

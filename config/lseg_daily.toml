@@ -20,6 +20,8 @@ hrd = [
 ]
 kline_base_plan = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_full_rocksdb_20261112/plan.json"
 kline_cache = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/lseg_full_rocksdb_20261112/extract"
+# Trade-correction netting witnesses (one-time `lseg_kline witness-import`).
+kline_witnesses = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_trade_witnesses_20261110"
 # Sub-tools come from the same release directory as lseg-daily itself.
 # Remote files modified less than this long ago wait for the next run.
 settle_minutes = 60

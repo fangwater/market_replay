@@ -42,14 +42,60 @@ impl Tuning {
     }
 }
 
-/// Opens a TAS database read-only with one shared LRU block cache, the
+/// Opens a TAS database read-only with its own LRU block cache, the
 /// `quote_last` merge operator and single-threaded background work.
 pub fn open_read_only<I, S>(path: &Path, cfs: I, tuning: Tuning) -> Result<DB>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let cache = Cache::new_lru_cache(tuning.cache_bytes);
+    open_with_cache(path, cfs, tuning, &Cache::new_lru_cache(tuning.cache_bytes))
+}
+
+/// One bounded LRU block cache for many databases that are open at the same
+/// time (a kline group holds every source of a product at once). Memory for
+/// cached blocks then stays at `cache_bytes` in total instead of growing with
+/// the number of databases; reads and results are unchanged.
+pub struct SharedCache {
+    cache: Cache,
+    tuning: Tuning,
+}
+
+impl SharedCache {
+    pub fn new(tuning: Tuning) -> Self {
+        Self {
+            cache: Cache::new_lru_cache(tuning.cache_bytes),
+            tuning,
+        }
+    }
+    /// [`open_read_only`] with this shared cache.
+    pub fn open<I, S>(&self, path: &Path, cfs: I) -> Result<DB>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        open_with_cache(path, cfs, self.tuning, &self.cache)
+    }
+    /// Bytes currently held by the shared cache.
+    pub fn usage(&self) -> usize {
+        self.cache.get_usage()
+    }
+}
+
+/// Tuning of the cache shared by all sources of one kline group: index
+/// blocks live in the bounded cache, so per-DB table-reader memory does not
+/// grow with the number of daily databases.
+pub const GROUP_TUNING: Tuning = Tuning {
+    cache_bytes: 256 << 20,
+    max_open_files: 64,
+    cache_index_and_filter_blocks: true,
+};
+
+fn open_with_cache<I, S>(path: &Path, cfs: I, tuning: Tuning, cache: &Cache) -> Result<DB>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let options = || {
         let mut o = Options::default();
         o.set_max_open_files(tuning.max_open_files);
@@ -58,7 +104,7 @@ where
         o.set_skip_stats_update_on_db_open(true);
         o.set_merge_operator_associative("quote_last", quote_last_merge);
         let mut table = BlockBasedOptions::default();
-        table.set_block_cache(&cache);
+        table.set_block_cache(cache);
         if tuning.cache_index_and_filter_blocks {
             table.set_cache_index_and_filter_blocks(true);
             table.set_pin_l0_filter_and_index_blocks_in_cache(false);

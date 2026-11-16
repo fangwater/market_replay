@@ -99,6 +99,9 @@ pub struct Schedule {
     /// Optional weekday filter ("Mon".."Sun"); empty = every day.
     #[serde(default)]
     pub weekdays: Vec<String>,
+    /// Optional day-of-month filter (1..=28); empty = every day.
+    #[serde(default)]
+    pub month_days: Vec<u32>,
 }
 
 fn yes() -> bool {
@@ -165,6 +168,11 @@ impl Config {
                 j.name
             );
             j.schedule.days()?;
+            ensure!(
+                j.schedule.month_days.iter().all(|d| (1..=28).contains(d)),
+                "job {}: month_days must be 1..28",
+                j.name
+            );
         }
         Ok(cfg)
     }

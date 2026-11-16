@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+mod merge;
 mod publish;
 mod remote;
 mod state;
@@ -49,10 +50,16 @@ struct Workers {
     /// about kline_groups x kline (user budget 2026-11-16: 18 cores).
     #[serde(default = "one")]
     kline_groups: usize,
+    /// RocksDB background jobs of the monthly merge (flush + compaction).
+    #[serde(default = "two")]
+    merge_compaction: i32,
 }
 
 fn one() -> usize {
     1
+}
+fn two() -> i32 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +75,14 @@ struct Config {
     work_root: PathBuf,
     /// Per-batch RocksDBs: <db_root>/<batch>/<product>/attempt_N.
     db_root: PathBuf,
+    /// Monthly merged RocksDBs: <monthly_db_root>/<YYYY-MM>/<product>/attempt_N
+    /// (default: `cme_tas_monthly` next to `db_root`).
+    #[serde(default)]
+    monthly_db_root: Option<PathBuf>,
+    /// Delivered root the merge verification must reproduce (read only;
+    /// default `delivery_root`).
+    #[serde(default)]
+    merge_compare_root: Option<PathBuf>,
     /// Local ric-day exports before publication.
     export_root: PathBuf,
     delivery_root: PathBuf,
@@ -86,6 +101,9 @@ struct Config {
     hrd: Vec<PathBuf>,
     kline_base_plan: PathBuf,
     kline_cache: PathBuf,
+    /// Raw source witness store for trade-correction netting
+    /// (`lseg_kline witness-import`; correction_policy_version=1).
+    kline_witnesses: PathBuf,
     #[serde(default)]
     bin_dir: Option<PathBuf>,
     /// Remote files younger than this (Last-Modified) wait for the next run.
@@ -145,8 +163,9 @@ fn load_config(path: &Path) -> Result<Config> {
             && (1..=16).contains(&w.parse)
             && (1..=8).contains(&w.export)
             && (1..=8).contains(&w.status)
-            && (1..=2).contains(&w.kline),
-        "workers out of the fixed budget (replay needs >= 2, kline 1..2)"
+            && (1..=2).contains(&w.kline)
+            && (1..=4).contains(&w.merge_compaction),
+        "workers out of the fixed budget (replay needs >= 2, kline 1..2, merge_compaction 1..4)"
     );
     ensure!(
         cfg.production || cfg.delivery_root != Path::new(PRODUCTION_ROOT),
@@ -158,6 +177,7 @@ fn load_config(path: &Path) -> Result<Config> {
         &cfg.db_root,
         &cfg.export_root,
         &cfg.state_file,
+        &merge::monthly_root(&cfg),
     ] {
         ensure!(
             p.is_absolute() && !p.starts_with(&cfg.delivery_root),
@@ -197,6 +217,26 @@ enum Cmd {
         /// Inventory + discovery only; print the plan, write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Merge a month's finished daily DBs into one DB per product, verify
+    /// (record counts + klines reproduced in staging), then switch the plan.
+    Merge {
+        #[arg(long)]
+        config: PathBuf,
+        /// YYYY-MM, or "previous" (the UTC month before today).
+        #[arg(long)]
+        month: String,
+        /// Only these product directories (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        products: Vec<String>,
+        /// List sources and targets only; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// After both verifications pass, delete the retired source DBs.
+        #[arg(long)]
+        delete_sources: bool,
+        #[arg(long)]
+        no_notify: bool,
     },
     /// Show state, open batches and gaps.
     Status {
@@ -543,6 +583,8 @@ fn new_batch(run_id: &str, planned: BTreeMap<String, Vec<PlannedFile>>) -> Resul
                 kline_done: false,
                 prev_last: None,
                 error: None,
+                merged_into: None,
+                db_deleted: false,
             },
         );
     }
@@ -1047,7 +1089,7 @@ fn kline_plan(cfg: &Config, st: &State) -> Result<Value> {
             let (Some(db), Some(base)) = (&pr.db, pr.plan_index) else {
                 continue;
             };
-            if pr.stage != Stage::Done {
+            if pr.stage != Stage::Done || pr.merged_into.is_some() {
                 continue;
             }
             let dir = product_dir(cfg, &b.id, product);
@@ -1061,6 +1103,19 @@ fn kline_plan(cfg: &Config, st: &State) -> Result<Value> {
                     "exchange_map": dir.join("exchange_map.json"),
                 }));
             }
+        }
+    }
+    for m in st.merged.iter().filter(|m| m.retired_by.is_none()) {
+        for (i, cf) in m.cfs.keys().enumerate() {
+            let (year, cfp) = cf_parts(cf)?;
+            jobs.push(json!({
+                "id": format!("monthly_{}__{}", publish::component(&m.id), publish::component(cf)),
+                "db": m.db, "cf": cf, "year": year, "product": cfp, "period": m.period,
+                "source": "daily", "source_index": m.plan_index + i as u32,
+                "audit": m.report, "coverage_days": m.coverage_days,
+                "exchange_map": m.exchange_map,
+                "merged_from": m.merged_from.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            }));
         }
     }
     Ok(plan)
@@ -1162,6 +1217,49 @@ fn run_kline(ctx: &mut Ctx, st: &mut State) -> Result<KlineReport> {
         ],
         &log,
     )?;
+    // Raw-CSV correction evidence of the new batches, so their kind=12
+    // rows can be netted (one immutable witness segment per batch/product).
+    let mut appended = BTreeSet::new();
+    for news in groups.values() {
+        for (bi, product) in &news.owners {
+            if !appended.insert((*bi, product.clone())) {
+                continue;
+            }
+            let b = &st.batches[*bi];
+            let pr = &b.products[product];
+            let files = pr
+                .files
+                .iter()
+                .map(|f| {
+                    f.source_file
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .context("downloaded source file")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if files.is_empty() {
+                continue;
+            }
+            ctx.run(
+                "改撤见证",
+                "lseg_kline",
+                &[
+                    "witness-append".into(),
+                    "--store".into(),
+                    cfg.kline_witnesses.display().to_string(),
+                    "--segment".into(),
+                    format!("daily{}_{}", b.id, publish::component(product)),
+                    "--year".into(),
+                    pr.year.to_string(),
+                    "--files".into(),
+                    files.join(","),
+                    "--workers".into(),
+                    ctx.cfg.workers.stage.min(8).to_string(),
+                ],
+                &log,
+            )?;
+        }
+    }
     let mut failed_products = BTreeSet::new();
     let mut rows = Vec::new();
     // One job per (year, product) group, each with its own work dir and log
@@ -1189,6 +1287,8 @@ fn run_kline(ctx: &mut Ctx, st: &mut State) -> Result<KlineReport> {
             plan_path.display().to_string(),
             "--cache".into(),
             cfg.kline_cache.display().to_string(),
+            "--witnesses".into(),
+            cfg.kline_witnesses.display().to_string(),
             "--work".into(),
             gdir.display().to_string(),
             "--output".into(),
@@ -1422,7 +1522,11 @@ fn write_gaps(cfg: &Config, st: &State) -> Result<()> {
 // ---------------------------------------------------------------- run
 
 fn notify(cfg: &Config, enabled: bool, title: &str, body: &str) {
-    let text = format!("【LSEG 日更】{title}（{}）\n{body}", cfg.host_tag);
+    notify_as(cfg, enabled, "LSEG 日更", title, body)
+}
+
+fn notify_as(cfg: &Config, enabled: bool, head: &str, title: &str, body: &str) {
+    let text = format!("【{head}】{title}（{}）\n{body}", cfg.host_tag);
     eprintln!("{text}");
     if !enabled {
         return;
@@ -1942,6 +2046,27 @@ fn main() -> Result<()> {
             };
             run(&cfg, &opts, !no_notify && !dry_run)
         }
+        Cmd::Merge {
+            config,
+            month,
+            products,
+            dry_run,
+            delete_sources,
+            no_notify,
+        } => {
+            let cfg = load_config(&config)?;
+            let month = merge::resolve_month(&month, Utc::now().date_naive())?;
+            merge::run(
+                &cfg,
+                &merge::Opts {
+                    month,
+                    products,
+                    dry_run,
+                    delete_sources,
+                },
+                !no_notify && !dry_run,
+            )
+        }
         Cmd::Status { config } => status(&load_config(&config)?),
         Cmd::TestNotify { config } => {
             let cfg = load_config(&config)?;
@@ -1997,7 +2122,7 @@ mod tests {
         assert!(text.lines().count() <= 7, "{text}");
     }
 
-    fn cfg(root: &Path) -> Config {
+    pub(crate) fn cfg(root: &Path) -> Config {
         toml::from_str(&format!(
             r#"remote_root = "http://x/"
 raw_root = "{r}/raw"
@@ -2012,6 +2137,7 @@ approved_exchanges = "{r}/approved.json"
 hrd = []
 kline_base_plan = "{r}/plan.json"
 kline_cache = "{r}/cache"
+kline_witnesses = "{r}/witnesses"
 dingtalk_webhook_env = "W"
 dingtalk_secret_env = "S"
 [workers]

@@ -173,7 +173,64 @@ pub fn status_schema() -> Arc<Schema> {
         ]),
     ))
 }
-pub fn kline_schema() -> Arc<Schema> {
+/// Per-file inputs of the kline metadata.
+#[derive(Clone, Debug, Default)]
+pub struct KlineInfo {
+    /// Group source signature (same digest as the Python full build).
+    pub input_signature: String,
+    /// Unresolved kind=12 controls of this RIC-year (all of them without a
+    /// witness ledger).
+    pub correction_pending_count: usize,
+    /// `correction_plan_sha256` when a witness ledger was applied.
+    pub correction_plan_sha256: Option<String>,
+}
+
+/// The production key set of `lseg_only_full_v1` kline.parquet, with the
+/// descriptive texts copied from delivered files. Netted RICs additionally
+/// carry the `correction_policy_version=1` keys.
+pub fn kline_metadata(info: &KlineInfo) -> Meta {
+    let mut m = Meta::from([
+        ("source", "LSEG TAS trades, corrections and Mkt. Condition qualifiers only"),
+        ("kline_status_policy", "lseg_only_full_v1"),
+        ("kline_schema_version", "5"),
+        ("fill_policy_version", "5"),
+        ("frequency", "1min; UTC minute-start labels"),
+        ("price_scale", "1; open/high/low/close are nullable Float64 in actual price units, same units as baseline and IB"),
+        ("trade_time_basis", "exchange time, nearest UTC date within 12h of publication; missing exchange time falls back to publication"),
+        ("empty_minutes", "continuous UTC grid in valid covered instrument lifetime; all no-trade prices use own previous close, volume/trade_count=0; null if no own prior price; is_ffill indicates an actual fill"),
+        ("is_ffill", "true only when no trade occurred and OHLC was filled from the previous close; unpriced empty rows remain null and false; volume/trade_count are never filled"),
+        ("status", "TRADING/SCHEDULED_CLOSED/HALTED/PARTIAL/UNKNOWN; detailed LSEG phases/qualifiers in session_status.parquet"),
+        ("status_scope", "CME-native phase semantics only for LSEG-verified CME Group venue; other venues explicit halt flag only, otherwise UNKNOWN"),
+        ("status_time_basis", "LSEG publication time; same-time source patch order; missing archive resets UNKNOWN"),
+        ("lifetime_source", "LSEG HRD consistent with observed source lifetime; native CME expiry; otherwise last observed LSEG evidence"),
+    ]
+    .map(|(k, v)| (k.to_owned(), v.to_owned())));
+    m.insert("input_signature".into(), info.input_signature.clone());
+    m.insert(
+        "correction_pending_count".into(),
+        info.correction_pending_count.to_string(),
+    );
+    match &info.correction_plan_sha256 {
+        None => {
+            m.insert("correction_scope".into(), "raw Trade aggregation; unlinked kind=12 controls retained as problems; no speculative deletion".into());
+            m.insert("exception_policy".into(), "raw prints aggregated without revision netting; non-trading/unknown-state prints retained; diagnostic details under meta".into());
+        }
+        Some(sha) => {
+            m.insert("correction_scope".into(), "witnessed kind=12 cancels/corrections/inserts netted (correction_policy_version=1); unlinked kind=12 controls retained as problems; no speculative deletion".into());
+            m.insert("exception_policy".into(), "raw prints immutable; reliably linked historical cancels/corrections/inserts applied; all remaining prints retained including non-trading/unknown-state prints; unresolved links under meta/problems".into());
+            m.insert(
+                "correction_policy_version".into(),
+                super::netting::VERSION.into(),
+            );
+            m.insert("correction_plan_sha256".into(), sha.clone());
+            m.insert("correction_pending_scope".into(), "pending at ledger evaluation; current unresolved issues are in meta/problems/native_kline; ledger witnesses retained locally by hash".into());
+            m.insert("trade_revisions".into(), "historical as-of-source netting of reliably linked cancellations/corrections/inserts; raw ticks immutable; unresolved links retained under meta/problems".into());
+        }
+    }
+    m
+}
+
+fn kline_fields() -> Vec<Field> {
     let mut fields = vec![
         Field::new("ric", DataType::Utf8, true),
         Field::new("ts_utc_ns", DataType::UInt64, true),
@@ -186,7 +243,18 @@ pub fn kline_schema() -> Arc<Schema> {
     }
     fields.push(Field::new("is_ffill", DataType::Boolean, true));
     fields.push(Field::new("status", DataType::Utf8, true));
-    Arc::new(Schema::new_with_metadata(fields,Meta::from([("source".into(),"LSEG TAS; native direct RocksDB streaming".into()),("kline_status_policy".into(),"lseg_only_full_v1".into()),("kline_schema_version".into(),"5".into()),("price_scale".into(),"1; nullable Float64 actual prices".into()),("trade_time_basis".into(),"exchange clock nearest UTC date within 12h; publication fallback when missing".into()),("empty_minutes".into(),"continuous UTC minutes within LSEG lifetime; own previous close across all breaks".into()),("correction_scope".into(),"unlinked kind=12 recorded as source_witness_pending; original 237 revised RICs reused unchanged".into())])))
+    fields
+}
+/// Columns with the per-file metadata of `info`.
+pub fn kline_schema_for(info: &KlineInfo) -> Arc<Schema> {
+    Arc::new(Schema::new_with_metadata(
+        kline_fields(),
+        kline_metadata(info),
+    ))
+}
+/// Columns with metadata for an unidentified source (tests, comparisons).
+pub fn kline_schema() -> Arc<Schema> {
+    kline_schema_for(&KlineInfo::default())
 }
 #[derive(Clone, Debug)]
 pub struct StatusRow {
@@ -237,6 +305,9 @@ pub struct Kline {
     pub status: &'static str,
 }
 pub fn kline_batch(ric: &str, rows: &[Kline]) -> Result<RecordBatch> {
+    kline_batch_with(kline_schema(), ric, rows)
+}
+pub fn kline_batch_with(schema: Arc<Schema>, ric: &str, rows: &[Kline]) -> Result<RecordBatch> {
     let mut a: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
             ric,
@@ -263,7 +334,7 @@ pub fn kline_batch(ric: &str, rows: &[Kline]) -> Result<RecordBatch> {
     a.push(Arc::new(StringArray::from_iter_values(
         rows.iter().map(|r| r.status),
     )));
-    Ok(RecordBatch::try_new(kline_schema(), a)?)
+    Ok(RecordBatch::try_new(schema, a)?)
 }
 
 fn light(path: &Path, schema: &Schema, rows: u64) -> Result<()> {
@@ -491,8 +562,10 @@ enum Mode {
     Create,
     /// Existing file: footer check only.
     Keep,
-    /// Existing protected (corrected) file: never touched.
-    Frozen,
+    /// Existing file of the earlier Python generation of the 237 revised
+    /// 2026 RICs outside the compare window: left as delivered. Their seed /
+    /// lifetime policy differs for a few RICs (row counts may differ).
+    Legacy,
     /// Existing file: compare values; replace with backup if different.
     Compare,
 }
@@ -545,31 +618,29 @@ fn open_temp(path: &Path, parent_known: bool) -> Result<(PathBuf, File)> {
 }
 impl Sink {
     pub fn new(path: PathBuf, schema: Arc<Schema>) -> Result<Self> {
-        Self::new_impl(path, schema, false, None, false)
+        Self::new_impl(path, schema, false, None)
     }
     pub fn new_in(
         path: PathBuf,
         schema: Arc<Schema>,
         directories: &mut DayDirectories,
     ) -> Result<Self> {
-        Self::new_with(path, schema, directories, None, false)
+        Self::new_with(path, schema, directories, None)
     }
     pub fn new_with(
         path: PathBuf,
         schema: Arc<Schema>,
         directories: &mut DayDirectories,
         policy: Option<Arc<Replace>>,
-        frozen: bool,
     ) -> Result<Self> {
         let known = directories.plan(&path)?;
-        Self::new_impl(path, schema, known, policy, frozen)
+        Self::new_impl(path, schema, known, policy)
     }
     fn new_impl(
         path: PathBuf,
         schema: Arc<Schema>,
         parent_known: bool,
         policy: Option<Arc<Replace>>,
-        frozen: bool,
     ) -> Result<Self> {
         let mut out = Self {
             path,
@@ -582,9 +653,7 @@ impl Sink {
             buffered: Vec::new(),
         };
         if out.path.exists() {
-            out.mode = if frozen {
-                Mode::Frozen
-            } else if out
+            out.mode = if out
                 .policy
                 .as_ref()
                 .is_some_and(|p| day_of(&out.path).is_some_and(|d| d >= p.compare_from))
@@ -662,11 +731,11 @@ impl Sink {
     }
     pub fn finish(mut self) -> Result<PathBuf> {
         match self.mode {
-            Mode::Frozen => return Ok(self.path.clone()),
             Mode::Compare => {
                 self.compare_replace()?;
                 return Ok(self.path.clone());
             }
+            Mode::Legacy => return Ok(self.path.clone()),
             Mode::Keep | Mode::Create => {}
         }
         if let Some(mut w) = self.writer.take() {
@@ -727,14 +796,30 @@ pub struct StatusWriter {
     directories: DayDirectories,
     pending: PendingFiles,
     policy: Option<Arc<Replace>>,
-    frozen_before: u64,
+    /// Post-expiry rule (same as `lseg_catalog --prune-expired-status`).
+    kline_last_day: Option<u64>,
+    expired_day: Option<u64>,
+    day_open: bool,
+    day_expire: bool,
+    day_redundant: bool,
+    holding: bool,
+    held: Vec<(u64, State, Vec<StatusRow>)>,
+    held_rows: usize,
+    last_state: State,
+    skipped: u64,
 }
+/// Rows of redundant post-expiry status days kept in memory until the
+/// RIC's final state is known; beyond this they are simply written.
+const HELD_ROWS: usize = 1_000_000;
 impl StatusWriter {
-    /// Existing day files: compare/replace under `policy`; days before
-    /// `frozen_before` (protected corrected RICs) are never touched.
-    pub fn set_policy(&mut self, policy: Option<Arc<Replace>>, frozen_before: u64) {
+    /// Existing day files: compare/replace under `policy`.
+    pub fn set_policy(&mut self, policy: Option<Arc<Replace>>) {
         self.policy = policy;
-        self.frozen_before = frozen_before;
+    }
+    /// Last UTC day index that also gets a kline.parquet (`None`: no kline).
+    /// Such days are never treated as status-only.
+    pub fn set_kline_last_day(&mut self, day: Option<u64>) {
+        self.kline_last_day = day;
     }
     pub fn new(root: PathBuf, product: &str, ric: &str) -> Result<Self> {
         Self::new_with_pool(root, product, ric, None)
@@ -758,8 +843,28 @@ impl StatusWriter {
             directories,
             pending: PendingFiles::new(pool),
             policy: None,
-            frozen_before: 0,
+            kline_last_day: None,
+            expired_day: None,
+            day_open: false,
+            day_expire: false,
+            day_redundant: true,
+            holding: false,
+            held: Vec::new(),
+            held_rows: 0,
+            last_state: State::Unknown,
+            skipped: 0,
         })
+    }
+    fn open_sink(&mut self) -> Result<()> {
+        self.sink = Some(Sink::new_with(
+            self.root
+                .join(date(self.day * DAY)?)
+                .join("session_status.parquet"),
+            status_schema(),
+            &mut self.directories,
+            self.policy.clone(),
+        )?);
+        Ok(())
     }
     fn flush(&mut self) -> Result<()> {
         if !self.buffer.is_empty() {
@@ -772,7 +877,7 @@ impl StatusWriter {
         }
         Ok(())
     }
-    fn close(&mut self) -> Result<()> {
+    fn close_sink(&mut self) -> Result<()> {
         self.flush()?;
         if let Some(sink) = self.sink.take() {
             let rows = sink.rows;
@@ -786,36 +891,130 @@ impl StatusWriter {
         }
         Ok(())
     }
+    /// Write one held day as an ordinary file.
+    fn write_held(&mut self, day: u64, before: State, rows: Vec<StatusRow>) -> Result<()> {
+        self.day = day;
+        self.before = before;
+        self.open_sink()?;
+        for chunk in rows.chunks(BATCH) {
+            self.buffer.extend_from_slice(chunk);
+            self.flush()?;
+        }
+        self.close_sink()
+    }
+    fn release_held(&mut self) -> Result<()> {
+        let (day, before) = (self.day, self.before);
+        for (d, b, rows) in std::mem::take(&mut self.held) {
+            self.write_held(d, b, rows)?
+        }
+        self.held_rows = 0;
+        (self.day, self.before) = (day, before);
+        Ok(())
+    }
+    fn close(&mut self) -> Result<()> {
+        if !self.day_open {
+            return Ok(());
+        }
+        if self.holding {
+            self.holding = false;
+            let rows = std::mem::take(&mut self.buffer);
+            self.held_rows += rows.len();
+            self.held.push((self.day, self.before, rows));
+            if self.held_rows > HELD_ROWS {
+                self.release_held()?
+            }
+        } else {
+            self.close_sink()?;
+        }
+        if self.expired_day.is_none() && self.day_expire && self.last_state == State::Expired {
+            self.expired_day = Some(self.day)
+        }
+        self.day_open = false;
+        Ok(())
+    }
     pub fn push(&mut self, row: StatusRow) -> Result<()> {
         let day = row.at / DAY;
-        if self.sink.is_none() || day != self.day {
+        if !self.day_open || day != self.day {
             self.close()?;
             self.day = day;
             self.before = row.before;
-            self.sink = Some(Sink::new_with(
-                self.root
-                    .join(date(day * DAY)?)
-                    .join("session_status.parquet"),
-                status_schema(),
-                &mut self.directories,
-                self.policy.clone(),
-                day * DAY < self.frozen_before,
-            )?)
+            self.day_open = true;
+            self.day_expire = false;
+            self.day_redundant = true;
+            // Candidate: strictly after the explicit expiry day, no kline.
+            self.holding = self.expired_day.is_some_and(|e| day > e)
+                && self.kline_last_day.is_none_or(|k| day > k);
+            if !self.holding {
+                self.open_sink()?
+            }
+        }
+        if row.decoded.action == "EXPIRE" && row.decoded.state == State::Expired {
+            self.day_expire = true
+        }
+        self.day_redundant &=
+            row.decoded.state == State::Expired && row.decoded.action == "NO_CHANGE";
+        self.last_state = row.decoded.state;
+        if self.holding && (!self.day_redundant || self.buffer.len() >= HELD_ROWS) {
+            // Real content after expiry: an ordinary file.
+            self.holding = false;
+            self.open_sink()?;
+            let held = std::mem::take(&mut self.buffer);
+            for chunk in held.chunks(BATCH) {
+                self.buffer.extend_from_slice(chunk);
+                self.flush()?;
+            }
         }
         self.buffer.push(row);
-        if self.buffer.len() == BATCH {
+        if !self.holding && self.buffer.len() == BATCH {
             self.flush()?
         }
         Ok(())
     }
     pub fn finish(self) -> Result<Vec<StatusFile>> {
-        self.finish_with_directories().map(|(files, _)| files)
+        self.finish_with_directories().map(|(files, _, _)| files)
     }
-    pub fn finish_with_directories(mut self) -> Result<(Vec<StatusFile>, DayDirectories)> {
+    /// Files written, the directory cache, and the number of redundant
+    /// post-expiry status-only days not written.
+    pub fn finish_with_directories(mut self) -> Result<(Vec<StatusFile>, DayDirectories, u64)> {
         self.close()?;
+        if self.last_state == State::Expired {
+            for (day, before, rows) in std::mem::take(&mut self.held) {
+                if only_status_files(&self.root.join(date(day * DAY)?))? {
+                    self.skipped += 1;
+                } else {
+                    self.write_held(day, before, rows)?
+                }
+            }
+        } else {
+            self.release_held()?
+        }
         self.pending.finish()?;
-        Ok((std::mem::take(&mut self.files), self.directories))
+        self.files.sort_by_key(|f| f.day);
+        Ok((
+            std::mem::take(&mut self.files),
+            self.directories,
+            self.skipped,
+        ))
     }
+}
+
+/// The day directory holds nothing but status files (or does not exist).
+fn only_status_files(dir: &Path) -> Result<bool> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        if !matches!(
+            name.to_str(),
+            Some("status.parquet" | "session_status.parquet")
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn write_kline(
@@ -825,16 +1024,18 @@ pub fn write_kline(
     pending: &mut PendingFiles,
     sample: bool,
     policy: Option<Arc<Replace>>,
-    frozen: bool,
+    legacy: bool,
 ) -> Result<()> {
     let known = directories.plan(&path)?;
     pending.execute(move || {
-        let mut sink = Sink::new_impl(path.clone(), kline_schema(), known, policy, frozen)?;
-        let frozen_kept = sink.mode == Mode::Frozen;
+        let mut sink = Sink::new_impl(path.clone(), batch.schema(), known, policy)?;
+        if legacy && sink.mode == Mode::Keep {
+            sink.mode = Mode::Legacy
+        }
+        let kept = sink.mode == Mode::Legacy;
         sink.write(&batch)?;
         sink.finish()?;
-        // Frozen (protected, revised) files keep their revised values.
-        if sample && !frozen_kept {
+        if sample && !kept {
             verify_kline(&path, &batch)?;
         }
         Ok(path)
@@ -985,7 +1186,7 @@ mod performance_tests {
                                 })?;
                             }
                         }
-                        let (_, mut directories) = status.finish_with_directories()?;
+                        let (_, mut directories, _) = status.finish_with_directories()?;
                         let mut pending = PendingFiles::new(pool);
                         for day in 0..32 {
                             let start = start + day * DAY;
@@ -1119,6 +1320,9 @@ pub struct Stats {
     pub status_files: u64,
     #[serde(default)]
     pub status_rows: u64,
+    /// Redundant post-expiry status-only days not written.
+    #[serde(default)]
+    pub status_days_skipped: u64,
 }
 impl Stats {
     pub fn add(&mut self, other: &Self) {
@@ -1130,7 +1334,8 @@ impl Stats {
         self.kline_rows += other.kline_rows;
         self.files += other.files;
         self.status_files += other.status_files;
-        self.status_rows += other.status_rows
+        self.status_rows += other.status_rows;
+        self.status_days_skipped += other.status_days_skipped
     }
 }
 pub struct Problems {
@@ -1271,14 +1476,14 @@ mod replace_tests {
         kline_batch("X", &rows).unwrap()
     }
 
-    fn sink(path: &Path, policy: Option<Arc<Replace>>, frozen: bool) -> Sink {
+    fn sink(path: &Path, policy: Option<Arc<Replace>>, schema: Arc<Schema>) -> Sink {
         let ric_dir = path.parent().unwrap().parent().unwrap();
         let mut d = DayDirectories::new(ric_dir.into()).unwrap();
-        Sink::new_with(path.into(), kline_schema(), &mut d, policy, frozen).unwrap()
+        Sink::new_with(path.into(), schema, &mut d, policy).unwrap()
     }
 
-    fn write(path: &Path, b: &RecordBatch, policy: Option<Arc<Replace>>, frozen: bool) {
-        let mut s = sink(path, policy, frozen);
+    fn write(path: &Path, b: &RecordBatch, policy: Option<Arc<Replace>>) {
+        let mut s = sink(path, policy, b.schema());
         s.write(b).unwrap();
         s.finish().unwrap();
     }
@@ -1288,23 +1493,31 @@ mod replace_tests {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("delivery");
         let path = root.join("review/2026/X/20261107/kline.parquet");
-        write(&path, &day(601, 1), None, false);
+        write(&path, &day(601, 1), None);
         let original = fs::read(&path).unwrap();
         // Without a policy an existing file is kept (row-count check fails).
-        let mut keep = sink(&path, None, false);
+        let mut keep = sink(&path, None, kline_schema());
         keep.write(&day(1440, 1)).unwrap();
         assert!(keep.finish().is_err());
         let log = t.path().join("replaced.jsonl");
         let policy = Replace::new(root.clone(), t.path().join("backup"), 0, &log).unwrap();
-        // Frozen (protected) days are never touched.
-        write(&path, &day(1440, 1), Some(policy.clone()), true);
-        assert_eq!(fs::read(&path).unwrap(), original);
         // Identical values: untouched, nothing logged.
-        write(&path, &day(601, 1), Some(policy.clone()), false);
+        write(&path, &day(601, 1), Some(policy.clone()));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "");
+        // Metadata alone (e.g. the unified key set) never triggers a replacement.
+        let info = KlineInfo {
+            input_signature: "abc".into(),
+            correction_pending_count: 3,
+            correction_plan_sha256: Some("def".into()),
+        };
+        let relabelled =
+            RecordBatch::try_new(kline_schema_for(&info), day(601, 1).columns().to_vec()).unwrap();
+        write(&path, &relabelled, Some(policy.clone()));
         assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(fs::read_to_string(&log).unwrap(), "");
         // Tail completion: replaced, old bytes kept in the backup.
-        write(&path, &day(1440, 1), Some(policy.clone()), false);
+        write(&path, &day(1440, 1), Some(policy.clone()));
         assert!(same_values(&read_all(&path).unwrap(), &day(1440, 1)));
         let backup = t.path().join("backup/review/2026/X/20261107/kline.parquet");
         assert_eq!(fs::read(backup).unwrap(), original);
@@ -1315,11 +1528,169 @@ mod replace_tests {
         assert_eq!(line["old_is_prefix"], true);
         // A value correction with the same row count is also replaced.
         let p2 = Replace::new(root.clone(), t.path().join("backup2"), 0, &log).unwrap();
-        write(&path, &day(1440, 2), Some(p2), false);
+        write(&path, &day(1440, 2), Some(p2));
         assert!(same_values(&read_all(&path).unwrap(), &day(1440, 2)));
         // Days before compare_from are only footer-checked, never replaced.
         let later = Replace::new(root, t.path().join("backup3"), u64::MAX, &log).unwrap();
-        write(&path, &day(1440, 3), Some(later), false);
+        write(&path, &day(1440, 3), Some(later));
         assert!(same_values(&read_all(&path).unwrap(), &day(1440, 2)));
+    }
+}
+
+#[cfg(test)]
+mod status_expiry_tests {
+    use super::*;
+    use crate::native_kline::session::Decoder;
+
+    const D0: u64 = 1_793_923_200_000_000_000 / DAY; // 2026-11-06
+
+    /// Status rows of one RIC: day 0 trades then expires; later days only
+    /// repeat the terminal state.
+    fn rows(days: u64, revive_on: Option<u64>) -> Vec<StatusRow> {
+        let mut d = Decoder::new(true);
+        let mut previous = State::Unknown;
+        let mut out = Vec::new();
+        let mut push = |at: u64, q: &str, previous: &mut State| {
+            let decoded = d.decode(q, *previous);
+            let before = *previous;
+            *previous = decoded.state;
+            out.push(StatusRow {
+                at,
+                before,
+                decoded,
+                qualifiers: q.into(),
+            });
+        };
+        push(D0 * DAY + 10, "15[TRD_TYPE]", &mut previous);
+        push(D0 * DAY + 20, "4[HALT_REASN]", &mut previous);
+        for day in 1..days {
+            let q = if revive_on == Some(day) {
+                "8[HALT_REASN]"
+            } else {
+                "15[TRD_TYPE]"
+            };
+            push((D0 + day) * DAY + 5, q, &mut previous);
+        }
+        out
+    }
+    fn written(root: &Path) -> Vec<u64> {
+        let mut days: Vec<u64> = fs::read_dir(root)
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                p.join("session_status.parquet")
+                    .exists()
+                    .then(|| day_of(&p.join("x")).unwrap() / DAY - D0)
+            })
+            .collect();
+        days.sort();
+        days
+    }
+
+    #[test]
+    fn redundant_post_expiry_status_days_are_not_written() {
+        let rows = rows(5, None);
+        assert_eq!(rows[1].decoded.action, "EXPIRE");
+        assert!(rows[2..]
+            .iter()
+            .all(|r| r.decoded.state == State::Expired && r.decoded.action == "NO_CHANGE"));
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cme/2026/X");
+        // The kline grid covers days 0-1; day 2 keeps another delivered file.
+        fs::create_dir_all(root.join(date((D0 + 2) * DAY).unwrap())).unwrap();
+        fs::write(
+            root.join(date((D0 + 2) * DAY).unwrap())
+                .join("trade.parquet"),
+            b"",
+        )
+        .unwrap();
+        let mut w = StatusWriter::new(root.clone(), "X", "X").unwrap();
+        w.set_kline_last_day(Some(D0 + 1));
+        for r in rows {
+            w.push(r).unwrap()
+        }
+        let (files, _, skipped) = w.finish_with_directories().unwrap();
+        // Kline days and the day with other files; not days 3 and 4.
+        assert_eq!(written(&root), [0, 1, 2]);
+        assert_eq!(files.len(), 3);
+        assert_eq!(skipped, 2);
+        assert_eq!(files[1].rows, 1);
+    }
+
+    #[test]
+    fn post_expiry_days_are_kept_unless_the_ric_stays_expired() {
+        // CME expiry is terminal: a later phase message stays EXPIRED.
+        let rows_cme = rows(4, Some(3));
+        assert_eq!(rows_cme.last().unwrap().decoded.state, State::Expired);
+        // If the RIC is not finally EXPIRED (e.g. a non-terminal venue
+        // reopens it), no day is dropped, as in the catalog prune rule.
+        let mut rows = rows(4, None);
+        let mut reopened = rows.last().unwrap().clone();
+        reopened.at += DAY;
+        reopened.before = State::Expired;
+        reopened.decoded.state = State::Trading;
+        reopened.decoded.action = "OPEN";
+        rows.push(reopened);
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cme/2026/X");
+        let mut w = StatusWriter::new(root.clone(), "X", "X").unwrap();
+        for r in rows {
+            w.push(r).unwrap()
+        }
+        let (files, _, skipped) = w.finish_with_directories().unwrap();
+        assert_eq!((written(&root), skipped), (vec![0, 1, 2, 3, 4], 0));
+        assert_eq!(files.len(), 5);
+        assert!(files.windows(2).all(|w| w[0].day < w[1].day));
+    }
+
+    #[test]
+    fn kline_metadata_has_the_production_key_set() {
+        let plain = kline_metadata(&KlineInfo {
+            input_signature: "sig".into(),
+            correction_pending_count: 7,
+            correction_plan_sha256: None,
+        });
+        let mut keys: Vec<_> = plain.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "correction_pending_count",
+                "correction_scope",
+                "empty_minutes",
+                "exception_policy",
+                "fill_policy_version",
+                "frequency",
+                "input_signature",
+                "is_ffill",
+                "kline_schema_version",
+                "kline_status_policy",
+                "lifetime_source",
+                "price_scale",
+                "source",
+                "status",
+                "status_scope",
+                "status_time_basis",
+                "trade_time_basis"
+            ]
+        );
+        assert_eq!(plain["fill_policy_version"], "5");
+        assert_eq!(plain["correction_pending_count"], "7");
+        assert_eq!(plain["input_signature"], "sig");
+        assert!(plain["exception_policy"].contains("without revision netting"));
+        let netted = kline_metadata(&KlineInfo {
+            input_signature: "sig".into(),
+            correction_pending_count: 2,
+            correction_plan_sha256: Some("abc".into()),
+        });
+        assert_eq!(netted.len(), plain.len() + 4);
+        assert_eq!(netted["correction_policy_version"], "1");
+        assert_eq!(netted["correction_plan_sha256"], "abc");
+        assert!(netted["exception_policy"].contains("reliably linked"));
+        // Columns never depend on metadata.
+        assert_eq!(
+            kline_schema_for(&KlineInfo::default()).fields(),
+            kline_schema().fields()
+        );
     }
 }

@@ -2,6 +2,7 @@
 //! No Python, market-event JSON, external calendar, Databento or IB input.
 pub mod engine;
 pub mod io;
+pub mod netting;
 mod publication;
 pub mod session;
 
