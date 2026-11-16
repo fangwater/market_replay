@@ -257,6 +257,7 @@ mod tests {
         .unwrap();
         assert_eq!(census.messages, 1);
         assert_eq!(messages[0].fields[0].name, "CURRENCY");
-        assert_eq!(messages[0].ts_utc_ns, 1_625_112_766_594_175_513);
+        // 2021-07-01T03:46:06.594175513Z
+        assert_eq!(messages[0].ts_utc_ns, 1_625_111_166_594_175_513);
     }
 }

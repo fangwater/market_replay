@@ -22,8 +22,11 @@ fn worker_error_does_not_publish_or_leave_building_db() {
         &bad,
         concat!(
             "#RIC,Domain,Date-Time,GMT Offset,Type,MsgClass/FID number,UpdateType/Action,FID Name,FID Value,FID Enum String,PE Code,Template Number,Key/Msg Sequence Number,Number of FIDs\n",
-            "AAPL.O,Market Price,2021-07-01T00:00:00Z,-4,Raw,UPDATE,UNSPECIFIED,,,,74,,1,1\n",
-            ",,,,FID,999999,,NEW_FIELD,1,\n",
+            // Unknown FIDs are kept as auxiliary fields; a duplicated Quote
+            // FID is still a hard error and must fail the whole replay.
+            "AAPL.O,Market Price,2021-07-01T00:00:00.100000000Z,-4,Raw,UPDATE,QUOTE,,,,74,,1,2\n",
+            ",,,,FID,22,,BID,100.08,\n",
+            ",,,,FID,22,,BID,100.09,\n",
         ),
     )
     .unwrap();
@@ -51,9 +54,13 @@ fn worker_error_does_not_publish_or_leave_building_db() {
         .env("RUST_BACKTRACE", "0")
         .output()
         .unwrap();
-    assert!(!result.status.success());
+    assert!(
+        !result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unsupported RAW FID"), "{stderr}");
+    assert!(stderr.contains("duplicate Quote FID"), "{stderr}");
     assert!(stderr.contains("incomplete output was removed"), "{stderr}");
     assert!(!output.exists());
     assert!(!raw_building_path(&output).exists());
