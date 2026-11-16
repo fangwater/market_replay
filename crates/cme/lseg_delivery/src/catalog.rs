@@ -15,6 +15,7 @@ use parquet::arrow::{
 };
 use parquet::file::statistics::Statistics;
 use rocksdb::{ReadOptions, DB};
+use serde::Deserialize;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
     Connection, Row, SqliteConnection,
@@ -27,6 +28,9 @@ use std::{
 
 const ROOT: &str = "/mnt/nfs/30.100_cta_data/lseg";
 const WORK: &str = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/lseg_native_klines_20261112";
+/// Written by `ib_kline_export` after every run (one entry per published RIC).
+const IB_MANIFEST: &str =
+    "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/ib_kline_export/ib_contracts.json";
 const PLAN: &str =
     "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_full_rocksdb_20261112/plan.json";
 
@@ -49,6 +53,22 @@ pub struct Build {
     /// Remove only later UTC dates containing exclusively redundant expired status files.
     #[arg(long)]
     pub prune_expired_status: bool,
+    /// IB contract manifest imported into `ib_contracts` (skipped if absent).
+    #[arg(long, default_value = IB_MANIFEST)]
+    pub ib_manifest: PathBuf,
+}
+/// Refresh only the IB tables of an existing catalog (no RocksDB access).
+#[derive(Args)]
+pub struct IbSync {
+    #[arg(long, default_value = ROOT)]
+    pub root: PathBuf,
+    /// Defaults to <root>/meta/catalog.sqlite.
+    #[arg(long)]
+    pub database: Option<PathBuf>,
+    #[arg(long, default_value = IB_MANIFEST)]
+    pub ib_manifest: PathBuf,
+    #[arg(long, default_value = WORK)]
+    pub work: PathBuf,
 }
 #[derive(Args)]
 pub struct Query {
@@ -106,6 +126,137 @@ INSERT INTO conventions VALUES
  ('status_cleanup','only dates strictly after an explicit EXPIRE; all rows EXPIRED/NO_CHANGE; directory has only status/session_status; source RocksDB retained'),
  ('history','Source-year namespaces are retained; repeated one-digit RIC years are not merged');
 "#;
+
+/// IB minute bars (`kline_ib.parquet`) are a separate, pure export from IB
+/// MySQL. `tas_data = 0` marks IB-only RICs: no TAS for the RIC or any alias,
+/// exchange directory taken from the product, directory holds only
+/// `kline_ib.parquet`.
+const IB_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS ib_contracts (
+ ric TEXT PRIMARY KEY, con_id TEXT NOT NULL, ib_symbol TEXT NOT NULL, ib_local_symbol TEXT NOT NULL,
+ ib_exchange TEXT NOT NULL, maturity_date TEXT NOT NULL, product TEXT NOT NULL, exchange TEXT NOT NULL,
+ exchange_basis TEXT NOT NULL, tas_data INTEGER NOT NULL, first_day TEXT, last_day TEXT
+);
+CREATE INDEX IF NOT EXISTS ib_contracts_product ON ib_contracts(product,ric);
+CREATE TABLE IF NOT EXISTS ib_directories (
+ ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL, PRIMARY KEY(ric,utc_year)
+);
+CREATE VIEW IF NOT EXISTS ib_only_contracts AS SELECT * FROM ib_contracts WHERE tas_data=0;
+INSERT OR REPLACE INTO conventions VALUES
+ ('ib_scope','ib_contracts: IB MySQL minute bars exported as-is to kline_ib.parquet (comparison only; no fill or trim)'),
+ ('ib_only','tas_data=0 (view ib_only_contracts): no TAS for the RIC or its aliases; exchange directory from the product; only kline_ib.parquet exists'),
+ ('ib_directory_usage','SELECT directory FROM ib_directories WHERE ric=?; read <directory>/<UTC YYYYMMDD>/kline_ib.parquet');
+"#;
+
+#[derive(Deserialize)]
+struct IbEntry {
+    ric: String,
+    con_id: String,
+    ib_symbol: String,
+    ib_local_symbol: String,
+    ib_exchange: String,
+    maturity_date: String,
+    product: String,
+    exchange: String,
+    exchange_basis: String,
+    tas_data: bool,
+    first_day: String,
+    last_day: String,
+}
+
+/// Replaces the IB tables from the manifest. Returns (contracts, IB-only).
+async fn load_ib(
+    conn: &mut SqliteConnection,
+    root: &Path,
+    manifest: &Path,
+) -> Result<(usize, usize)> {
+    let entries: Vec<IbEntry> = serde_json::from_slice(
+        &fs::read(manifest).with_context(|| format!("read {}", manifest.display()))?,
+    )?;
+    sqlx::raw_sql(IB_SCHEMA).execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM ib_contracts")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM ib_directories")
+        .execute(&mut *conn)
+        .await?;
+    let mut ib_only = 0;
+    for e in &entries {
+        ib_only += usize::from(!e.tas_data);
+        let day = |d: &str| (!d.is_empty()).then(|| d.to_string());
+        sqlx::query("INSERT INTO ib_contracts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&e.ric)
+            .bind(&e.con_id)
+            .bind(&e.ib_symbol)
+            .bind(&e.ib_local_symbol)
+            .bind(&e.ib_exchange)
+            .bind(&e.maturity_date)
+            .bind(&e.product)
+            .bind(&e.exchange)
+            .bind(&e.exchange_basis)
+            .bind(e.tas_data)
+            .bind(day(&e.first_day))
+            .bind(day(&e.last_day))
+            .execute(&mut *conn)
+            .await?;
+        let year = |d: &str| d.get(..4).and_then(|y| y.parse::<i32>().ok());
+        if let (Some(lo), Some(hi)) = (year(&e.first_day), year(&e.last_day)) {
+            for y in lo..=hi {
+                let dir = root
+                    .join(&e.exchange)
+                    .join(y.to_string())
+                    .join(component(&e.ric));
+                sqlx::query("INSERT INTO ib_directories VALUES (?,?,?)")
+                    .bind(&e.ric)
+                    .bind(y)
+                    .bind(dir.to_string_lossy().as_ref())
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+    }
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    Ok((entries.len(), ib_only))
+}
+
+/// Copies `local` next to `output` and renames it into place.
+fn publish_sqlite(local: &Path, output: &Path) -> Result<()> {
+    fs::create_dir_all(output.parent().context("catalog parent")?)?;
+    let temp = output.with_extension("sqlite.partial");
+    fs::copy(local, &temp)?;
+    File::open(&temp)?.sync_all()?;
+    fs::rename(&temp, output)?;
+    File::open(output.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+pub async fn ib_sync(a: IbSync) -> Result<()> {
+    let output = a
+        .database
+        .clone()
+        .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    fs::create_dir_all(&a.work)?;
+    let local = a.work.join("catalog_ib_sync.sqlite.partial");
+    fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
+    let mut conn = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&local)
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full),
+    )
+    .await?;
+    let (n, ib_only) = load_ib(&mut conn, &a.root, &a.ib_manifest).await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut conn)
+        .await?;
+    ensure!(integrity == "ok", "SQLite integrity failure: {integrity}");
+    conn.close().await?;
+    publish_sqlite(&local, &output)?;
+    fs::remove_file(&local)?;
+    println!("{}: {n} IB contracts ({ib_only} IB-only)", output.display());
+    Ok(())
+}
 
 fn utc(ns: u64) -> Result<String> {
     Ok(chrono::DateTime::from_timestamp(
@@ -644,13 +795,12 @@ pub async fn build(a: Build) -> Result<()> {
         .fetch_one(&mut conn)
         .await?;
     ensure!(integrity == "ok", "SQLite integrity failure: {integrity}");
+    if a.ib_manifest.exists() {
+        let (n, ib_only) = load_ib(&mut conn, &a.root, &a.ib_manifest).await?;
+        eprintln!("imported {n} IB contracts ({ib_only} IB-only)");
+    }
     conn.close().await?;
-    fs::create_dir_all(output.parent().context("catalog parent")?)?;
-    let temp = output.with_extension("sqlite.partial");
-    fs::copy(&local, &temp)?;
-    File::open(&temp)?.sync_all()?;
-    fs::rename(&temp, &output)?;
-    File::open(output.parent().unwrap())?.sync_all()?;
+    publish_sqlite(&local, &output)?;
     println!("{}: {count} source-year/RIC entries; {active} active at product snapshot dates; {cleaned} redundant status-only dates removed",output.display());
     Ok(())
 }
@@ -708,6 +858,42 @@ mod tests {
         session::{Decoder, State},
     };
     use parquet::arrow::ArrowWriter;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ib_manifest_import_marks_ib_only_and_directories() {
+        let t = tempfile::tempdir().unwrap();
+        let manifest = t.path().join("ib_contracts.json");
+        fs::write(&manifest, r#"[
+ {"ric":"ESZ26","con_id":"1","ib_symbol":"ES","ib_local_symbol":"ESZ6","ib_exchange":"CME","maturity_date":"20261218",
+  "product":"ES","exchange":"cme","exchange_basis":"ric","tas_data":true,"first_day":"20251218","last_day":"20261116"},
+ {"ric":"X/1","con_id":"2","ib_symbol":"X","ib_local_symbol":"X1","ib_exchange":"EUREX","maturity_date":"20270101",
+  "product":"X","exchange":"eurex","exchange_basis":"product","tas_data":false,"first_day":"20261110","last_day":"20261116"}
+]"#).unwrap();
+        let mut c = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+        let (n, only) = load_ib(&mut c, Path::new("/r"), &manifest).await.unwrap();
+        assert_eq!((n, only), (2, 1));
+        // Re-import replaces rather than duplicates.
+        load_ib(&mut c, Path::new("/r"), &manifest).await.unwrap();
+        let ib_only: Vec<String> = sqlx::query_scalar("SELECT ric FROM ib_only_contracts")
+            .fetch_all(&mut c)
+            .await
+            .unwrap();
+        assert_eq!(ib_only, vec!["X/1".to_string()]);
+        let dirs: Vec<String> =
+            sqlx::query_scalar("SELECT directory FROM ib_directories ORDER BY ric,utc_year")
+                .fetch_all(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(
+            dirs,
+            vec![
+                "/r/cme/2025/ESZ26",
+                "/r/cme/2026/ESZ26",
+                "/r/eurex/2026/X%2F1"
+            ]
+        );
+    }
 
     fn status(dir: &Path, ric: &str, at: u64, previous: State, qualifier: &str) -> Result<()> {
         fs::create_dir_all(dir)?;

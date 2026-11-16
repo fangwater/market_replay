@@ -7,6 +7,7 @@
 //! bounded streaming (one UTC day per file in flight, bounded queues).
 mod catalog;
 mod ib_minute;
+mod manifest;
 mod mapping;
 mod mysql;
 mod plan;

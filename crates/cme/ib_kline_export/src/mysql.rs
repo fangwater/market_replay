@@ -378,11 +378,12 @@ pub fn run(
         }
     }
     let mut work = Vec::new();
+    let mut entries = Vec::new();
     let mut unresolved = 0;
     let rt2 = &rt;
     for (con_id, job) in &jobs {
         match catalog.exchange(job) {
-            Ok((exchange, _)) => {
+            Ok((exchange, basis)) => {
                 let mut days = touched[con_id].clone();
                 if first_mapped.contains(con_id) {
                     // First mapping: publish the contract's whole history, not only new ids.
@@ -403,10 +404,18 @@ pub fn run(
                         Ok::<_, anyhow::Error>(out)
                     })?);
                 }
+                let days: Vec<i64> = days.into_iter().collect();
+                let mut entry = crate::manifest::Entry::new(job, &exchange, &basis);
+                let labels: Vec<String> = days.iter().filter_map(|d| day_label(*d).ok()).collect();
+                if let (Some(lo), Some(hi)) = (labels.iter().min(), labels.iter().max()) {
+                    entry.first_day = lo.clone();
+                    entry.last_day = hi.clone();
+                }
+                entries.push(entry);
                 work.push(Work {
                     job: job.clone(),
                     exchange,
-                    days: days.into_iter().collect(),
+                    days,
                 });
             }
             Err(reason) => {
@@ -493,6 +502,17 @@ pub fn run(
         tally.add(&r.tally);
     }
     problems.flush(&a.delivery_root, &now_utc())?;
+    let published: std::collections::HashSet<&str> = reports
+        .iter()
+        .filter(|r| r.failed_days.is_empty())
+        .map(|r| r.ric.as_str())
+        .collect();
+    crate::manifest::merge(
+        &a.state_dir,
+        entries
+            .into_iter()
+            .filter(|e| published.contains(e.ric.as_str())),
+    )?;
     summary["tally"] = serde_json::json!(tally);
     summary["replaced"] = serde_json::json!(reports
         .iter()

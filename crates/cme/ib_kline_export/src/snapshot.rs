@@ -327,10 +327,14 @@ pub fn run(
     }
     ensure!(!jobs.is_empty(), "no snapshot RICs selected");
     let mut work = Vec::new();
+    let mut entries = Vec::new();
     let mut unresolved = 0;
     for j in jobs {
         match catalog.exchange(&j) {
-            Ok((e, basis)) => work.push((j, e, format!("{basis:?}"))),
+            Ok((e, basis)) => {
+                entries.push(crate::manifest::Entry::new(&j, &e, &basis));
+                work.push((j, e, format!("{basis:?}")))
+            }
             Err(reason) => {
                 unresolved += 1;
                 ctx.problems
@@ -382,6 +386,17 @@ pub fn run(
         total.add(&r.tally);
     }
     ctx.problems.flush(&ctx.delivery_root, &now_utc())?;
+    let published: std::collections::HashSet<&str> = reports
+        .iter()
+        .filter(|r| r.failed_days.is_empty())
+        .map(|r| r.ric.as_str())
+        .collect();
+    crate::manifest::merge(
+        &ctx.state_dir,
+        entries
+            .into_iter()
+            .filter(|e| published.contains(e.ric.as_str())),
+    )?;
     let summary = serde_json::json!({
         "mode": "snapshot",
         "delivery_root": ctx.delivery_root,
