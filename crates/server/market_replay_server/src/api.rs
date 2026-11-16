@@ -11,7 +11,7 @@ use crate::manager::{recent_runs, Manager};
 use crate::process;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -116,9 +116,16 @@ async fn page() -> Html<&'static str> {
     Html(include_str!("admin.html"))
 }
 
-pub fn router(m: Arc<Manager>) -> Router {
+/// `/admin`: the dashboard's 服务与任务 tab when the dashboard is mounted,
+/// otherwise the minimal built-in page.
+pub fn router(m: Arc<Manager>, dashboard: bool) -> Router {
+    let admin = if dashboard {
+        get(|| async { Redirect::to("/#admin") })
+    } else {
+        get(page)
+    };
     Router::new()
-        .route("/admin", get(page))
+        .route("/admin", admin)
         .route("/api/admin/status", get(status))
         .route("/api/admin/runs", get(runs))
         .route("/api/admin/log/{kind}/{name}", get(log))

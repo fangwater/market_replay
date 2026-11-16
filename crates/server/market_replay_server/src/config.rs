@@ -16,6 +16,10 @@ pub struct Config {
     pub http: Http,
     /// `cn-kline-server` config (gRPC `listen`, baseline root, roll dir).
     pub cn_market: CnMarket,
+    /// Read-only dashboard 数据处理进度与品种查询 (`data_dashboard`): UI at
+    /// `/`, JSON at `/api/dashboard/*`. Omit to serve without it.
+    #[serde(default)]
+    pub dashboard: Option<Dashboard>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
     #[serde(default, rename = "job")]
@@ -31,6 +35,13 @@ pub struct Http {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CnMarket {
+    pub config: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dashboard {
+    /// `config/data_dashboard.toml` (its `listen` is ignored here).
     pub config: PathBuf,
 }
 

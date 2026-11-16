@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据处理进度与品种查询</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f3f3f1; --surface-1: #fcfcfb; --border: #e2e1dc;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --series-1: #2a78d6; --series-1-soft: #d8e7f9; --grid: #ecebe7;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --neutral: #9a9992;
+  --good-ink: #006300; --warn-ink: #8a5a00; --crit-ink: #a52222;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-0: #121211; --surface-1: #1a1a19; --border: #33332f;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --series-1: #3987e5; --series-1-soft: #1d3554; --grid: #2a2a27;
+    --good-ink: #5fd35f; --warn-ink: #fab219; --crit-ink: #ff8a8a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  background: var(--surface-0); color: var(--text-primary); }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--surface-1);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+nav button { border: 1px solid var(--border); background: transparent; color: var(--text-secondary);
+  padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+nav button.on { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+.meta { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+.tile .t { color: var(--text-secondary); font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 600; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.tile .s { font-size: 12px; color: var(--text-muted); }
+.panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+.panel h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.panel h3 { font-size: 13px; margin: 14px 0 6px; color: var(--text-secondary); font-weight: 600; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 16px; }
+.kv div { min-width: 0; }
+.kv .k { color: var(--text-muted); font-size: 12px; }
+.kv .val { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 500;
+  border: 1px solid currentColor; white-space: nowrap; }
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dot); }
+.b-ok { color: var(--good-ink); --dot: var(--good); }
+.b-lag { color: var(--warn-ink); --dot: var(--warning); }
+.b-fail { color: var(--crit-ink); --dot: var(--critical); }
+.b-unknown, .b-absent { color: var(--text-muted); --dot: var(--neutral); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--text-muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { max-height: 360px; overflow: auto; }
+.problems { margin: 6px 0 0; padding-left: 18px; }
+.problems li { color: var(--crit-ink); }
+.ok-note { color: var(--good-ink); }
+.muted { color: var(--text-muted); }
+.row { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
+details summary { cursor: pointer; color: var(--text-secondary); }
+pre { white-space: pre-wrap; font-size: 12px; background: var(--surface-0); padding: 8px; border-radius: 6px; margin: 4px 0; max-height: 260px; overflow: auto; }
+svg text { fill: var(--text-muted); font-size: 10px; }
+svg .bar { fill: var(--series-1); }
+svg .bar:hover { fill-opacity: .75; }
+svg .line { stroke: var(--series-1); stroke-width: 2; fill: none; }
+svg .dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+svg .gridl { stroke: var(--grid); }
+.chart-title { font-size: 12px; color: var(--text-secondary); margin: 4px 0 2px; }
+.meter { height: 12px; background: var(--grid); border-radius: 6px; overflow: hidden; }
+.meter > div { height: 100%; background: var(--series-1); border-radius: 6px; }
+/* search */
+.searchbar { display: flex; gap: 8px; margin-bottom: 14px; }
+.searchbar input { flex: 1; font-size: 16px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-1); color: var(--text-primary); }
+.groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+.group h2 { font-size: 14px; }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; background: var(--surface-1); }
+.card:hover, .card.sel { border-color: var(--series-1); }
+.card .code { font-weight: 600; font-size: 15px; }
+.card .cn { margin-left: 6px; }
+.card .en { color: var(--text-secondary); font-size: 12px; }
+.card .ex { color: var(--text-muted); font-size: 12px; }
+.chip { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--series-1-soft); color: var(--text-primary); font-size: 12px; margin: 1px 2px; }
+a, .link { color: var(--series-1); cursor: pointer; text-decoration: none; }
+a:hover, .link:hover { text-decoration: underline; }
+.cal { display: grid; grid-template-columns: 64px repeat(31, 1fr); gap: 2px; font-size: 10px; max-width: 760px; }
+.cal .m { color: var(--text-muted); }
+.cal .d { height: 13px; border-radius: 2px; background: var(--grid); }
+.cal .d.on { background: var(--series-1); cursor: pointer; }
+.cal .d.on:hover { outline: 2px solid var(--text-primary); }
+.toolbar { display: flex; gap: 12px; align-items: center; margin: 6px 0; flex-wrap: wrap; font-size: 13px; }
+.hidden { display: none; }
+.btn { border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); padding: 2px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.btn:hover { border-color: var(--series-1); }
+.btn.act { color: var(--series-1); border-color: var(--series-1); }
+.token { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1); color: var(--text-primary); width: 200px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>数据处理进度与品种查询</h1>
+  <nav><button id="tab-progress" class="on">处理进度</button> <button id="tab-search">品种查询</button> <button id="tab-admin">服务与任务</button></nav>
+  <span class="meta" id="meta">载入中…</span>
+</header>
+<main>
+  <section id="view-progress">
+    <div class="tiles" id="tiles"></div>
+    <div id="panels"></div>
+  </section>
+  <section id="view-search" class="hidden">
+    <div class="searchbar">
+      <input id="q" placeholder="代码、合约、RIC、中文或英文名，如 RB、rb2701、ESZ26、CL、螺纹钢、原油、标普、黄金" autocomplete="off">
+    </div>
+    <div id="results"></div>
+    <div id="detail"></div>
+    <div id="contract"></div>
+  </section>
+  <section id="view-admin" class="hidden">
+    <div id="admin"></div>
+    <div class="panel" id="logpanel"><h2>日志 <span id="logname" class="muted" style="font-weight:400"></span>
+      <select id="logbytes"><option value="65536">最后 64 KB</option><option value="262144">最后 256 KB</option><option value="1048576">最后 1 MB</option></select>
+      <button class="btn" id="logrefresh">刷新</button></h2><pre id="log" style="max-height:520px">点击“日志”查看</pre></div>
+  </section>
+</main>
+<script>
+"use strict";
+// Relative API base so the page works when mounted under a prefix.
+const BASE = (() => {
+  let p = location.pathname.replace(/index\.html$/, "");
+  return p.endsWith("/") ? p : p + "/";
+})();
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtN = (v) => v == null || v === "" ? "–" : Number(v).toLocaleString("zh-CN");
+const fmtB = (b) => b == null ? "–" : (b >= 2**30 ? (b / 2**30).toFixed(1) + " GB" : (b / 2**20).toFixed(1) + " MB");
+const STATUS = { ok: "正常", lag: "滞后/有问题", fail: "失败", unknown: "未知", absent: "未部署" };
+const badge = (s, label) => `<span class="badge b-${esc(s || "unknown")}">${esc(label || STATUS[s] || s || "未知")}</span>`;
+const okBadge = (ok) => ok ? badge("ok", "成功") : badge("fail", "失败");
+function localTime(iso) {
+  if (!iso) return "–";
+  const d = new Date(iso);
+  if (isNaN(d)) return esc(iso);
+  return d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) + "（北京）";
+}
+function ago(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (isNaN(s)) return "";
+  if (s < 90) return Math.round(s) + " 秒前";
+  if (s < 5400) return Math.round(s / 60) + " 分钟前";
+  if (s < 172800) return (s / 3600).toFixed(1) + " 小时前";
+  return Math.round(s / 86400) + " 天前";
+}
+async function getJSON(path) {
+  const r = await fetch(BASE + path);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+const kv = (pairs) => `<div class="kv">${pairs.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="val">${v}</div></div>`).join("")}</div>`;
+const problemsList = (ps) => ps && ps.length
+  ? `<h3>待处理问题（${ps.length}）</h3><ul class="problems">${ps.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+  : `<h3>待处理问题</h3><div class="ok-note">无</div>`;
+
+// ---- charts: single-series bars / line, inline SVG with hover titles
+function barChart(rows, { h = 120, fmt = fmtN, unit = "" } = {}) {
+  if (!rows.length) return `<div class="muted">无数据</div>`;
+  const w = Math.max(240, rows.length * 26), pad = 22, top = 8;
+  const max = Math.max(...rows.map((r) => r.v || 0)) || 1;
+  const bw = (w - pad) / rows.length;
+  let s = `<svg viewBox="0 0 ${w} ${h + 18}" width="100%" style="max-width:${w}px" role="img">`;
+  s += `<line class="gridl" x1="${pad}" x2="${w}" y1="${h}" y2="${h}"/>`;
+  s += `<text x="0" y="${top + 8}">${esc(fmt(max))}</text>`;
+  rows.forEach((r, i) => {
+    const bh = Math.max(1, ((r.v || 0) / max) * (h - top));
+    const x = pad + i * bw + 2, y = h - bh, bwid = Math.max(3, bw - 4), rr = Math.min(4, bwid / 2, bh);
+    s += `<path class="bar" d="M${x},${h} V${y + rr} Q${x},${y} ${x + rr},${y} H${x + bwid - rr} Q${x + bwid},${y} ${x + bwid},${y + rr} V${h} Z"><title>${esc(r.label)}：${esc(fmt(r.v))}${unit}</title></path>`;
+    if (rows.length <= 16 || i % Math.ceil(rows.length / 10) === 0 || i === rows.length - 1)
+      s += `<text x="${x + bwid / 2}" y="${h + 12}" text-anchor="middle">${esc(r.short ?? r.label)}</text>`;
+  });
+  return s + "</svg>";
+}
+function lineChart(rows, { h = 100, fmt = (v) => v, unit = "" } = {}) {
+  const pts = rows.filter((r) => r.v != null);
+  if (pts.length < 2) return `<div class="muted">无数据</div>`;
+  const w = Math.max(240, rows.length * 26), pad = 26, top = 10;
+  const max = Math.max(...pts.map((r) => r.v)), min = Math.min(...pts.map((r) => r.v));
+  const span = max - min || 1, step = (w - pad - 10) / (rows.length - 1);
+  const xy = (i, v) => [pad + i * step, h - ((v - min) / span) * (h - top * 2) - top];
+  let d = "", dots = "";
+  rows.forEach((r, i) => {
+    if (r.v == null) return;
+    const [x, y] = xy(i, r.v);
+    d += (d ? " L" : "M") + x.toFixed(1) + "," + y.toFixed(1);
+    dots += `<g><circle cx="${x}" cy="${y}" r="9" fill="transparent"><title>${esc(r.label)}：${esc(fmt(r.v))}${unit}</title></circle><circle class="dot" cx="${x}" cy="${y}" r="4" pointer-events="none"/></g>`;
+  });
+  let s = `<svg viewBox="0 0 ${w} ${h + 16}" width="100%" style="max-width:${w}px" role="img">`;
+  s += `<line class="gridl" x1="${pad}" x2="${w}" y1="${h}" y2="${h}"/>`;
+  s += `<text x="0" y="${top + 4}">${esc(fmt(max))}</text><text x="0" y="${h - 2}">${esc(fmt(min))}</text>`;
+  s += `<path class="line" d="${d}"/>${dots}`;
+  rows.forEach((r, i) => {
+    if (rows.length <= 16 || i % Math.ceil(rows.length / 10) === 0 || i === rows.length - 1)
+      s += `<text x="${xy(i, min)[0]}" y="${h + 12}" text-anchor="middle">${esc(r.short ?? r.label)}</text>`;
+  });
+  return s + "</svg>";
+}
+const shortDay = (d) => (d || "").slice(5);
+
+// ---------------------------------------------------------------- progress
+let progressData = null;
+async function loadProgress() {
+  try {
+    progressData = await getJSON("api/dashboard/progress");
+    renderProgress();
+    $("meta").textContent = "页面更新 " + new Date().toLocaleTimeString("zh-CN", { hour12: false }) + " · 每 30 秒自动刷新 · 只读";
+  } catch (e) {
+    $("meta").textContent = "载入失败：" + e.message;
+  }
+}
+function sec(name) { return (progressData && progressData.sections[name]) || null; }
+function secHeader(s) {
+  if (!s) return `<span class="muted">尚未载入</span>`;
+  return `<span class="muted" style="font-weight:400;font-size:12px">数据刷新于 ${esc(ago(s.updated_at))}（${s.took_ms} ms）</span>` +
+    (s.ok ? "" : ` <span class="badge b-fail">读取失败：${esc(s.error)}</span>`);
+}
+function renderProgress() {
+  const cn = sec("cn"), ls = sec("lseg"), ib = sec("ib"), mc = sec("mdl_cache"), rf = sec("reference");
+  const d = (s) => (s && s.data) || {};
+  const svc = adminStatus ? adminStatus.services.filter((v) => v.enabled) : [];
+  const badSvc = svc.filter((v) => v.status !== "running").map((v) => v.name);
+  const badJob = adminStatus ? adminStatus.jobs.filter((j) => j.last && j.last.ok === false).map((j) => j.name) : [];
+  const tiles = [
+    ["p-cn", "国内期货 cn-daily", d(cn).status, d(cn).last_done || "–", d(cn).lag_days && d(cn).lag_days.length ? `落后 ${d(cn).lag_days.length} 个交易日` : "已到应完成日 " + (d(cn).expected_day || "–")],
+    ["p-lseg", "LSEG TAS 交付", d(ls).status, (d(ls).catalog || {}).latest_day || "–", d(ls).lag_days != null ? `最新 UTC 日距今 ${d(ls).lag_days} 天` : ""],
+    ["p-ib", "IB 分钟导出", d(ib).status, ((d(ib).catalog || {}).latest_day) || "–", d(ib).state ? `cutoff 更新于 ${ago(d(ib).state.updated_at_utc)}` : ""],
+    ["p-svc", "参考数据同步", d(rf).status, d(rf).as_of || "–", rf && rf.ok ? `合约 ${fmtN(d(rf).instrument_count)}` : "接口不可用"],
+    ["admin", "服务与任务", !adminStatus ? (adminError ? "absent" : "unknown") : (badSvc.length || badJob.length ? "fail" : "ok"),
+      adminStatus ? `${svc.length - badSvc.length}/${svc.length} 服务运行` : "–",
+      !adminStatus ? (adminError || "") : (badSvc.length || badJob.length ? "异常：" + badSvc.concat(badJob).join("、") : `任务 ${adminStatus.jobs.length} 个，队列 ${adminStatus.queue.length}`)],
+    ["p-svc", "mdl-replay 缓存", d(mc).status, fmtB(d(mc).total_bytes), `上限 ${fmtB(d(mc).limit_bytes)}，${(d(mc).days || []).length} 个自然日`],
+  ];
+  $("tiles").innerHTML = tiles.map(([id, t, s, v, sub]) =>
+    `<div class="tile" data-go="${id}"><div class="t">${esc(t)} ${badge(s)}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
+  document.querySelectorAll(".tile").forEach((el) => el.onclick = () => el.dataset.go === "admin" ? show("admin") : $(el.dataset.go)?.scrollIntoView({ behavior: "smooth" }));
+  $("panels").innerHTML = panelCn(cn) + panelLseg(ls) + panelIb(ib) + panelServices(rf, mc) + panelNames(sec("names"));
+}
+
+function panelCn(s) {
+  const d = (s && s.data) || {};
+  const hist = d.history || [];
+  const last = hist[0];
+  const audits = d.audits || [];
+  const dom = d.dominant || {};
+  let h = `<div class="panel" id="p-cn"><h2>国内期货 cn-daily ${badge(d.status)} ${secHeader(s)}</h2>`;
+  h += kv([
+    ["最新完成交易日（last_done）", esc(d.last_done || "–")],
+    ["当前应完成交易日", esc(d.expected_day || "–") + ` <span class="muted">（按 msg 目录与 ${esc("16:00")} 就绪时刻推算）</span>`],
+    ["落后", d.lag_days && d.lag_days.length ? `<b>${d.lag_days.length} 个交易日</b>：${esc(d.lag_days.join("、"))}` : `<span class="ok-note">无</span>`],
+    ["最近一次运行", last ? `${okBadge(last.ok)} ${esc(last.day)} · ${localTime(last.finished_utc)}` : "–"],
+    ["时段快照 session_as_of", esc(d.session_as_of || "–")],
+    ["主力结果最新交易日", dom.available ? esc(dom.latest_trading_day) + `（${fmtN(dom.count)} 个品种）` : `<span class="muted">接口不可用</span>`],
+    ["今日换月", dom.available ? (dom.rolled_today.length ? dom.rolled_today.map((x) => `<span class="chip">${esc(x)}</span>`).join("") : "无") : "–"],
+    ["下一交易日换月", dom.available ? (dom.rolling_next.length ? dom.rolling_next.map((x) => `<span class="chip">${esc(x)}</span>`).join("") : "无") : "–"],
+  ]);
+  h += problemsList(d.problems);
+  h += `<div class="row"><div><div class="chart-title">近 ${audits.length} 个交易日 1 分钟表行数</div>` +
+    barChart(audits.map((a) => ({ label: a.day, short: shortDay(a.day), v: a.rows })), { unit: " 行" }) + `</div>` +
+    `<div><div class="chart-title">VWAP 落在快照高低价外的分钟占比（%）</div>` +
+    lineChart(audits.map((a) => ({ label: a.day, short: shortDay(a.day), v: a.vwap_outside_pct })), { fmt: (v) => Number(v).toFixed(2), unit: "%" }) + `</div></div>`;
+  h += `<h3>生产 baseline_data_1min 各交易所最新日</h3><table><tr><th>交易所</th><th></th><th class="n">品种目录</th><th>最新日</th><th>未到最新日的品种</th><th>已停更品种（>30 天）</th></tr>`;
+  for (const b of d.baseline || []) {
+    h += `<tr><td>${esc(b.exchange)}</td><td>${esc(b.exchange_cn)}</td><td class="n">${b.products}</td><td>${esc(b.latest || "–")}</td>` +
+      `<td>${b.behind.length ? b.behind.map((x) => `<span class="chip">${esc(x.product)} ${esc(x.last)}</span>`).join("") : '<span class="ok-note">无</span>'}</td>` +
+      `<td class="muted">${b.stopped.map((x) => esc(x.product) + " " + esc(x.last)).join("、") || "–"}</td></tr>`;
+  }
+  h += `</table><div class="muted" style="font-size:12px">${esc(d.baseline_root || "")}</div>`;
+  const la = audits[audits.length - 1];
+  if (la) {
+    h += `<h3>最新审计 ${esc(la.day)}</h3>` + kv([
+      ["品种文件", fmtN(la.files)], ["行数", fmtN(la.rows)], ["有成交分钟", fmtN(la.traded_minutes)], ["合约", fmtN(la.contracts)],
+      ["VWAP 越界", la.vwap_outside_pct == null ? "–" : la.vwap_outside_pct + "%"],
+      ["各所品种", Object.entries(la.per_exchange || {}).map(([k, v]) => `${esc(k)} ${v}`).join("，")],
+      ["新增品种", (la.new_vs_prev || []).join("、") || "无"], ["缺少品种", (la.missing_vs_prev || []).join("、") || "无"],
+    ]);
+  }
+  h += `<h3>运行历史（最近 ${hist.length} 次）</h3><div class="scroll"><table><tr><th>交易日</th><th>完成时间</th><th>结果</th><th>摘要</th></tr>`;
+  for (const r of hist) {
+    h += `<tr><td>${esc(r.day)}</td><td>${localTime(r.finished_utc)}</td><td>${okBadge(r.ok)}</td><td><details><summary>${esc(r.headline)}</summary><pre>${esc(r.detail)}</pre></details></td></tr>`;
+  }
+  return h + `</table></div></div>`;
+}
+
+function panelLseg(s) {
+  const d = (s && s.data) || {};
+  const c = d.catalog || {};
+  const ld = d.lseg_daily || {};
+  let h = `<div class="panel" id="p-lseg"><h2>LSEG TAS 交付 ${badge(d.status)} ${secHeader(s)}</h2>`;
+  h += kv([
+    ["数据最新 UTC 日", esc(c.latest_day || "–")], ["距今", d.lag_days == null ? "–" : d.lag_days + " 天"],
+    ["品种 / 合约", `${fmtN(c.products)} / ${fmtN(c.contracts)}`], ["活跃合约", fmtN(c.active_contracts)],
+    ["catalog 修改时间", localTime(c.mtime)], ["catalog", `<span class="muted">${esc(d.catalog_path)}</span>`],
+  ]);
+  h += problemsList(d.problems);
+  h += `<h3>lseg-daily 每日任务</h3>`;
+  if (!ld.present) {
+    h += `<div>${badge("absent")} 状态文件不存在：<span class="muted">${esc(ld.path || "")}</span>。任务上线后此处显示每日交付进度。</div>`;
+  } else if (ld.error) {
+    h += `<div>${badge("fail", "状态文件无法解析")} ${esc(ld.error)}</div>`;
+  } else {
+    h += kv([
+      ["已交付最新日", esc(ld.latest_day || "–")], ["品种", fmtN(ld.products)], ["已交付品种·日", fmtN(ld.delivered_days)],
+      ["源缺口", fmtN(ld.gaps)], ["未完成批次", fmtN((ld.open_batches || []).length)], ["catalog 待刷新", ld.catalog_dirty ? "是" : "否"],
+    ]);
+    if ((ld.open_batches || []).length) {
+      h += `<table><tr><th>批次</th><th>创建</th><th>各阶段品种数</th><th>错误</th></tr>` + ld.open_batches.map((b) =>
+        `<tr><td>${esc(b.id)}</td><td>${localTime(b.created_utc)}</td><td>${Object.entries(b.stages).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join("")}</td><td>${b.errors.map((e) => esc(e.product + "：" + e.error)).join("<br>")}</td></tr>`).join("") + `</table>`;
+    }
+    if ((ld.history || []).length) {
+      h += `<div class="scroll"><table><tr><th>运行</th><th>完成</th><th>结果</th><th>摘要</th></tr>` + ld.history.map((r) =>
+        `<tr><td>${esc(r.run)}</td><td>${localTime(r.finished_utc)}</td><td>${okBadge(r.ok)}</td><td><details><summary>${esc(r.headline)}</summary><pre>${esc(r.detail)}</pre></details></td></tr>`).join("") + `</table></div>`;
+    }
+    if ((ld.gap_samples || []).length) {
+      h += `<details><summary>源缺口样例（${ld.gap_samples.length}）</summary><table>${ld.gap_samples.map((g) => `<tr><td>${esc(g.key)}</td><td>${esc(g.reason)}</td></tr>`).join("")}</table></details>`;
+    }
+  }
+  h += `<div class="row"><div><h3>各交易所目录</h3><div class="scroll"><table><tr><th>目录</th><th class="n">品种</th><th class="n">活跃合约</th><th>最新日</th></tr>` +
+    (c.per_exchange || []).map((e) => `<tr><td>${esc(e.exchange)}</td><td class="n">${e.products}</td><td class="n">${e.active}</td><td>${esc(e.latest || "–")}</td></tr>`).join("") +
+    `</table></div></div><div><h3>品种按最新数据日分布</h3>` +
+    barChart((c.latest_histogram || []).map((x) => ({ label: x.day, short: shortDay(x.day), v: x.products })), { unit: " 个品种" }) + `</div></div>`;
+  h += `<h3>meta/problems 目录</h3><div class="scroll"><table><tr><th>名称</th><th class="n">大小 / 条目</th><th>修改时间</th></tr>` +
+    (d.problems_dir || []).map((p) => `<tr><td>${esc(p.name)}${p.dir ? "/" : ""}</td><td class="n">${p.dir ? fmtN(p.entries) + " 项" : fmtB(p.bytes)}</td><td>${localTime(p.mtime)}</td></tr>`).join("") + `</table></div>`;
+  return h + `</div>`;
+}
+
+function panelIb(s) {
+  const d = (s && s.data) || {};
+  const st = d.state || {};
+  const c = d.catalog || {};
+  const runs = d.runs || [];
+  let h = `<div class="panel" id="p-ib"><h2>IB 分钟导出（ib-kline-daily）${badge(d.status)} ${secHeader(s)}</h2>`;
+  h += kv([
+    ["kline_ib 最新日", esc(c.latest_day || "–")], ["cutoff_id", fmtN(st.cutoff_id)],
+    ["cutoff 更新", localTime(st.updated_at_utc) + ` <span class="muted">${esc(ago(st.updated_at_utc))}</span>`],
+    ["IB 合约 / IB-only", `${fmtN(c.contracts)} / ${fmtN(c.ib_only)}`], ["IB 品种", fmtN(c.symbols)],
+    ["新映射合约", fmtN(st.new_contracts)], ["ib_contracts.json 修改", localTime(d.contracts_json_mtime)],
+    ["problems.csv", Object.entries(d.problem_kinds || {}).map(([k, v]) => `${esc(k)} ${v}`).join("，") || "无"],
+  ]);
+  h += problemsList(d.problems);
+  h += `<h3>最近运行（${runs.length}）</h3><div class="scroll"><table><tr><th>开始</th><th>结果</th><th class="n">合约</th><th class="n">新建</th><th class="n">替换</th><th class="n">相同</th><th class="n">行</th><th class="n">未映射</th><th class="n">失败</th><th class="n">耗时 s</th><th>catalog 同步</th></tr>`;
+  for (const r of runs) {
+    const m = r.summary || {};
+    h += `<tr><td>${localTime(r.started_utc)}</td><td>${okBadge(r.ok)}</td><td class="n">${fmtN(m.mapped_rics)}</td><td class="n">${fmtN(m.created)}</td><td class="n">${fmtN(m.replaced)}</td><td class="n">${fmtN(m.identical)}</td><td class="n">${fmtN(m.rows)}</td><td class="n">${fmtN(m.unmapped_contracts)}</td><td class="n">${fmtN(m.failures)}</td><td class="n">${m.seconds == null ? "–" : Number(m.seconds).toFixed(1)}</td><td>${m.catalog_synced ? "是" : "否"}</td></tr>`;
+    if (r.tail) h += `<tr><td colspan="11"><pre>${esc(r.tail)}</pre></td></tr>`;
+  }
+  return h + `</table></div></div>`;
+}
+
+function panelServices(rf, mc) {
+  const r = (rf && rf.data) || {};
+  const m = (mc && mc.data) || {};
+  let h = `<div class="panel" id="p-svc"><h2>参考数据与回放缓存</h2>`;
+  h += `<div class="row"><div><h3>参考数据每日同步（cn-futures-reference）${badge(r.status)} ${secHeader(rf)}</h3>` + kv([
+    ["数据 as_of", esc(r.as_of || "–")], ["今天（北京）", esc(r.today_shanghai || "–")],
+    ["最近更新", esc(r.latest_update_ts || "–")], ["合约 / 版本", `${fmtN(r.instrument_count)} / ${fmtN(r.version_count)}`],
+  ]) + `<div class="muted" style="font-size:12px">同步失败（代理不可用等）时 as_of 停在旧日期，详见“服务与任务”里 cn-reference-daily-sync 的日志。</div></div>`;
+  const pct = m.limit_bytes ? Math.min(100, (m.total_bytes / m.limit_bytes) * 100) : 0;
+  h += `<div><h3>mdl-replay 分片缓存 ${badge(m.status)} ${secHeader(mc)}</h3>` +
+    `<div class="meter" title="${esc(fmtB(m.total_bytes))} / ${esc(fmtB(m.limit_bytes))}"><div style="width:${pct.toFixed(1)}%"></div></div>` +
+    `<div style="font-size:12px;margin:4px 0">已用 ${esc(fmtB(m.total_bytes))} / 上限 ${esc(fmtB(m.limit_bytes))}（${pct.toFixed(0)}%）<span class="muted"> ${esc(m.cache_dir || "")}</span></div>` +
+    `<table><tr><th>自然日</th><th class="n">大小</th><th class="n">频道</th><th class="n">文件</th><th>最后写入</th></tr>` +
+    (m.days || []).map((x) => `<tr><td>${esc(x.day)}</td><td class="n">${fmtB(x.bytes)}</td><td class="n">${x.channels}</td><td class="n">${x.files}</td><td>${localTime(x.mtime)}</td></tr>`).join("") + `</table></div></div>`;
+  return h + `</div>`;
+}
+
+function panelNames(s) {
+  const d = (s && s.data) || {};
+  const c = d.coverage || {};
+  const lab = { cn: "国内期货", lseg: "海外期货 LSEG", ib: "IB" };
+  let h = `<div class="panel" id="p-names"><h2>品种中文名覆盖 ${secHeader(s)}</h2><table><tr><th>市场</th><th class="n">品种</th><th class="n">有中文名</th><th>缺中文名（显示英文名）</th></tr>`;
+  for (const k of ["cn", "lseg", "ib"]) {
+    const v = c[k];
+    if (!v) continue;
+    h += `<tr><td>${lab[k]}</td><td class="n">${v.products}</td><td class="n">${v.with_chinese}</td><td>${v.missing.length ? `<details><summary>${v.missing.length} 个</summary>${v.missing.map((m) => `<span class="chip" title="${esc(m.name_en || "")}">${esc(m.code)}</span>`).join("")}</details>` : "无"}</td></tr>`;
+  }
+  h += `</table>`;
+  if ((d.warnings || []).length) h += problemsList(d.warnings);
+  return h + `</div>`;
+}
+
+// ---------------------------------------------------------------- search
+let searchTimer = null, lastQ = "";
+$("q").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch($("q").value), 200); });
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(searchTimer); doSearch($("q").value); } });
+
+async function doSearch(q) {
+  q = q.trim();
+  lastQ = q;
+  setHash(q ? "q=" + encodeURIComponent(q) : "");
+  if (!q) { $("results").innerHTML = ""; return; }
+  try {
+    const r = await getJSON("api/dashboard/search?q=" + encodeURIComponent(q));
+    if (q !== lastQ) return;
+    if (!r.groups.length) { $("results").innerHTML = `<div class="panel muted">没有找到“${esc(q)}”。可以试试代码（RB、CL）、合约（rb2701、ESZ26）或中文名。</div>`; return; }
+    $("results").innerHTML = `<div class="groups">` + ["cn", "lseg", "ib"].map((m) => {
+      const g = r.groups.find((x) => x.market === m);
+      if (!g) return "";
+      return `<div class="group panel"><h2>${esc(g.label)} <span class="muted" style="font-weight:400">${g.hits.length} 个</span></h2>` + g.hits.map(card).join("") + `</div>`;
+    }).join("") + `</div>`;
+    document.querySelectorAll(".card").forEach((el) => el.onclick = () => openProduct(el.dataset.m, el.dataset.c, el.dataset.k));
+    if (r.total === 1 || (r.groups.length === 1 && r.groups[0].hits.length === 1)) {
+      const h = r.groups[0].hits[0];
+      openProduct(h.product.market, h.product.code, h.contract || "");
+    }
+  } catch (e) {
+    $("results").innerHTML = `<div class="panel problems">${esc(e.message)}</div>`;
+  }
+}
+function card(h) {
+  const p = h.product, s = p.summary || {};
+  let avail = "";
+  if (p.market === "cn") {
+    avail = s.baseline ? `1 分钟表 ${esc(s.baseline.first)} 至 ${esc(s.baseline.last)}（${fmtN(s.baseline.days)} 天）` : `<span class="muted">无 1 分钟表</span>`;
+    if (s.dominant) avail += ` · 主力 <b>${esc(s.dominant.dominant)}</b>${s.dominant.rolls_next_day ? ` → ${esc(s.dominant.scheduled_next)}` : ""}`;
+  } else if (p.market === "lseg") {
+    avail = `合约 ${fmtN(s.contracts)}，活跃 ${fmtN(s.active_contracts)}，最新 ${esc(s.latest_day || "–")}`;
+  } else {
+    avail = `合约 ${fmtN(s.contracts)}（IB-only ${fmtN(s.ib_only)}），${esc(s.first_day || "–")} 至 ${esc(s.last_day || "–")}`;
+  }
+  return `<div class="card" data-m="${esc(p.market)}" data-c="${esc(p.code)}" data-k="${esc(h.contract || "")}">` +
+    `<div><span class="code">${esc(p.code)}</span><span class="cn">${esc(p.name_cn || "")}</span>` +
+    (h.contract ? ` <span class="chip">合约 ${esc(h.contract)}</span>` : "") + ` <span class="muted" style="font-size:11px">匹配：${esc(h.matched)}</span></div>` +
+    (p.name_en ? `<div class="en">${esc(p.name_en)}</div>` : "") +
+    `<div class="ex">${esc(p.exchanges.join(" / "))} ${esc(p.exchange_cn)}${p.multiplier ? " · 乘数 " + esc(p.multiplier) : ""}${p.tick ? " · 最小变动 " + esc(p.tick) : ""}</div>` +
+    `<div style="font-size:12px">${avail}</div></div>`;
+}
+
+let productData = null;
+async function openProduct(m, code, contract) {
+  document.querySelectorAll(".card").forEach((el) => el.classList.toggle("sel", el.dataset.m === m && el.dataset.c === code));
+  $("detail").innerHTML = `<div class="panel muted">载入 ${esc(code)}…</div>`;
+  $("contract").innerHTML = "";
+  try {
+    productData = await getJSON(`api/dashboard/product/${m}/${encodeURIComponent(code)}`);
+    renderProduct(m);
+    $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (contract) openContract(m, contract);
+  } catch (e) {
+    $("detail").innerHTML = `<div class="panel problems">${esc(e.message)}</div>`;
+  }
+}
+function productInfo(p) {
+  return kv([
+    ["交易所", esc(p.exchanges.join(" / ")) + " " + esc(p.exchange_cn)],
+    ["中文名", p.name_cn ? esc(p.name_cn) + (p.category ? `（${esc(p.category)}）` : "") : `<span class="muted">无（暂无可靠来源）</span>`],
+    ["英文名", esc(p.name_en || "–")], ["乘数", esc(p.multiplier || "–")], ["最小变动价位", esc(p.tick || "–")],
+    ["名称来源", `<span class="muted">${esc([p.name_cn_source, p.name_en_source].filter(Boolean).join("；") || "–")}</span>`],
+  ]);
+}
+function renderProduct(m) {
+  const d = productData, p = d.product, s = p.summary || {};
+  let h = `<div class="panel"><h2>${esc(p.code)} ${esc(p.name_cn || p.name_en || "")} <span class="muted" style="font-weight:400">${m === "cn" ? "国内期货" : m === "lseg" ? "海外期货 LSEG" : "IB"}</span></h2>` + productInfo(p);
+  if (m === "cn") {
+    h += kv([
+      ["1 分钟表（生产）", s.baseline ? `${esc(s.baseline.first)} 至 ${esc(s.baseline.last)}，${fmtN(s.baseline.days)} 个交易日` : "无"],
+      ["当前主力", s.dominant ? `<b>${esc(s.dominant.dominant)}</b>（${esc(s.dominant.trading_day)}）` : "–"],
+      ["下一交易日主力", s.dominant ? esc(s.dominant.scheduled_next) + (s.dominant.rolls_next_day ? " <b>（换月）</b>" : "") : "–"],
+      ["上次换月", s.dominant ? esc(s.dominant.last_roll_day || "–") : "–"],
+      ["CTP 合约乘数", esc(s.ctp_multiplier || "–")],
+    ]);
+    const dh = d.dominant_history || {};
+    h += `<div class="row"><div><h3>合约（roll EOD，${(d.contracts || []).length} 个）</h3><div class="toolbar"><label><input type="checkbox" id="only-recent" checked> 只看最近 60 天仍有数据</label></div><div class="scroll" id="ctable"></div></div>`;
+    h += `<div><h3>主力换月记录（最近 ${(dh.rolls || []).length} 次）</h3>` + (dh.available ? `<div class="scroll"><table><tr><th>交易日</th><th>当日主力</th><th>次日主力</th></tr>` +
+      dh.rolls.map((r) => `<tr><td>${esc(r.trad_day)}</td><td>${esc(r.instrument_id)}</td><td>${esc(r.scheduled_next)}</td></tr>`).join("") + `</table></div>` : `<div class="muted">主力接口不可用：${esc(dh.error)}</div>`) + `</div></div>`;
+  } else if (m === "lseg") {
+    const years = [...new Set(d.contracts.map((c) => c.source_year))].sort((a, b) => b - a);
+    h += `<h3>合约（${d.contracts.length} 个，catalog contracts）</h3><div class="toolbar"><label><input type="checkbox" id="only-active" ${s.active_contracts ? "checked" : ""}> 只看活跃合约</label>` +
+      ` 源年份 <select id="year-sel"><option value="">全部</option>${years.map((y) => `<option>${y}</option>`).join("")}</select></div><div class="scroll" id="ctable"></div>`;
+  } else {
+    h += kv([["对应 LSEG 品种", (s.lseg_products || []).map((x) => `<span class="link" data-lp="${esc(x)}">${esc(x)}</span>`).join("、") || "无（IB-only）"],
+      ["数据范围", `${esc(s.first_day || "–")} 至 ${esc(s.last_day || "–")}`]]);
+    h += `<h3>合约（${d.contracts.length} 个，catalog ib_contracts）</h3><div class="toolbar"><label><input type="checkbox" id="only-recent" checked> 只看最近 60 天仍有数据</label></div><div class="scroll" id="ctable"></div>`;
+  }
+  $("detail").innerHTML = h + `</div>`;
+  document.querySelectorAll("[data-lp]").forEach((el) => el.onclick = () => openProduct("lseg", el.dataset.lp, ""));
+  const rer = () => renderContractTable(m);
+  ["only-recent", "only-active", "year-sel"].forEach((id) => { if ($(id)) $(id).onchange = rer; });
+  rer();
+}
+function renderContractTable(m) {
+  const d = productData;
+  let rows = d.contracts || [], h = "";
+  const recent = $("only-recent") && $("only-recent").checked;
+  const cutoff = new Date(Date.now() - 60 * 86400e3).toISOString().slice(0, 10);
+  if (m === "cn") {
+    const dom = (d.product.summary.dominant || {}).dominant;
+    if (recent) rows = rows.filter((c) => c.last >= cutoff);
+    h = `<table><tr><th>合约</th><th>首日</th><th>末日</th><th class="n">天数</th><th class="n">末日持仓</th><th class="n">末日成交</th></tr>` + rows.map((c) =>
+      `<tr><td><span class="link" data-k="${esc(c.instrument_id)}">${esc(c.instrument_id)}</span>${c.instrument_id === dom ? ' <span class="chip">主力</span>' : ""}${c.expired ? ' <span class="muted">已到期</span>' : ""}</td><td>${esc(c.first)}</td><td>${esc(c.last)}</td><td class="n">${c.days}</td><td class="n">${fmtN(c.last_open_int)}</td><td class="n">${fmtN(c.last_volume)}</td></tr>`).join("") + `</table>`;
+  } else if (m === "lseg") {
+    if ($("only-active").checked) rows = rows.filter((c) => c.active);
+    const y = $("year-sel").value;
+    if (y) rows = rows.filter((c) => String(c.source_year) === y);
+    rows = rows.slice().sort((a, b) => (b.last_market_date || "").localeCompare(a.last_market_date || "") || a.ric.localeCompare(b.ric));
+    h = `<table><tr><th>RIC</th><th class="n">源年份</th><th>目录</th><th>首笔成交</th><th>末笔成交</th><th>最后行情日</th><th>状态</th><th>IB</th></tr>` + rows.slice(0, 600).map((c) =>
+      `<tr><td><span class="link" data-k="${esc(c.ric)}" data-y="${c.source_year}">${esc(c.ric)}</span>${c.active ? ' <span class="chip">活跃</span>' : ""}</td><td class="n">${c.source_year}</td><td>${esc(c.exchange)}</td><td>${esc(c.first_trade_utc || "–")}</td><td>${esc(c.last_trade_utc || "–")}</td><td>${esc(c.last_market_date || "–")}</td><td>${esc(c.state)}${c.expired ? "（已到期）" : ""}</td><td>${c.ib ? "有" : ""}</td></tr>`).join("") + `</table>` +
+      (rows.length > 600 ? `<div class="muted">仅显示前 600 个，请按年份筛选</div>` : "");
+  } else {
+    const fmt = (x) => x ? x.slice(0, 4) + "-" + x.slice(4, 6) + "-" + x.slice(6) : "–";
+    if (recent) rows = rows.filter((c) => fmt(c.last_day) >= cutoff);
+    rows = rows.slice().sort((a, b) => (b.last_day || "").localeCompare(a.last_day || "") || a.maturity_date.localeCompare(b.maturity_date));
+    h = `<table><tr><th>RIC</th><th>IB 代码</th><th>IB 交易所</th><th>到期</th><th>首日</th><th>末日</th><th>TAS</th><th>目录</th></tr>` + rows.map((c) =>
+      `<tr><td><span class="link" data-k="${esc(c.ric)}">${esc(c.ric)}</span></td><td>${esc(c.ib_local_symbol)}</td><td>${esc(c.ib_exchange)}</td><td>${esc(fmt(c.maturity_date))}</td><td>${esc(fmt(c.first_day))}</td><td>${esc(fmt(c.last_day))}</td><td>${c.tas_data ? "有" : '<span class="chip">IB-only</span>'}</td><td>${esc(c.exchange)}</td></tr>`).join("") + `</table>`;
+  }
+  $("ctable").innerHTML = rows.length ? h : `<div class="muted">没有符合条件的合约</div>`;
+  $("ctable").querySelectorAll("[data-k]").forEach((el) => el.onclick = () => openContract(m, el.dataset.k, el.dataset.y));
+}
+
+async function openContract(m, code, year, day) {
+  $("contract").innerHTML = `<div class="panel muted">载入合约 ${esc(code)}…</div>`;
+  let url = `api/dashboard/contract/${m}/${encodeURIComponent(code)}`;
+  const qs = [];
+  if (year) qs.push("year=" + encodeURIComponent(year));
+  if (day) qs.push("day=" + encodeURIComponent(day));
+  if (qs.length) url += "?" + qs.join("&");
+  try {
+    const d = await getJSON(url);
+    renderContract(m, d, year);
+    if (!day) $("contract").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    $("contract").innerHTML = `<div class="panel problems">${esc(e.message)}</div>`;
+  }
+}
+function calendar(days, onClass) {
+  const set = new Set(days);
+  const months = [...new Set(days.map((d) => d.slice(0, 7)))].sort().reverse();
+  let h = `<div class="cal"><div></div>${Array.from({ length: 31 }, (_, i) => `<div class="m" style="text-align:center">${i + 1}</div>`).join("")}`;
+  for (const mo of months) {
+    h += `<div class="m">${mo}</div>`;
+    for (let i = 1; i <= 31; i++) {
+      const d = `${mo}-${String(i).padStart(2, "0")}`;
+      h += set.has(d) ? `<div class="d on ${onClass ? onClass(d) : ""}" data-day="${d}" title="${d}"></div>` : `<div class="d" title="${d}：无"></div>`;
+    }
+  }
+  return h + `</div>`;
+}
+function renderContract(m, d, year) {
+  let h = `<div class="panel"><h2>合约 ${esc(d.contract)} ${m === "lseg" ? `<span class="muted" style="font-weight:400">源年份 ${esc(d.source_year)}</span>` : ""}</h2>`;
+  if (m === "cn") {
+    h += kv([["有数据的交易日", `${fmtN(d.days.length)} 天：${esc(d.days[0])} 至 ${esc(d.days[d.days.length - 1])}`],
+      ["品种 1 分钟表范围", d.baseline ? `${esc(d.baseline.first)} 至 ${esc(d.baseline.last)}` : "–"]]);
+    h += `<div class="muted" style="font-size:12px;margin:4px 0">${esc(d.note)}</div>` + calendar(d.days);
+    h += `<h3>最近 ${d.eod.length} 个交易日 EOD</h3><div class="scroll"><table><tr><th>交易日</th><th class="n">持仓</th><th class="n">成交</th><th class="n">收盘</th></tr>` +
+      d.eod.map((r) => `<tr><td>${esc(r.trad_day)}</td><td class="n">${fmtN(r.open_int)}</td><td class="n">${fmtN(r.volume)}</td><td class="n">${esc(r.close)}</td></tr>`).join("") + `</table></div>`;
+  } else {
+    const L = d.listing || {};
+    if (m === "lseg") {
+      const r = (d.rows || []).find((x) => x.source_year === d.source_year) || {};
+      h += kv([["交易所目录", esc(r.exchange)], ["首笔成交", esc(r.first_trade_utc || "–")], ["末笔成交", esc(r.last_trade_utc || "–")],
+        ["最后行情日", esc(r.last_market_date || "–")], ["状态", esc(r.last_session_state) + (r.expired_at_utc ? `（到期 ${esc(r.expired_at_utc)}）` : "")],
+        ["IB 对应", d.ib ? `${esc(d.ib.ib_local_symbol)}（${esc(d.ib.first_day)}–${esc(d.ib.last_day)}）` : "无"],
+        ["其他源年份", (d.rows || []).filter((x) => x.source_year !== d.source_year).map((x) => `<span class="link" data-y2="${x.source_year}">${x.source_year}</span>`).join("、") || "无"]]);
+    } else {
+      const k = d.ib;
+      h += kv([["IB 代码", esc(k.ib_local_symbol) + " / " + esc(k.ib_exchange)], ["con_id", esc(k.con_id)], ["到期", esc(k.maturity_date)],
+        ["数据范围", esc(k.first_day || "–") + " 至 " + esc(k.last_day || "–")], ["TAS 数据", k.tas_data ? "有（源年份 " + esc((d.tas_source_years || []).join("、")) + "）" : "无（IB-only，只有 kline_ib）"]]);
+    }
+    h += `<h3>日目录（${fmtN(L.count)} 个 UTC 自然日）</h3><div class="muted" style="font-size:12px">${(d.directories || []).map((x) => esc(x[1])).join("<br>")}</div>`;
+    if ((L.errors || []).length) h += problemsList(L.errors);
+    h += calendar(L.days || []);
+    h += `<h3>文件（最近 10 天及所选日期）</h3><table><tr><th>UTC 日</th><th>trade</th><th>quote</th><th>status</th><th>kline</th><th>kline_ib</th><th>其他</th></tr>`;
+    const known = ["trade.parquet", "quote.parquet", "status.parquet", "kline.parquet", "kline_ib.parquet"];
+    for (const [day, fs] of Object.entries(L.files || {}).sort((a, b) => b[0].localeCompare(a[0]))) {
+      h += `<tr><td>${esc(day)}</td>` + known.map((f) => `<td>${fs.includes(f) ? "✓" : '<span class="muted">–</span>'}</td>`).join("") +
+        `<td class="muted">${esc(fs.filter((f) => !known.includes(f)).map((f) => f.replace(".parquet", "")).join("、"))}</td></tr>`;
+    }
+    h += `</table><div class="muted" style="font-size:12px">点击日历中的日期查看该日文件。</div>`;
+  }
+  $("contract").innerHTML = h + `</div>`;
+  if (m !== "cn") {
+    $("contract").querySelectorAll(".d.on").forEach((el) => el.onclick = () => openContract(m, d.contract, m === "lseg" ? d.source_year : null, el.dataset.day));
+    $("contract").querySelectorAll("[data-y2]").forEach((el) => el.onclick = () => openContract(m, d.contract, el.dataset.y2));
+  }
+}
+
+// ---------------------------------------------------------------- admin (market-replay-server)
+let adminStatus = null, adminError = "", adminRuns = [], logTarget = null;
+const TOKEN_KEY = "market_replay_admin_token";
+async function loadAdmin(withRuns) {
+  try {
+    const r = await fetch(BASE + "api/admin/status");
+    if (r.status === 404) { adminStatus = null; adminError = "未接入 market-replay-server"; return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    adminStatus = await r.json();
+    adminError = "";
+    if (withRuns) adminRuns = await (await fetch(BASE + "api/admin/runs?limit=40")).json();
+  } catch (e) {
+    adminStatus = null; adminError = "管理接口不可用：" + e.message;
+  }
+}
+const svcBadge = (v) => !v.enabled ? badge("absent", "已停用") : v.status === "running" ? badge("ok", "运行中") : badge("fail", v.status);
+function dur(a, b) {
+  if (!a || !b) return "–";
+  const s = (new Date(b) - new Date(a)) / 1000;
+  return s < 120 ? s.toFixed(0) + " 秒" : s < 7200 ? (s / 60).toFixed(1) + " 分钟" : (s / 3600).toFixed(1) + " 小时";
+}
+function renderAdmin() {
+  if (!adminStatus) {
+    $("admin").innerHTML = `<div class="panel">${badge("absent", "不可用")} ${esc(adminError || "载入中…")}<div class="muted" style="margin-top:6px">服务与任务由 market-replay-server 的 /api/admin/* 提供；独立运行 data-dashboard 时没有这部分。</div></div>`;
+    return;
+  }
+  const s = adminStatus;
+  let h = `<div class="panel"><h2>常驻服务 <span class="muted" style="font-weight:400;font-size:12px">服务器时间 ${localTime(s.now)}</span>
+    <span style="margin-left:auto;font-weight:400;font-size:12px">管理令牌 <input class="token" id="token" type="password" placeholder="本机访问无需填写" value="${esc(sessionStorage.getItem(TOKEN_KEY) || "")}"></span></h2>
+    <table><tr><th>名称</th><th>说明</th><th>状态</th><th class="n">PID</th><th>启动时间</th><th class="n">重启次数</th><th>上次退出</th><th></th></tr>`;
+  for (const v of s.services) {
+    h += `<tr><td>${esc(v.name)}</td><td>${esc(v.description)}</td><td>${svcBadge(v)}</td><td class="n">${v.pid ?? "–"}</td><td>${localTime(v.started_at)}</td><td class="n">${v.restarts}</td>` +
+      `<td>${esc(v.last_exit || "–")}${v.last_exit_at ? " · " + localTime(v.last_exit_at) : ""}</td>` +
+      `<td style="white-space:nowrap"><button class="btn" data-log="service/${esc(v.name)}">日志</button> ${v.enabled ? `<button class="btn" data-restart="${esc(v.name)}">重启</button>` : ""}</td></tr>`;
+  }
+  h += `</table></div><div class="panel"><h2>定时任务 <span class="muted" style="font-weight:400;font-size:12px">单队列依次执行；队列：${s.queue.length ? esc(s.queue.join("、")) : "空"}</span></h2>
+    <table><tr><th>名称</th><th>说明</th><th>计划</th><th>下次运行</th><th>当前</th><th>上次结果</th><th></th></tr>`;
+  for (const j of s.jobs) {
+    const l = j.last;
+    const cur = j.running ? `${badge("lag", "运行中")} 自 ${localTime(j.running.started_at)}` : j.queued ? badge("unknown", "排队中") : "–";
+    const last = l ? `${l.ok ? badge("ok", "成功") : badge("fail", l.result || "失败")} ${localTime(l.finished_at)} <span class="muted">${esc(l.trigger)} · ${dur(l.started_at, l.finished_at)}</span>` : `<span class="muted">尚未运行</span>`;
+    h += `<tr><td>${esc(j.name)}${j.enabled ? "" : ' <span class="muted">（已停用）</span>'}</td><td>${esc(j.description)}</td><td>${esc(j.schedule)}</td><td>${localTime(j.next_run)}</td><td>${cur}</td><td>${last}</td>` +
+      `<td style="white-space:nowrap"><button class="btn" data-log="job/${esc(j.name)}">日志</button> <button class="btn" data-run="${esc(j.name)}" ${j.running || j.queued ? "disabled" : ""}>立即运行</button></td></tr>`;
+  }
+  h += `</table></div><div class="panel"><h2>运行记录（最近 ${adminRuns.length} 次）</h2><div class="scroll"><table><tr><th>任务</th><th>触发</th><th>计划时刻</th><th>开始</th><th>结束</th><th>耗时</th><th>结果</th><th></th></tr>`;
+  for (const r of adminRuns) {
+    const res = r.ok == null ? badge("lag", "运行中") : r.ok ? badge("ok", r.result || "成功") : badge("fail", r.result || "失败");
+    h += `<tr><td>${esc(r.job)}</td><td>${esc(r.trigger)}</td><td>${localTime(r.slot)}</td><td>${localTime(r.started_at)}</td><td>${localTime(r.finished_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td>${res}</td>` +
+      `<td><button class="btn" data-log="job/${esc(r.job)}">日志</button></td></tr>`;
+  }
+  $("admin").innerHTML = h + `</table></div></div>`;
+  $("token").oninput = () => sessionStorage.setItem(TOKEN_KEY, $("token").value);
+  document.querySelectorAll("[data-log]").forEach((el) => el.onclick = () => showLog(el.dataset.log));
+  document.querySelectorAll("[data-run]").forEach((el) => el.onclick = () => adminPost(`api/admin/jobs/${encodeURIComponent(el.dataset.run)}/run`, `立即运行任务 ${el.dataset.run}？`));
+  document.querySelectorAll("[data-restart]").forEach((el) => el.onclick = () => adminPost(`api/admin/services/${encodeURIComponent(el.dataset.restart)}/restart`,
+    `重启服务 ${el.dataset.restart}？` + (el.dataset.restart === "exchange-mcp" ? "\n注意：同机其他用户在用这个服务。" : "")));
+}
+async function adminPost(path, question) {
+  if (!confirm(question)) return;
+  const headers = {};
+  const t = sessionStorage.getItem(TOKEN_KEY) || ($("token") && $("token").value) || "";
+  if (t) headers["X-Admin-Token"] = t;
+  try {
+    const r = await fetch(BASE + path, { method: "POST", headers });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 403) alert("被拒绝：非本机访问需要填写管理令牌（MARKET_REPLAY_ADMIN_TOKEN）。");
+    else if (!r.ok) alert("失败：" + (j.error || r.status));
+    else alert(j.queued ? `已加入队列：${j.queued}` : j.restarting ? `正在重启：${j.restarting}` : (j.note === "already queued or running" ? "已在排队或运行中" : JSON.stringify(j)));
+  } catch (e) { alert("请求失败：" + e.message); }
+  await loadAdmin(true); renderAdmin();
+}
+async function showLog(target) {
+  if (target) logTarget = target;
+  if (!logTarget) return;
+  $("logname").textContent = logTarget;
+  try {
+    const r = await fetch(BASE + `api/admin/log/${logTarget}?bytes=${$("logbytes").value}`);
+    const p = $("log");
+    p.textContent = r.ok ? await r.text() : "读取失败：HTTP " + r.status;
+    p.scrollTop = p.scrollHeight;
+    if (target) $("logpanel").scrollIntoView({ behavior: "smooth" });
+  } catch (e) { $("log").textContent = "读取失败：" + e.message; }
+}
+$("logrefresh").onclick = () => showLog();
+$("logbytes").onchange = () => showLog();
+
+// ---------------------------------------------------------------- tabs / hash
+function setHash(h) { history.replaceState(null, "", h ? "#" + h : location.pathname + location.search); }
+let currentTab = "progress";
+function show(tab) {
+  currentTab = tab;
+  for (const t of ["progress", "search", "admin"]) {
+    $("tab-" + t).classList.toggle("on", tab === t);
+    $("view-" + t).classList.toggle("hidden", tab !== t);
+  }
+  if (tab === "search") { $("q").focus(); if (!$("q").value) setHash("search"); }
+  else if (tab === "admin") { setHash("admin"); loadAdmin(true).then(renderAdmin); }
+  else setHash("");
+}
+$("tab-progress").onclick = () => show("progress");
+$("tab-search").onclick = () => show("search");
+$("tab-admin").onclick = () => show("admin");
+(function init() {
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (h.startsWith("q=")) { show("search"); $("q").value = h.slice(2); doSearch(h.slice(2)); }
+  else if (h === "search") show("search");
+  else if (h === "admin") show("admin");
+  loadAdmin(false).then(loadProgress);
+  setInterval(() => { if (!document.hidden) loadAdmin(false).then(loadProgress); }, 30000);
+  setInterval(() => { if (!document.hidden && currentTab === "admin") loadAdmin(true).then(renderAdmin); }, 10000);
+})();
+</script>
+</body>
+</html>

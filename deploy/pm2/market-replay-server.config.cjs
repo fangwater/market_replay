@@ -7,7 +7,7 @@ module.exports = {
     name: "market-replay-server",
     namespace: "cn_futures_db",
     cwd: "/home/fanghaizhou/cn_futures_db",
-    script: "/home/fanghaizhou/cn_futures_db/target/release/market-replay-server",
+    script: "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/market-replay-server",
     args: "--config /home/fanghaizhou/cn_futures_db/config/market_replay_server.toml",
     interpreter: "none",
     autorestart: true,

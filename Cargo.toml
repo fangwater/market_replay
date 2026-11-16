@@ -23,6 +23,7 @@ members = [
     "crates/usstock/usstock_lseg_rawll2_replay",
     "crates/usstock/usstock_nasdaq_baseline",
     "crates/usstock/usstock_aggregate_baseline",
+    "crates/web/data_dashboard",
 ]
 
 [workspace.package]

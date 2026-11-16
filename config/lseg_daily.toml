@@ -20,7 +20,7 @@ hrd = [
 ]
 kline_base_plan = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_full_rocksdb_20261112/plan.json"
 kline_cache = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/lseg_full_rocksdb_20261112/extract"
-bin_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay/release"
+# Sub-tools come from the same release directory as lseg-daily itself.
 # Remote files modified less than this long ago wait for the next run.
 settle_minutes = 60
 # A newer date waits this long for an earlier missing day (then: source gap).

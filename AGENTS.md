@@ -49,9 +49,10 @@
 
 用户要求"集中到一个 server 来管理，不要 PM2 启动很多东西"。PM2 里属于本项目的只有 `market-replay-server` 和数据库 `pg-domestic-futures`。说明见 [docs/market_replay_server.md](docs/market_replay_server.md)。
 
-- **对外接口：** gRPC `cn_market.v1` 在 :18312；HTTP 在 :18313，提供主力合约 API、管理页 `/admin`、管理 API `/api/admin/*`，之后的数据看板也挂在这里。
+- **对外接口：** gRPC `cn_market.v1` 在 :18312；HTTP 在 :18313，提供主力合约 API、管理 API `/api/admin/*`，以及数据看板“数据处理进度与品种查询”（`crates/web/data_dashboard`，页面在 `/`，接口 `/api/dashboard/*`，配置 `config/data_dashboard.toml`；`/admin` 跳到看板的“服务与任务”页）。看板严格只读：catalog.sqlite 以 read_only+immutable 打开，PostgreSQL 只走 `default_transaction_read_only` 的 psql，NFS 只做少量 readdir，后台一个任务按固定间隔刷新。
 - **常驻服务：** 参考数据 API（:8765）、参考数据每日同步、CME 参考数据（:8770）、MCP（:8780），以及默认关闭的 `mdl-replay`，都是这个进程的子进程，退出后自动按退避重启。
 - **每日任务：** `cn-daily`（上海 16:30）和 `ib-kline-daily`（上海 09:30）由它按时排程，走同一个队列依次执行，各自发钉钉。以后新的任务（例如 lseg-daily）只在 `config/market_replay_server.toml` 里加 `[[job]]`，**不得再单独注册 PM2 进程**。
+- **生产二进制：** 只从 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin` 运行，由 `scripts/deploy-release.sh <commit>` 从干净的 checkout 构建。不得让生产配置指向 `target/release`，因为 worktree 和开发构建共用这个目录。
 - 切换前的 PM2 进程列表保存在 `/mnt/nvme-raid0-28t/fanghaizhou/pm2_jlist_before_unify_20261116.json`（权限 600，内含环境变量）。各项目自己的 `ecosystem*.cjs` 和 `pm2-start.sh` 已删除，以免重复启动。
 
 ## 已定范围（2026-11-14，用户确认）
@@ -94,6 +95,7 @@
 | `crates/cme/lseg_delivery` | 原 `ly_cme_data` 子项目（2026-11-16 解散并入，见下文"LSEG / CME TAS 交付"）：LSEG/CME TAS tick parquet 导出、只用 LSEG 数据的 K 线与交易状态、改撤回补、SQLite 目录。配套 `scripts/lseg`、`config/lseg`、`docs/lseg` |
 | `reference_cme/` | CME 参考数据服务，原 `cme_exchange_info_summary`（Python，`market-replay-server` 托管的服务 `cme-reference`，0.0.0.0:8770），是 8780 MCP 的 CME 上游 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
+| `crates/web/data_dashboard` | 只读数据看板（库 + 薄的独立二进制 `data-dashboard`），由 `market-replay-server` 挂载：各数据集处理进度、品种中文名查询与合约下钻 |
 | `reference/` | 参考数据服务（Python） |
 
 - `crates/core/*` **只能依赖轻量的计算 crate**（目前有 anyhow、chrono、chrono-tz、csv、serde），可以用标准库读文件，但不得引入 RocksDB、parquet、arrow、polars、iceoryx、网络依赖，也不得依赖本仓库的非 core crate。mkt_signal 用 `git` + `rev` 固定版本依赖 core，core 里的任何改动都会进入实盘编译。

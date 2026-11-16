@@ -3,7 +3,7 @@
 # kline_ib.parquet on the delivery disk, then refresh the catalog IB tables.
 # Independent of cn-daily / lseg-daily; sends its own DingTalk message.
 set -uo pipefail
-BIN=/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay/release
+BIN=/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin
 ROOT=/mnt/nfs/30.100_cta_data/lseg
 LOG_DIR=/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/logs/ib_kline_daily
 mkdir -p "$LOG_DIR"

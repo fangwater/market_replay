@@ -10,12 +10,23 @@ target/release/market-replay-server --config config/market_replay_server.toml --
 
 数据库不放进这个进程托管：服务升级、重启都不应该连带重启数据库。
 
+## 发布（生产二进制与开发构建分离）
+
+生产环境只运行 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/` 下的二进制：服务器本身、各任务（cn-daily、lseg-daily 及其调用的子工具，以及 IB 任务）和 mdl-replay 都从这里启动。`target/release` 是所有 worktree 和开发构建共用的目录，生产不得指向它（2026-11-16 曾被一次开发构建覆盖）。
+
+```bash
+scripts/deploy-release.sh [<commit>]   # 用干净的 checkout 和独立的构建目录，为已提交的版本构建全部 bin，再原子切换 current
+scripts/market_replay_server.sh restart --execute   # 有任务在跑时会拒绝重启
+```
+
+`releases/<commit>/REVISION` 记录提交号、构建时间和 rustc 版本，保留最近 5 个版本。回滚时把 `current` 指回旧版本，再重启服务器。已经在运行的进程不受切换影响，下一次启动的任务才使用新版本。
+
 ## 它做什么
 
 | 部分 | 说明 |
 | --- | --- |
 | gRPC `cn_market.v1` | `0.0.0.0:18312`，配置取自 `config/cn_kline_server.toml`。逻辑在 `cn_kline_server` 库里，独立二进制 `cn-kline-server` 仍可单独运行 |
-| HTTP | `0.0.0.0:18313`：主力合约 `/api/v1/dominant`、管理页 `/admin`、管理 API `/api/admin/*`，之后的数据看板也挂在这里 |
+| HTTP | `0.0.0.0:18313`：主力合约 `/api/v1/dominant`、管理 API `/api/admin/*`、数据看板（页面 `/`，接口 `/api/dashboard/*`，`[dashboard]` 段指向 `config/data_dashboard.toml`；`/admin` 跳到看板的“服务与任务”页，没配看板时仍是内置的简易页） |
 | 常驻服务 `[[service]]` | 子进程，退出后按 2 秒起、最长 60 秒的退避自动重启：`cn-reference-api`（:8765）、`cn-reference-daily-sync`（自带 18:15 调度）、`cme-reference`（:8770）、`exchange-mcp`（:8780），以及 `mdl-replay`（默认关闭，按需在配置里启用） |
 | 定时任务 `[[job]]` | 按时区和时刻排程，所有任务走同一个队列依次执行：`cn-daily`（上海 16:30）、`ib-kline-daily`（上海 09:30）。每个任务各自发钉钉 |
 

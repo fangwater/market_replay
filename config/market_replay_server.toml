@@ -9,6 +9,11 @@ env_file = "/home/fanghaizhou/.config/market_replay/env"
 # dashboard share this port.
 listen = "0.0.0.0:18313"
 
+[dashboard]
+# 数据处理进度与品种查询 (read-only): UI at /, JSON at /api/dashboard/*;
+# /admin redirects to its 服务与任务 tab.
+config = "/home/fanghaizhou/cn_futures_db/config/data_dashboard.toml"
+
 [cn_market]
 # gRPC cn_market.v1 listens on this config's `listen` (0.0.0.0:18312).
 config = "/home/fanghaizhou/cn_futures_db/config/cn_kline_server.toml"
@@ -55,7 +60,7 @@ enabled = false
 cwd = "/home/fanghaizhou/cn_futures_db"
 # Pinned to cores 0-31 as before (taskset); enable here and restart the server.
 command = "/usr/bin/taskset"
-args = ["-c", "0-31", "/home/fanghaizhou/cn_futures_db/target/release/mdl-replay", "serve", "--config", "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"]
+args = ["-c", "0-31", "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/mdl-replay", "serve", "--config", "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"]
 stop_timeout_s = 10
 
 # ---- scheduled jobs (serial) ----
@@ -63,7 +68,7 @@ stop_timeout_s = 10
 name = "cn-daily"
 description = "国内期货：RocksDB 回放、1 分钟导出、裁剪、分桶、主力（钉钉）"
 cwd = "/home/fanghaizhou/cn_futures_db"
-command = "/home/fanghaizhou/cn_futures_db/target/release/cn-daily"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-daily"
 args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/cn_daily.toml"]
 schedule = { tz = "Asia/Shanghai", at = ["16:30"] }
 timeout_minutes = 600
@@ -80,7 +85,7 @@ timeout_minutes = 120
 name = "lseg-daily"
 description = "LSEG TAS 日包：下载 -> 回放/审计 -> trade/quote/status -> K线（晚到可补正替换）-> catalog（钉钉）"
 cwd = "/home/fanghaizhou/cn_futures_db"
-command = "/home/fanghaizhou/cn_futures_db/target/release/lseg-daily"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg-daily"
 args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml"]
 schedule = { tz = "Asia/Shanghai", at = ["11:00"] }
 timeout_minutes = 480

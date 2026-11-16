@@ -96,9 +96,18 @@ async fn run(cfg: config::Config) -> Result<()> {
         }
     };
 
-    let mut http = api::router(manager.clone());
+    let mut http = api::router(manager.clone(), cfg.dashboard.is_some());
     if let Some(dominant) = market.http {
         http = http.merge(dominant);
+    }
+    if let Some(d) = &cfg.dashboard {
+        // Same port: UI at `/`, `/api/dashboard/*`; the page reads
+        // `/api/admin/*` for services and jobs. Its refresher is one task on
+        // this runtime, its IO bounded by the dashboard's `io_permits`.
+        let dcfg = data_dashboard::Config::load(&d.config)?;
+        let state = data_dashboard::AppState::new(dcfg)?;
+        data_dashboard::spawn_background(state.clone());
+        http = http.merge(data_dashboard::router(state));
     }
     let listener = tokio::net::TcpListener::bind(&cfg.http.listen)
         .await
