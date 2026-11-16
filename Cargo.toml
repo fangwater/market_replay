@@ -9,6 +9,7 @@ members = [
     "crates/mdl_replay",
     "crates/cn/cn_futures_l2",
     "crates/cn/cn_futures_trim",
+    "crates/cn/cn_futures_roll",
     "crates/core/cme_roll_metadata",
     "crates/cme/cme_tas_replay",
     "crates/usstock/usstock_replay",

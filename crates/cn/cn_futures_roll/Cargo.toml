@@ -1,0 +1,25 @@
+[package]
+name = "cn_futures_roll"
+version.workspace = true
+edition.workspace = true
+description = "CN futures roll tables: Tonglian EOD cross-section extractor and the dominant / adjustment / continuous-price replay (Rust port of preprocess cn_futures.roll_replay --eod-input)"
+
+[lib]
+path = "src/lib.rs"
+
+# Copied from /home/fanghaizhou/preprocess/cn_futures_roll (EOD extractor).
+[[bin]]
+name = "cn_futures_roll"
+path = "src/main.rs"
+
+[[bin]]
+name = "cn_roll_replay"
+path = "src/bin/cn_roll_replay.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.3"
+rayon = "1.10"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

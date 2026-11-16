@@ -814,6 +814,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cn_futures_roll"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "csv",
+ "rayon",
+ "zip",
+]
+
+[[package]]
 name = "cn_futures_trim"
 version = "0.1.0"
 dependencies = [
