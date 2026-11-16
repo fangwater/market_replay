@@ -197,7 +197,7 @@ impl Cache {
         disk: Option<i64>,
         cursor: Option<(i64, u64, u64, u64, Vec<u8>)>,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for f in frames {
             let previous =
                 sqlx::query("SELECT signature FROM frames WHERE contract=? AND day=? AND cursor=?")
@@ -734,6 +734,25 @@ mod tests {
             .unwrap();
         assert!(disk.is_none());
     }
+    #[tokio::test]
+    async fn delayed_import_and_live_writes_do_not_upgrade_read_locks() {
+        let (_temp, c) = cache().await;
+        let live: Vec<_> = (1..=256).map(frame).collect();
+        let disk: Vec<_> = (257..=512).map(frame).collect();
+        let epoch = c.epoch(true).await.unwrap();
+        let (a, b) = tokio::join!(
+            c.store(&live, Some(epoch), None, None),
+            c.store(&disk, None, Some(disk[0].action_day), None)
+        );
+        a.unwrap();
+        b.unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM frames")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 512);
+    }
+
     #[test]
     fn partial_line_waits_and_prefix_replacement_is_rejected() {
         use std::io::Write;
