@@ -9,7 +9,7 @@
 use crate::manager::{recent_runs, Manager};
 use crate::process;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -68,7 +68,6 @@ async fn log(
 async fn run_job(
     State(m): St,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
     eprintln!("market-replay-server: admin run job {name} requested by {addr}");
@@ -84,7 +83,6 @@ async fn run_job(
 async fn restart_service(
     State(m): St,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
     eprintln!("market-replay-server: admin restart service {name} requested by {addr}");

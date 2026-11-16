@@ -1,0 +1,1148 @@
+# 品种中文名表（数据看板 data_dashboard 读取，只读）。
+#
+# 优先级：本文件的 [[...]] 明确条目 > 本文件的 pattern 规则 > 编译进二进制的
+# 名称来源（国内期货：cn_futures_reference.instrument_versions 的 OpenCTP 名称；
+# 海外：scripts/lseg/make_futures_checklist_excel.py 的 PRODUCTS 表，经 IB 代码对应）。
+# 本文件缺失、解析失败或某个品种不在这里时，看板继续用编译进去的名称，并把
+# 加载错误显示在“名称覆盖”告警里。改完后重启 market-replay-server 生效。
+#
+# 字段：
+#   market    cn / lseg / ib（看板的三个市场）
+#   code      看板里的品种代码：国内为交易所品种代码（大写），LSEG 为 catalog.sqlite
+#             contracts.product，IB 为 ib_contracts.ib_symbol。区分大小写。
+#   name_cn   中文名（必填）
+#   name_en   英文名（可选；有值时替换 LSEG 描述推出的英文名）
+#   exchange  交易所（可选，仅说明用）
+#   category  类别（可选；与 PRODUCTS 表口径一致：股指、利率、外汇、能源、农产品……）
+#   source    名称依据，必须是以下之一：
+#     exchange_cn_page          交易所官方中文页面上的名称
+#     industry_standard         合约身份由 LSEG 描述/RIC 根唯一确定，中文名用业内通行译名
+#     derived_from_description  没有通行中文名，按 LSEG 描述直译拼出（规格/条带等变体）
+#     derived_from_data         LSEG 无参考描述，从 RIC 写法或价格水平推断，**待核实**
+#     local_record              本机已有的书面记录（注明出处）
+#   evidence  可选，指出依据（LSEG 描述、页面、文件）
+#
+# 证据来源（本机，只读）：catalog.sqlite contracts；
+# lseg_data/artifacts/lseg_exchange_groups_20261109/{ric_catalog,source_ric_details}；
+# HRD 文件 cme_causal_roll_inputs_20261023/hrd.csv。2026-11-16 整理，覆盖当时
+# catalog 中没有中文名的 166 个 LSEG 品种和国内的 LR。
+
+# ---------------------------------------------------------------- 规则
+# prefix 后面紧跟 1–3 位数字时匹配；{n} 替换为去掉前导零的数字。
+[[pattern]]
+market = "lseg"
+prefix = "VX"
+name_cn = "VIX波动率指数期货（第{n}周到期）"
+name_en = "Cboe VIX Futures (week {n} expiry)"
+exchange = "CFE"
+category = "波动率"
+source = "industry_standard"
+evidence = "LSEG 描述 'VOL IN WKnn' / 'VIX FUT'；VXnn 为按到期周编号的 VIX 期货 RIC"
+
+[[pattern]]
+market = "lseg"
+prefix = "Cc"
+name_cn = "CBOT玉米第{n}连续合约"
+name_en = "CBOT Corn continuation #{n}"
+exchange = "CBOT"
+category = "农产品"
+source = "derived_from_description"
+evidence = "LSEG 描述 'cN Corn (Composite Trades) Nth Month'"
+
+# ---------------------------------------------------------------- 国内
+[[product]]
+market = "cn"
+code = "LR"
+name_cn = "晚籼稻"
+exchange = "郑州商品交易所"
+category = "农产品"
+source = "local_record"
+evidence = "preprocess/database/cn_hfq_missingness_review_20261106/README.md（LR 晚籼稻）；郑商所品种代码 LR；OpenCTP 快照无此品种名"
+
+# ---------------------------------------------------------------- LSEG：外汇
+[[product]]
+market = "lseg"
+code = "AD"
+name_cn = "澳元期货"
+name_en = "Australian Dollar Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "AUSTRLN DLR"
+
+[[product]]
+market = "lseg"
+code = "BP"
+name_cn = "英镑期货"
+name_en = "British Pound Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "BRITISH POUND"
+
+[[product]]
+market = "lseg"
+code = "BR"
+name_cn = "巴西雷亚尔期货"
+name_en = "Brazilian Real Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "BRAZIL REAL"
+
+[[product]]
+market = "lseg"
+code = "CD"
+name_cn = "加元期货"
+name_en = "Canadian Dollar Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "CANDIAN DLR / CANADIAN DL"
+
+[[product]]
+market = "lseg"
+code = "CNC"
+name_cn = "美元兑离岸人民币期货（标准规模）"
+name_en = "Standard-Size USD/Offshore RMB (CNH) Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "STD USD/CHN"
+
+[[product]]
+market = "lseg"
+code = "CNH"
+name_cn = "韩国交易所人民币期货（CNH）"
+name_en = "KRX CNH Futures"
+exchange = "KRX"
+category = "外汇"
+source = "industry_standard"
+evidence = "KOFEX CNH"
+
+[[product]]
+market = "lseg"
+code = "GSD"
+name_cn = "新加坡元兑美元期货"
+name_en = "SGD/USD Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "SGD USD"
+
+[[product]]
+market = "lseg"
+code = "JY"
+name_cn = "日元期货"
+name_en = "Japanese Yen Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "JPANESE YEN"
+
+[[product]]
+market = "lseg"
+code = "KRW"
+name_cn = "韩国交易所美元期货（美元兑韩元）"
+name_en = "KRX US Dollar Futures (USD/KRW)"
+exchange = "KRX"
+category = "外汇"
+source = "industry_standard"
+evidence = "KOFEX KRW / KOFEX USD"
+
+[[product]]
+market = "lseg"
+code = "KWR"
+name_cn = "韩元兑美元期货"
+name_en = "Korean Won/USD Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "WON USD"
+
+[[product]]
+market = "lseg"
+code = "MP"
+name_cn = "墨西哥比索期货"
+name_en = "Mexican Peso Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "MEXICAN PSO"
+
+[[product]]
+market = "lseg"
+code = "NE"
+name_cn = "新西兰元期货"
+name_en = "New Zealand Dollar Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "NEW ZEA DLR"
+
+[[product]]
+market = "lseg"
+code = "NOKA"
+name_cn = "挪威克朗期货"
+name_en = "Norwegian Krone Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "NOR KRONA"
+
+[[product]]
+market = "lseg"
+code = "PHC"
+name_cn = "智利比索兑美元期货"
+name_en = "Chilean Peso/USD Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "CHILPESO/US"
+
+[[product]]
+market = "lseg"
+code = "PLZ"
+name_cn = "波兰兹罗提期货"
+name_en = "Polish Zloty Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "POL ZLOT"
+
+[[product]]
+market = "lseg"
+code = "RA"
+name_cn = "南非兰特期货（待核实）"
+name_en = "South African Rand Futures (unverified)"
+exchange = "CME"
+category = "外汇"
+source = "derived_from_data"
+evidence = "无 LSEG 参考记录，exchange=review；RAH27 2026-09 价格约 0.0615（与 ZAR/USD 水平一致），月份 F27–Z27+H28；CME 南非兰特清算代码 RA"
+
+[[product]]
+market = "lseg"
+code = "SEK"
+name_cn = "巴西交易所瑞典克朗兑美元期货"
+name_en = "B3 Swedish Krona/USD Futures"
+exchange = "B3"
+category = "外汇"
+source = "industry_standard"
+evidence = "SWD KRONA X USD"
+
+[[product]]
+market = "lseg"
+code = "SEKA"
+name_cn = "瑞典克朗期货"
+name_en = "Swedish Krona Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "SWE KRONA"
+
+[[product]]
+market = "lseg"
+code = "SF"
+name_cn = "瑞士法郎期货"
+name_en = "Swiss Franc Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "SWISS FRANC"
+
+[[product]]
+market = "lseg"
+code = "SRI"
+name_cn = "印度卢比兑美元期货（标准规模）"
+name_en = "Standard-Size INR/USD Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "INR/USD Std"
+
+[[product]]
+market = "lseg"
+code = "URO"
+name_cn = "欧元期货"
+name_en = "Euro FX Futures"
+exchange = "CME"
+category = "外汇"
+source = "industry_standard"
+evidence = "EURO FX"
+
+# ---------------------------------------------------------------- LSEG：股指
+[[product]]
+market = "lseg"
+code = "DM"
+name_cn = "E-迷你标普中型股400指数期货"
+name_en = "E-mini S&P MidCap 400 Futures"
+exchange = "CME"
+category = "股指"
+source = "industry_standard"
+evidence = "MIDC E-MINI"
+
+[[product]]
+market = "lseg"
+code = "FCE"
+name_cn = "法国CAC 40指数期货"
+name_en = "CAC 40 Index Futures"
+exchange = "Euronext Paris"
+category = "股指"
+source = "industry_standard"
+evidence = "CAC 40"
+
+[[product]]
+market = "lseg"
+code = "FFI"
+name_cn = "富时100指数期货"
+name_en = "FTSE 100 Index Futures"
+exchange = "ICE Futures Europe"
+category = "股指"
+source = "industry_standard"
+evidence = "FTSE INDEX / ZFM"
+
+[[product]]
+market = "lseg"
+code = "FSMI"
+name_cn = "瑞士SMI指数期货"
+name_en = "SMI Index Futures"
+exchange = "Eurex"
+category = "股指"
+source = "industry_standard"
+evidence = "SMI INDEX"
+
+[[product]]
+market = "lseg"
+code = "FTXIN9"
+name_cn = "富时中国A50指数（现货指数）"
+name_en = "FTSE China A50 Index"
+exchange = "指数"
+category = "股指"
+source = "industry_standard"
+evidence = "FTSE China A50 Price Index（RIC .FTXIN9，指数，不是期货）"
+
+[[product]]
+market = "lseg"
+code = "FXXP"
+name_cn = "斯托克欧洲600指数期货"
+name_en = "STOXX Europe 600 Index Futures"
+exchange = "Eurex"
+category = "股指"
+source = "industry_standard"
+evidence = "STXE 600"
+
+[[product]]
+market = "lseg"
+code = "GIF"
+name_cn = "GIFT Nifty 50指数期货"
+name_en = "GIFT Nifty 50 Index Futures"
+exchange = "NSE IFSC"
+category = "股指"
+source = "industry_standard"
+evidence = "GIF FUT；交易所 nse_ifsc"
+
+[[product]]
+market = "lseg"
+code = "GIFV4_TMP"
+name_cn = "GIFT Nifty 50指数期货（2024年10月合约，临时RIC，待核实）"
+name_en = "GIFT Nifty 50 Index Futures Oct-2024 (temporary RIC, unverified)"
+exchange = "NSE IFSC"
+category = "股指"
+source = "derived_from_data"
+evidence = "无 LSEG 参考记录；仅凭 RIC 写法 GIF+V4+_TMP 推断"
+
+[[product]]
+market = "lseg"
+code = "HCEI"
+name_cn = "恒生中国企业指数期货"
+name_en = "Hang Seng China Enterprises Index Futures"
+exchange = "HKEX"
+category = "股指"
+source = "industry_standard"
+evidence = "HS C E I"
+
+[[product]]
+market = "lseg"
+code = "HHTI"
+name_cn = "恒生科技指数期货"
+name_en = "Hang Seng TECH Index Futures"
+exchange = "HKEX"
+category = "股指"
+source = "industry_standard"
+evidence = "HHTI HKD"
+
+[[product]]
+market = "lseg"
+code = "HSI"
+name_cn = "恒生指数期货"
+name_en = "Hang Seng Index Futures"
+exchange = "HKEX"
+category = "股指"
+source = "industry_standard"
+evidence = "HANG SENG"
+
+[[product]]
+market = "lseg"
+code = "IBV"
+name_cn = "巴西博维斯帕指数期货（CME）"
+name_en = "Ibovespa Index Futures (CME)"
+exchange = "CME"
+category = "股指"
+source = "industry_standard"
+evidence = "BOVESPA FUT"
+
+[[product]]
+market = "lseg"
+code = "IPC"
+name_cn = "墨西哥IPC指数期货"
+name_en = "Mexican IPC Index Futures"
+exchange = "MexDer"
+category = "股指"
+source = "industry_standard"
+evidence = "IPC INDEX"
+
+[[product]]
+market = "lseg"
+code = "JNI"
+name_cn = "日经225指数期货（大阪交易所）"
+name_en = "Nikkei 225 Futures (OSE)"
+exchange = "OSE"
+category = "股指"
+source = "industry_standard"
+evidence = "N225；交易所 ose"
+
+[[product]]
+market = "lseg"
+code = "KS"
+name_cn = "KOSPI 200指数期货"
+name_en = "KOSPI 200 Futures"
+exchange = "KRX"
+category = "股指"
+source = "industry_standard"
+evidence = "KOSPI 200"
+
+[[product]]
+market = "lseg"
+code = "MEM"
+name_cn = "MSCI新兴市场指数期货"
+name_en = "MSCI Emerging Markets Index Futures"
+exchange = "ICE Futures US"
+category = "股指"
+source = "industry_standard"
+evidence = "MSCI EMERG"
+
+[[product]]
+market = "lseg"
+code = "MFS"
+name_cn = "MSCI EAFE指数期货"
+name_en = "MSCI EAFE Index Futures"
+exchange = "ICE Futures US"
+category = "股指"
+source = "industry_standard"
+evidence = "MSCI EAFE"
+
+[[product]]
+market = "lseg"
+code = "MFST"
+name_cn = "迷你MSCI EAFE指数期货TAS（待核实）"
+name_en = "Mini MSCI EAFE Index Futures TAS (unverified)"
+exchange = "ICE Futures US"
+category = "股指"
+source = "derived_from_description"
+evidence = "仅一个 RIC MFSTM6，描述 'MINI MSCI TAS JU'；指数由 RIC 根 MFS（MSCI EAFE）推断"
+
+[[product]]
+market = "lseg"
+code = "NSEI"
+name_cn = "印度Nifty 50指数（现货指数）"
+name_en = "NIFTY 50 Index"
+exchange = "指数"
+category = "股指"
+source = "industry_standard"
+evidence = "NIFTY 50 / S&P CNX NIFTY INDEX（RIC .NSEI，指数，不是期货）"
+
+[[product]]
+market = "lseg"
+code = "RTY"
+name_cn = "E-迷你罗素2000指数期货"
+name_en = "E-mini Russell 2000 Index Futures"
+exchange = "CME"
+category = "股指"
+source = "industry_standard"
+evidence = "E-MINI RU"
+
+[[product]]
+market = "lseg"
+code = "SSG"
+name_cn = "新交所MSCI新加坡指数期货"
+name_en = "SGX MSCI Singapore Index Futures"
+exchange = "SGX"
+category = "股指"
+source = "industry_standard"
+evidence = "SGXMSCI SG"
+
+[[product]]
+market = "lseg"
+code = "STWN"
+name_cn = "新交所富时台湾指数期货"
+name_en = "SGX FTSE Taiwan Index Futures"
+exchange = "SGX"
+category = "股指"
+source = "exchange_cn_page"
+evidence = "SGXFTSE TWN；sgx.com/zh-hans 新闻稿“新交所将推出新交所富时台湾指数期货”（20200701）"
+
+[[product]]
+market = "lseg"
+code = "STXE"
+name_cn = "欧洲斯托克50指数期货"
+name_en = "EURO STOXX 50 Index Futures"
+exchange = "Eurex"
+category = "股指"
+source = "industry_standard"
+evidence = "ESTX 50"
+
+[[product]]
+market = "lseg"
+code = "SXF"
+name_cn = "标普/多伦多60指数期货"
+name_en = "S&P/TSX 60 Index Futures"
+exchange = "Montreal Exchange"
+category = "股指"
+source = "industry_standard"
+evidence = "S&P/TSX 60 / S&P/CDA 60"
+
+[[product]]
+market = "lseg"
+code = "TPY"
+name_cn = "东证指数（TOPIX）期货（CME）"
+name_en = "TOPIX Futures (CME)"
+exchange = "CME"
+category = "股指"
+source = "industry_standard"
+evidence = "TOPIX INDEX；交易所 cme"
+
+[[product]]
+market = "lseg"
+code = "YAA"
+name_cn = "标普/澳交所200 A-REIT指数期货"
+name_en = "S&P/ASX 200 A-REIT Index Futures"
+exchange = "ASX 24"
+category = "股指"
+source = "industry_standard"
+evidence = "S&P200 A-REIT"
+
+[[product]]
+market = "lseg"
+code = "YAP"
+name_cn = "澳交所SPI 200指数期货"
+name_en = "ASX SPI 200 Index Futures"
+exchange = "ASX 24"
+category = "股指"
+source = "industry_standard"
+evidence = "SPI 200"
+
+# ---------------------------------------------------------------- LSEG：波动率
+[[product]]
+market = "lseg"
+code = "FVS"
+name_cn = "VSTOXX波动率指数期货"
+name_en = "VSTOXX Futures"
+exchange = "Eurex"
+category = "波动率"
+source = "industry_standard"
+evidence = "VSTOXX FUT"
+
+[[product]]
+market = "lseg"
+code = "VXU2:VE"
+name_cn = "VIX波动率指数期货（2022年9月合约，另一种RIC写法）"
+name_en = "Cboe VIX Futures Sep-2022 (alternate RIC)"
+exchange = "CFE"
+category = "波动率"
+source = "derived_from_description"
+evidence = "单个 RIC，描述 'VIX FUT SEP2'，参考根 VX:VE"
+
+# ---------------------------------------------------------------- LSEG：利率
+[[product]]
+market = "lseg"
+code = "AUL"
+name_cn = "美国超长期国债期货（Ultra T-Bond）"
+name_en = "Ultra U.S. Treasury Bond Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "ULTRA BOND"
+
+[[product]]
+market = "lseg"
+code = "CGB"
+name_cn = "加拿大10年期政府债券期货"
+name_en = "Ten-Year Government of Canada Bond Futures"
+exchange = "Montreal Exchange"
+category = "利率"
+source = "industry_standard"
+evidence = "CA 10YR BND"
+
+[[product]]
+market = "lseg"
+code = "CGF"
+name_cn = "加拿大5年期政府债券期货"
+name_en = "Five-Year Government of Canada Bond Futures"
+exchange = "Montreal Exchange"
+category = "利率"
+source = "industry_standard"
+evidence = "CA 5YR BND"
+
+[[product]]
+market = "lseg"
+code = "CGZ"
+name_cn = "加拿大2年期政府债券期货"
+name_en = "Two-Year Government of Canada Bond Futures"
+exchange = "Montreal Exchange"
+category = "利率"
+source = "industry_standard"
+evidence = "2 YR BOND；交易所 montreal"
+
+[[product]]
+market = "lseg"
+code = "FBTP"
+name_cn = "意大利长期国债期货（Euro-BTP）"
+name_en = "Euro-BTP Futures"
+exchange = "Eurex"
+category = "利率"
+source = "industry_standard"
+evidence = "BTP 6%"
+
+[[product]]
+market = "lseg"
+code = "FEI"
+name_cn = "三个月欧元银行间拆借利率期货（Euribor）"
+name_en = "Three Month Euribor Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "EURIBOR 3M / IFM"
+
+[[product]]
+market = "lseg"
+code = "FF"
+name_cn = "30天联邦基金利率期货"
+name_en = "30-Day Federal Funds Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "30 DAY FED"
+
+[[product]]
+market = "lseg"
+code = "FGBX"
+name_cn = "德国超长期国债期货（Buxl）"
+name_en = "Euro-Buxl Futures"
+exchange = "Eurex"
+category = "利率"
+source = "industry_standard"
+evidence = "EUR BUXL 4%"
+
+[[product]]
+market = "lseg"
+code = "FLG"
+name_cn = "英国长期国债期货（Long Gilt）"
+name_en = "Long Gilt Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "LONG GILT / RFM"
+
+[[product]]
+market = "lseg"
+code = "FOAT"
+name_cn = "法国长期国债期货（Euro-OAT）"
+name_en = "Euro-OAT Futures"
+exchange = "Eurex"
+category = "利率"
+source = "industry_standard"
+evidence = "FOAT"
+
+[[product]]
+market = "lseg"
+code = "FSR3"
+name_cn = "三个月SARON期货"
+name_en = "Three-Month SARON Futures"
+exchange = "Eurex"
+category = "利率"
+source = "industry_standard"
+evidence = "3M SARON"
+
+[[product]]
+market = "lseg"
+code = "FST3"
+name_cn = "三个月欧元短期利率（€STR）期货"
+name_en = "Three-Month €STR Futures"
+exchange = "Eurex"
+category = "利率"
+source = "industry_standard"
+evidence = "3MTH STR"
+
+[[product]]
+market = "lseg"
+code = "G"
+name_cn = "英国短期国债期货（Short Gilt）"
+name_en = "Short Gilt Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "SHORT GILT / GFM"
+
+[[product]]
+market = "lseg"
+code = "H"
+name_cn = "英国中期国债期货（Medium Gilt）"
+name_en = "Medium Gilt Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "MEDIUM GILT / HFM"
+
+[[product]]
+market = "lseg"
+code = "S1R"
+name_cn = "一个月SOFR期货"
+name_en = "One-Month SOFR Futures"
+exchange = "CME"
+category = "利率"
+source = "industry_standard"
+evidence = "1-Mon SOFR"
+
+[[product]]
+market = "lseg"
+code = "SON3"
+name_cn = "三个月SONIA期货"
+name_en = "Three Month SONIA Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "3M SONIA"
+
+[[product]]
+market = "lseg"
+code = "SRA"
+name_cn = "三个月SOFR期货"
+name_en = "Three-Month SOFR Futures"
+exchange = "CME"
+category = "利率"
+source = "industry_standard"
+evidence = "3-Mon SOFR"
+
+[[product]]
+market = "lseg"
+code = "TN"
+name_cn = "美国超长期10年期国债期货（Ultra 10-Year）"
+name_en = "Ultra 10-Year U.S. Treasury Note Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "10 YR UL TN"
+
+[[product]]
+market = "lseg"
+code = "U"
+name_cn = "英国超长期国债期货（Ultra Long Gilt）"
+name_en = "Ultra Long Gilt Futures"
+exchange = "ICE Futures Europe"
+category = "利率"
+source = "industry_standard"
+evidence = "Euronext LIFFE Ultra Long Gilt Bond / UFM"
+
+[[product]]
+market = "lseg"
+code = "US"
+name_cn = "美国长期国债期货（T-Bond）"
+name_en = "U.S. Treasury Bond Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "US T BONDS"
+
+[[product]]
+market = "lseg"
+code = "YR"
+name_cn = "美国3年期国债期货"
+name_en = "3-Year U.S. Treasury Note Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "3YR NOTES"
+
+[[product]]
+market = "lseg"
+code = "YTC"
+name_cn = "澳大利亚10年期国债期货"
+name_en = "ASX 10 Year Treasury Bond Futures"
+exchange = "ASX 24"
+category = "利率"
+source = "industry_standard"
+evidence = "10YR TB-DAY"
+
+[[product]]
+market = "lseg"
+code = "YTT"
+name_cn = "澳大利亚3年期国债期货"
+name_en = "ASX 3 Year Treasury Bond Futures"
+exchange = "ASX 24"
+category = "利率"
+source = "industry_standard"
+evidence = "3YR TB-DAY"
+
+[[product]]
+market = "lseg"
+code = "ZP"
+name_cn = "美国20年期国债期货"
+name_en = "20-Year U.S. Treasury Bond Futures"
+exchange = "CBOT"
+category = "利率"
+source = "industry_standard"
+evidence = "20 YR T"
+
+# ---------------------------------------------------------------- LSEG：能源
+[[product]]
+market = "lseg"
+code = "AFCM"
+name_cn = "理查兹湾煤炭（API4）月度期货"
+name_en = "Richards Bay Coal (API4) Futures, monthly"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "RCHRDS BAY（月度 RIC）"
+
+[[product]]
+market = "lseg"
+code = "AFCQ"
+name_cn = "理查兹湾煤炭（API4）季度期货"
+name_en = "Richards Bay Coal (API4) Futures, quarterly strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RCHRDS BAY Q1x"
+
+[[product]]
+market = "lseg"
+code = "AFCS"
+name_cn = "理查兹湾煤炭（API4）季节期货"
+name_en = "Richards Bay Coal (API4) Futures, seasonal strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RCHRDS BAYSU / WI"
+
+[[product]]
+market = "lseg"
+code = "AFCY"
+name_cn = "理查兹湾煤炭（API4）年度期货"
+name_en = "Richards Bay Coal (API4) Futures, calendar-year strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RCHRDS BAY YR"
+
+[[product]]
+market = "lseg"
+code = "ATWM"
+name_cn = "鹿特丹煤炭（API2）月度期货"
+name_en = "Rotterdam Coal (API2) Futures, monthly"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "RTM Coal MTHLY"
+
+[[product]]
+market = "lseg"
+code = "ATWQ"
+name_cn = "鹿特丹煤炭（API2）季度期货"
+name_en = "Rotterdam Coal (API2) Futures, quarterly strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RTM COAL QTRLY"
+
+[[product]]
+market = "lseg"
+code = "ATWS"
+name_cn = "鹿特丹煤炭（API2）季节期货"
+name_en = "Rotterdam Coal (API2) Futures, seasonal strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RTM COAL SESNL"
+
+[[product]]
+market = "lseg"
+code = "ATWY"
+name_cn = "鹿特丹煤炭（API2）年度期货"
+name_en = "Rotterdam Coal (API2) Futures, calendar-year strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RTM COAL YRLY / ROTTERDAM YR"
+
+[[product]]
+market = "lseg"
+code = "ETH"
+name_cn = "巴西含水乙醇期货"
+name_en = "B3 Hydrous Ethanol Futures"
+exchange = "B3"
+category = "能源"
+source = "industry_standard"
+evidence = "HYDRATED ET / BMF ETHANOL（与以太坊无关）"
+
+[[product]]
+market = "lseg"
+code = "JKM"
+name_cn = "液化天然气日韩基准价（JKM，普氏）期货"
+name_en = "LNG Japan/Korea Marker (Platts) Futures"
+exchange = "NYMEX"
+category = "能源"
+source = "industry_standard"
+evidence = "LNG JnK"
+
+[[product]]
+market = "lseg"
+code = "NCFM"
+name_cn = "纽卡斯尔煤炭月度期货"
+name_en = "Newcastle Coal Futures, monthly"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "NEWCASTLE（月度 RIC）"
+
+[[product]]
+market = "lseg"
+code = "NCFQ"
+name_cn = "纽卡斯尔煤炭季度期货"
+name_en = "Newcastle Coal Futures, quarterly strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NEWCASTLE Q"
+
+[[product]]
+market = "lseg"
+code = "NCFY"
+name_cn = "纽卡斯尔煤炭年度期货"
+name_en = "Newcastle Coal Futures, calendar-year strip"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NEWCASTLE YR"
+
+[[product]]
+market = "lseg"
+code = "NGLND"
+name_cn = "英国NBP天然气日度期货"
+name_en = "ICE UK NBP Natural Gas Daily Futures"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "NATGS DLY / ICE UK NBP Natural Gas Electronic Daily"
+
+[[product]]
+market = "lseg"
+code = "NGLNDBOM"
+name_cn = "英国NBP天然气（当月剩余天数，BOM）"
+name_en = "UK NBP Natural Gas, balance of month"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -BOM"
+
+[[product]]
+market = "lseg"
+code = "NGLNDBOW"
+name_cn = "英国NBP天然气（当周剩余天数，BOW）"
+name_en = "UK NBP Natural Gas, balance of week"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -BOW"
+
+[[product]]
+market = "lseg"
+code = "NGLNDDA"
+name_cn = "英国NBP天然气（次日，DA）"
+name_en = "UK NBP Natural Gas, day-ahead"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -DA"
+
+[[product]]
+market = "lseg"
+code = "NGLNDMT"
+name_cn = "英国NBP天然气（近月连续，MTH1/MTH2）"
+name_en = "UK NBP Natural Gas, month-ahead (MTH1/MTH2)"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "RIC NGLNDMTH1 / NGLNDMTH2，描述 'NGLND -MTH1'"
+
+[[product]]
+market = "lseg"
+code = "NGLNDSAT"
+name_cn = "英国NBP天然气（周六）"
+name_en = "UK NBP Natural Gas, Saturday"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -SAT"
+
+[[product]]
+market = "lseg"
+code = "NGLNDSUN"
+name_cn = "英国NBP天然气（周日）"
+name_en = "UK NBP Natural Gas, Sunday"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -SUN"
+
+[[product]]
+market = "lseg"
+code = "NGLNDWDNW"
+name_cn = "英国NBP天然气（下周工作日，WDNW）"
+name_en = "UK NBP Natural Gas, working days next week"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -WK/DY NW"
+
+[[product]]
+market = "lseg"
+code = "NGLNDWE"
+name_cn = "英国NBP天然气（周末，WE）"
+name_en = "UK NBP Natural Gas, weekend"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "derived_from_description"
+evidence = "NGLND -W/END / -WE"
+
+[[product]]
+market = "lseg"
+code = "TFUBM"
+name_cn = "荷兰TTF天然气月度期货"
+name_en = "Dutch TTF Natural Gas Futures, monthly"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "DUTCH TTF / D TTF M"
+
+[[product]]
+market = "lseg"
+code = "WTCL"
+name_cn = "ICE WTI原油期货"
+name_en = "ICE WTI Crude Oil Futures"
+exchange = "ICE Futures Europe"
+category = "能源"
+source = "industry_standard"
+evidence = "WTI CRUDE；交易所 ice_europe"
+
+# ---------------------------------------------------------------- LSEG：金属
+[[product]]
+market = "lseg"
+code = "ALI"
+name_cn = "COMEX铝期货"
+name_en = "COMEX Aluminum Futures"
+exchange = "COMEX"
+category = "有色金属"
+source = "industry_standard"
+evidence = "ALU PHY FUT / ALI"
+
+[[product]]
+market = "lseg"
+code = "HRC"
+name_cn = "美国中西部热轧卷钢期货"
+name_en = "U.S. Midwest Hot-Rolled Coil Steel Futures"
+exchange = "COMEX"
+category = "黑色商品"
+source = "industry_standard"
+evidence = "Hot-Rolled Coil Steel / H R STEEL"
+
+# ---------------------------------------------------------------- LSEG：农产品与其他
+[[product]]
+market = "lseg"
+code = "FCPO"
+name_cn = "马来西亚毛棕榈油期货"
+name_en = "Bursa Malaysia Crude Palm Oil Futures"
+exchange = "Bursa Malaysia Derivatives"
+category = "农产品"
+source = "industry_standard"
+evidence = "CRU PA OIL；FCPO 通行中文名“毛棕榈油期货”"
+
+[[product]]
+market = "lseg"
+code = "FCPO-TOT"
+name_cn = "马来西亚毛棕榈油期货（全部合约汇总）"
+name_en = "Crude Palm Oil Futures, all-contract total"
+exchange = "Bursa Malaysia Derivatives"
+category = "农产品"
+source = "derived_from_description"
+evidence = "单个 RIC FCPO-TOT，描述 'PALM OIL'；'-TOT' 按汇总 RIC 理解"
+
+[[product]]
+market = "lseg"
+code = "KW"
+name_cn = "堪萨斯硬红冬小麦期货"
+name_en = "KC HRW Wheat Futures"
+exchange = "CBOT"
+category = "农产品"
+source = "industry_standard"
+evidence = "WHEAT HRW"
+
+[[product]]
+market = "lseg"
+code = "LSUSPOT"
+name_cn = "ICE白砂糖（5号糖）现货月（待核实）"
+name_en = "ICE White Sugar spot month (unverified)"
+exchange = "ICE Futures Europe"
+category = "农产品"
+source = "derived_from_data"
+evidence = "无 LSEG 参考记录，exchange=review，2010–2011 无成交；仅凭 RIC 写法 LSU+SPOT 推断"
+
+[[product]]
+market = "lseg"
+code = "LXR"
+name_cn = "木材期货"
+name_en = "Lumber Futures"
+exchange = "CME"
+category = "农产品"
+source = "industry_standard"
+evidence = "LUMBER FUT"
+
+[[product]]
+market = "lseg"
+code = "OJ"
+name_cn = "冷冻浓缩橙汁期货（FCOJ-A）"
+name_en = "FCOJ-A Futures"
+exchange = "ICE Futures US"
+category = "农产品"
+source = "industry_standard"
+evidence = "ICE FCOJ-A / OJFM"
+
+[[product]]
+market = "lseg"
+code = "SINR"
+name_cn = "上海国际能源交易中心20号胶期货"
+name_en = "INE TSR 20 Rubber Futures"
+exchange = "INE"
+category = "农产品"
+source = "industry_standard"
+evidence = "INE TSR 20（国内代码 NR）"
+
+# ---------------------------------------------------------------- LSEG：数字资产
+[[product]]
+market = "lseg"
+code = "HTE"
+name_cn = "CME以太币期货"
+name_en = "CME Ether Futures"
+exchange = "CME"
+category = "数字资产"
+source = "industry_standard"
+evidence = "ETHER"

@@ -36,9 +36,12 @@ problems_csv = "/mnt/nfs/30.100_cta_data/lseg/meta/problems/ib_kline/problems.cs
 mdl_replay_config = "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"
 reference_api = "http://127.0.0.1:8765"
 
-# Name sources (Chinese names for overseas products also come from
-# scripts/lseg/make_futures_checklist_excel.py, compiled into the binary).
+# Name sources. Chinese names: config/product_names.toml (maintained table,
+# highest priority; per-entry evidence kind) > PostgreSQL OpenCTP names (CN) /
+# scripts/lseg/make_futures_checklist_excel.py compiled into the binary
+# (overseas, via IB symbol). Read once at startup.
 [names]
+product_names_toml = "/home/fanghaizhou/cn_futures_db/config/product_names.toml"
 exchange_summary_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/exchange_summary.csv"
 ric_catalog_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/ric_catalog.csv"
 ib_matches_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/ib_tas_all_futures_20261103/all_ib_futures_tas_matches.csv"

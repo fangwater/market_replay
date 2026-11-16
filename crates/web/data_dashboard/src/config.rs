@@ -69,6 +69,12 @@ pub struct NamesConfig {
     pub ib_matches_csv: PathBuf,
     /// `ib_tas_all_futures_*/ib_futures_snapshot.json` (IB multipliers, names).
     pub ib_snapshot_json: PathBuf,
+    /// Maintained Chinese-name table (`config/product_names.toml`); its
+    /// entries take priority over the compiled-in names. Optional: when unset
+    /// or unreadable the compiled-in names are used (load error shown as a
+    /// warning).
+    #[serde(default)]
+    pub product_names_toml: Option<PathBuf>,
 }
 
 fn d_listen() -> String {

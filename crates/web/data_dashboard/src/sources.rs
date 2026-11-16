@@ -19,6 +19,22 @@ pub struct NameSources {
     pub ib_matches: Vec<IbMatch>,
     pub ib_snapshot: HashMap<String, (String, String, String)>,
     pub lseg_desc: HashMap<String, String>,
+    /// `config/product_names.toml`, priority over everything above.
+    pub overrides: names::ProductNames,
+    pub overrides_error: Option<String>,
+}
+
+fn load_overrides(n: &crate::config::NamesConfig) -> (names::ProductNames, Option<String>) {
+    match &n.product_names_toml {
+        None => (names::ProductNames::default(), None),
+        Some(p) => match names::ProductNames::load(p) {
+            Ok(t) => (t, None),
+            Err(e) => (
+                names::ProductNames::default(),
+                Some(format!("品种中文名表载入失败，使用内置名称：{e:#}")),
+            ),
+        },
+    }
 }
 
 /// Returns true when the product index should be rebuilt.
@@ -245,13 +261,18 @@ async fn name_sources(st: &Arc<AppState>) -> Arc<NameSources> {
     st.names
         .get_or_init(|| async {
             let n = st.cfg.names.clone();
-            st.blocking(move || NameSources {
-                products: names::parse_products(names::CHECKLIST_SCRIPT),
-                ib_exchanges: names::parse_exchanges(names::CHECKLIST_SCRIPT),
-                exchange_summary: names::load_exchange_summary(&n.exchange_summary_csv),
-                ib_matches: names::load_ib_matches(&n.ib_matches_csv),
-                ib_snapshot: names::load_ib_snapshot(&n.ib_snapshot_json),
-                lseg_desc: names::load_lseg_descriptions(&n.ric_catalog_csv),
+            st.blocking(move || {
+                let (overrides, overrides_error) = load_overrides(&n);
+                NameSources {
+                    products: names::parse_products(names::CHECKLIST_SCRIPT),
+                    ib_exchanges: names::parse_exchanges(names::CHECKLIST_SCRIPT),
+                    exchange_summary: names::load_exchange_summary(&n.exchange_summary_csv),
+                    ib_matches: names::load_ib_matches(&n.ib_matches_csv),
+                    ib_snapshot: names::load_ib_snapshot(&n.ib_snapshot_json),
+                    lseg_desc: names::load_lseg_descriptions(&n.ric_catalog_csv),
+                    overrides,
+                    overrides_error,
+                }
             })
             .await
             .map(Arc::new)
@@ -263,6 +284,8 @@ async fn name_sources(st: &Arc<AppState>) -> Arc<NameSources> {
                     ib_matches: Vec::new(),
                     ib_snapshot: HashMap::new(),
                     lseg_desc: HashMap::new(),
+                    overrides: names::ProductNames::default(),
+                    overrides_error: Some("品种中文名表未载入（后台任务失败）".into()),
                 })
             })
         })
@@ -459,6 +482,10 @@ pub async fn build_index(st: &Arc<AppState>) -> Result<(Index, Value), String> {
         warnings.push("catalog.sqlite 尚未载入，海外品种暂缺".into());
     }
 
+    ns.overrides.apply(&mut products);
+    if let Some(e) = &ns.overrides_error {
+        warnings.push(e.clone());
+    }
     let mut ix = Index::new(products);
     for (m, p, c) in contract_links {
         ix.add_contract(m, &p, &c);
