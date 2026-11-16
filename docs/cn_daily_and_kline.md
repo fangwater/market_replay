@@ -42,7 +42,7 @@ target/release/cn-daily audit --config config/cn_daily.toml --day 2026-11-13
 - `GetMinuteBars(exchange, contract, trading_day | time{start_ms,end_ms})`：
   - `contract` 不区分大小写，郑商所的 `AP601` 和 `AP2601` 都可以。
   - 按时间范围查询时最长 31 天，会向后多看 10 个自然日，把夜盘所属的交易日也找进来。
-  - 只返回 `volume > 0` 的分钟；归档里前填的空分钟不返回。
+  - 默认只返回 `volume > 0` 的分钟；设置 `include_empty_minutes=true` 时返回底表中已有的零成交分钟，用于连续分钟分段与小时聚合。不生成底表不存在的分钟；空分钟的未知价格保持 NaN。
 - `Contract`：
   - `volume_multiple` 来自 PostgreSQL 的 `domestic_future_product_multipliers`，没有已验证的乘数时直接报错（`FAILED_PRECONDITION`）。
   - `price_tick` 来自 reference 服务里的 OpenCTP 期货公司参考数据：先按合约精确查找，查不到再用同品种的值（同品种的值不一致时报错）。`price_tick_source` 标明取自哪一种。
@@ -77,3 +77,10 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
   - `GET http://172.16.30.38:18313/api/v1/dominant/{品种}?start=YYYY-MM-DD&end=YYYY-MM-DD`：逐日历史。
   - MCP（8780）工具 `cn_dominant_contracts`，HTTP 调用形式是 `/api/cn_dominant_contracts?product=RB`。
 - **初始化（2026-11-16）：** 以 `cn_roll_replay/2019_20260826` 的原始截面加上 08-27 到 11-13 的缺口截面为输入，重算到 2026-11-13，08-26 及以前已发布的主力行逐行未变。
+
+### 实时大小分类阈值导出
+
+`fill_1min_size_buckets --product SN --start 2026-10-01 --end 2026-10-31 --export-thresholds /private/path/current.json`
+只读打开 RocksDB，导出一个完整上海自然月的区间成交额 P50/P90 和样本数，
+不覆盖 parquet。云端或本机实时信号可使用上一完整月的这份事实阈值；
+盘后原有当月回填口径保持不变。

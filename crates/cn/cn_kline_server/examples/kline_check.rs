@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
                     exchange: ex as i32,
                     contract: id.clone(),
                     range: Some(Range::TradingDay(day)),
+                    include_empty_minutes: false,
                 };
                 let resp = match client.get_minute_bars(req).await {
                     Ok(r) => r.into_inner(),

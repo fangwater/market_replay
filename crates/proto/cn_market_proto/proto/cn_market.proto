@@ -38,6 +38,9 @@ message GetMinuteBarsRequest {
     uint32 trading_day = 3;
     TimeRange time = 4;
   }
+  // Return the synthesized baseline's zero-volume minutes as well. Required
+  // for source-consecutive hourly aggregation; no new minutes are invented.
+  bool include_empty_minutes = 5;
 }
 
 message Contract {
@@ -59,7 +62,8 @@ message Contract {
 message MinuteBar {
   int64 open_time_ms = 1;
   uint32 trading_day = 2;
-  // OHLC in quote units. high/low are widened, on the tick grid, to contain
+  // OHLC in quote units. For requested empty minutes, a missing baseline
+  // price remains NaN. high/low are widened, on the tick grid, to contain
   // vwap when the snapshot-derived range misses trades between snapshots.
   double open = 3;
   double high = 4;
@@ -143,7 +147,8 @@ message Book5 {
 
 message GetMinuteBarsResponse {
   Contract contract = 1;
-  // Only minutes with volume > 0, ascending; missing minutes are omitted.
+  // Ascending baseline minutes. Zero-volume rows are returned only when
+  // include_empty_minutes is set; absent source minutes remain omitted.
   repeated MinuteBar bars = 2;
   DataState data_state = 3;
 }

@@ -3,8 +3,8 @@
 2026-11-16 起，本项目只有一个常驻进程 `market-replay-server`（代码 `crates/server/market_replay_server`，配置 `config/market_replay_server.toml`）。PM2 里属于本项目的只剩它和数据库 `pg-domestic-futures`：
 
 ```bash
-pm2 start deploy/pm2/market-replay-server.config.cjs && pm2 save   # 首次注册
-pm2 restart market-replay-server --namespace cn_futures_db           # 升级二进制或改配置后
+./scripts/market_replay_server.sh start --execute   # 首次注册
+./scripts/market_replay_server.sh restart --execute # 升级二进制或改配置后
 target/release/market-replay-server --config config/market_replay_server.toml --check  # 只校验配置
 ```
 
@@ -34,4 +34,6 @@ target/release/market-replay-server --config config/market_replay_server.toml --
 
 ## 新增任务或服务
 
-在 `config/market_replay_server.toml` 里加一个 `[[job]]` 或 `[[service]]`，先用 `--check` 校验，再 `pm2 restart market-replay-server`。**不要再为单个任务注册新的 PM2 进程。**
+在 `config/market_replay_server.toml` 里加一个 `[[job]]` 或 `[[service]]`，先用 `--check` 校验，再通过 `scripts/market_replay_server.sh restart --execute` 重启。**不要再为单个任务注册新的 PM2 进程。**
+
+环境脚本重启前检查队列和运行任务；有任务时保留当前服务，并归档相关 PM2 日志后再执行空闲服务的重启。

@@ -203,6 +203,30 @@ fn widen(high: f64, low: f64, vwap: f64, tick: f64) -> (f64, f64, bool) {
     (h, l, widened)
 }
 
+fn minute_prices(
+    open: Option<f64>,
+    high: Option<f64>,
+    low: Option<f64>,
+    close: Option<f64>,
+    volume: f64,
+) -> Result<(f64, f64, f64, f64), Status> {
+    if volume > 0.0
+        && [open, high, low, close]
+            .iter()
+            .any(|v| v.is_none_or(|v| !v.is_finite()))
+    {
+        return Err(Status::data_loss(
+            "traded baseline minute without finite OHLC",
+        ));
+    }
+    Ok((
+        open.unwrap_or(f64::NAN),
+        high.unwrap_or(f64::NAN),
+        low.unwrap_or(f64::NAN),
+        close.unwrap_or(f64::NAN),
+    ))
+}
+
 fn yyyymmdd(d: NaiveDate) -> u32 {
     d.format("%Y%m%d").to_string().parse().unwrap_or(0)
 }
@@ -340,22 +364,25 @@ impl Service {
                         price_tick_source: source.into(),
                     });
                 }
-                if r.volume <= 0.0 {
+                if r.volume <= 0.0 && !req.include_empty_minutes {
                     continue;
                 }
                 let open_ms = r.ts * 1000;
                 if window.is_some_and(|(a, b)| open_ms < a || open_ms > b) {
                     continue;
                 }
-                let (Some(o), Some(h), Some(l), Some(c)) = (r.open, r.high, r.low, r.close) else {
-                    return Err(Status::data_loss(format!(
-                        "{} {} traded minute without OHLC",
-                        r.contract_id, r.ts
-                    )));
-                };
+                let (o, h, l, c) = minute_prices(r.open, r.high, r.low, r.close, r.volume)?;
                 let tick = out_contract.as_ref().expect("set above").price_tick;
-                let vwap = r.amount / r.volume / multiplier;
-                let (hh, ll, widened) = widen(h, l, vwap, tick);
+                let vwap = if r.volume > 0.0 {
+                    r.amount / r.volume / multiplier
+                } else {
+                    r.vwap.unwrap_or(f64::NAN)
+                };
+                let (hh, ll, widened) = if r.volume > 0.0 {
+                    widen(h, l, vwap, tick)
+                } else {
+                    (h, l, false)
+                };
                 bars.push(MinuteBar {
                     open_time_ms: open_ms,
                     trading_day: td,
@@ -563,6 +590,19 @@ pub async fn serve(cfg: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_empty_minutes_preserve_carried_or_missing_prices() {
+        assert_eq!(
+            minute_prices(Some(100.), Some(101.), Some(99.), Some(100.), 0.).unwrap(),
+            (100., 101., 99., 100.)
+        );
+        let missing = minute_prices(None, None, None, None, 0.).unwrap();
+        assert!(
+            missing.0.is_nan() && missing.1.is_nan() && missing.2.is_nan() && missing.3.is_nan()
+        );
+        assert!(minute_prices(None, Some(101.), Some(99.), Some(100.), 1.).is_err());
+    }
 
     #[test]
     fn widening_stays_on_tick_grid_and_contains_vwap() {

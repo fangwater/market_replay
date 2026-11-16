@@ -43,6 +43,9 @@ struct Args {
     /// Only overlay day files with TradDay <= end.
     #[arg(long)]
     end: Option<String>,
+    /// Read-only export of one product's monthly thresholds. Does not overlay parquet.
+    #[arg(long)]
+    export_thresholds: Option<PathBuf>,
 }
 
 fn year_month(ts_utc_ns: u64) -> u32 {
@@ -107,8 +110,10 @@ fn exchange_of_product(root: &Path, product: &str) -> Result<Option<String>> {
 fn scan_product_trades(
     db: &L2Db,
     cf_names: &[String],
+    months: Option<(u32, u32)>,
+    collect_buckets: bool,
 ) -> Result<(
-    HashMap<u32, (f64, f64)>,
+    HashMap<u32, (f64, f64, usize)>,
     HashMap<(String, i64), SizeBuckets>,
 )> {
     let mut amounts: HashMap<u32, Vec<f64>> = HashMap::new();
@@ -124,13 +129,19 @@ fn scan_product_trades(
             if kind != KIND_TRADE {
                 break;
             }
+            let month = year_month(ts_ns);
+            if months.is_some_and(|(start, end)| month < start || month > end) {
+                continue;
+            }
             let rec = decode_trade(&value)?;
             let amount = rec.turnover.unwrap_or(rec.price * rec.volume);
             if !(amount.is_finite() && amount > 0.0) {
                 continue;
             }
             amounts.entry(year_month(ts_ns)).or_default().push(amount);
-            trades.push((id, ts_ns, amount, rec.aggressor));
+            if collect_buckets {
+                trades.push((id, ts_ns, amount, rec.aggressor));
+            }
         }
     }
     let mut thresholds = HashMap::new();
@@ -142,11 +153,11 @@ fn scan_product_trades(
         let Some(p90) = linear_percentile(&values, 0.9) else {
             continue;
         };
-        thresholds.insert(month, (p50, p90));
+        thresholds.insert(month, (p50, p90, values.len()));
     }
     let mut buckets: HashMap<(String, i64), SizeBuckets> = HashMap::new();
     for (id, ts_ns, amount, aggressor) in trades {
-        let Some(&(p50, p90)) = thresholds.get(&year_month(ts_ns)) else {
+        let Some(&(p50, p90, _)) = thresholds.get(&year_month(ts_ns)) else {
             continue;
         };
         let key = (id, minute_left_sec(ts_ns));
@@ -249,6 +260,37 @@ fn main() -> Result<()> {
     }
     let mut jobs: Vec<(String, Vec<String>)> = by_product.into_iter().collect();
     jobs.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(output) = &args.export_thresholds {
+        anyhow::ensure!(
+            args.product.is_some() && jobs.len() == 1,
+            "threshold export requires one explicit product"
+        );
+        let (start, end) = range.context("threshold export requires --start and --end")?;
+        let months = (
+            start.year() as u32 * 100 + start.month(),
+            end.year() as u32 * 100 + end.month(),
+        );
+        anyhow::ensure!(
+            months.0 == months.1
+                && start.day() == 1
+                && end.succ_opt().is_some_and(|d| d.month() != end.month()),
+            "export requires one complete calendar month"
+        );
+        let (product, cf_names) = &jobs[0];
+        let (thresholds, _) = scan_product_trades(&db, cf_names, Some(months), false)?;
+        let &(p50, p90, samples) = thresholds
+            .get(&months.0)
+            .context("no positive interval amounts in requested month")?;
+        let report = serde_json::json!({"product":product,"source_month":months.0,"p50":p50,"p90":p90,"samples":samples,"source":"cn_futures_l2 inferred interval turnover","column_families":cf_names});
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = output.with_extension("json.new");
+        fs::write(&temporary, serde_json::to_vec_pretty(&report)?)?;
+        fs::rename(temporary, output)?;
+        println!("{report}");
+        return Ok(());
+    }
     eprintln!(
         "fill_1min_size_buckets products={} root={}",
         jobs.len(),
@@ -283,7 +325,7 @@ fn main() -> Result<()> {
                     eprintln!("skip {exchange} {product}: empty 1min directory");
                     continue;
                 }
-                let (_thresholds, buckets) = scan_product_trades(&db, &cf_names)?;
+                let (_thresholds, buckets) = scan_product_trades(&db, &cf_names, None, true)?;
                 let mut product_hits = 0u64;
                 for path in &days {
                     product_hits += overlay_day(path, &buckets)?;
