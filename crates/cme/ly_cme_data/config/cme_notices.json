@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "cme_globex_announcements",
+      "kind": "discovery_web",
+      "url": "https://www.cmegroup.com/tools-information/communications/globex-announcements.html",
+      "enabled": false,
+      "disabled_reason": "CME/Akamai返回403，正文明确说明出口IP因疑似网页抓取被限制；暂停自动请求，待取得允许的内容交付渠道。",
+      "diagnostic": "artifacts/cme_official_access_20261111/cme_globex.response.json"
+    },
+    {
+      "id": "cmegroup_post_1994395477840990459",
+      "kind": "known_official_post",
+      "url": "https://cdn.syndication.twimg.com/tweet-result?id=1994395477840990459&lang=en&token=0",
+      "source_url": "https://x.com/CMEGroup/status/1994395477840990459",
+      "expected_author_id": "15935591",
+      "expected_post_id": "1994395477840990459",
+      "enabled": true,
+      "cache_ttl_seconds": 86400,
+      "scope": "只验证及维护已知公告，不代表可以发现新公告或覆盖完整历史。"
+    }
+  ]
+}

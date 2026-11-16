@@ -82,6 +82,7 @@
 | `crates/cme/cme_tas_replay` | 从 mkt_signal `7b8d96de` 迁入：CME TAS / LL2 / Raw LL2 回放与 1s/1min/hfq/ylabel 导出 |
 | `crates/usstock/*` | 从 mkt_signal `7b8d96de` 迁入：美股 6 个 crate（TAS/normalised、MBP、RAW、Raw LL2、Nasdaq baseline、聚合）。`usstock_features_1min_hfq` 依赖实盘因子公式，仍留在 mkt_signal 根 crate，等因子公式抽进 core 后再迁 |
 | `config/cme_*`、`config/usstock_*`、`scripts/*cme*`、`scripts/usstock_*`、`scripts/*ll2*`、`tests/scripts/test_cme_*` 等 | 随这些 crate 一起从 mkt_signal 迁入，共 85 个配置、脚本、Python 测试和文档。Python 测试从仓库根目录用 `python3 -m pytest tests/scripts` 运行；`tests/__init__.py` 必须保留，否则 `from scripts.x import ...` 会解析到 `tests/scripts` 上 |
+| `crates/cme/ly_cme_data` | 原 `/home/fanghaizhou/ly_cme_data`（2026-11-16 并入，原路径为软链接）：LSEG/CME TAS tick parquet、只用 LSEG 数据的 K 线、交易状态、改撤回补、IB 比较。自带 `AGENTS.md`，其中"资源限制与任务启动方式"为最高优先级规则 |
 | `reference_cme/` | CME 参考数据服务，原 `cme_exchange_info_summary`（Python，PM2 `cme-exchange-info-summary`，0.0.0.0:8770），是 8780 MCP 的 CME 上游 |
 | `crates/mdl_replay` | 单日 MDL 回放服务 |
 | `reference/` | 参考数据服务（Python） |
@@ -150,3 +151,12 @@
 - **进程管理：** PM2 进程 `pg-domestic-futures`，配置 `deploy/pm2/pg-domestic-futures.config.cjs`。入口脚本 `run-pg-domestic-futures.sh` 会等 RAID 挂载后再 `exec postgres`。PM2 停止时发 SIGINT，postgres 执行快速关闭；`kill_timeout` 设为 60 秒，不得调小，否则 PM2 会 SIGKILL postmaster。开机由 fanghaizhou 的 PM2 resurrect 拉起，不用 systemd。
 - **故障原因与修复：** 2026-11-16 整库不可连接，报错 `could not open shared memory segment "/PostgreSQL.*"`：u171 名下的 posix 动态共享内存段在 `/dev/shm` 里被删了。新实例设置 `dynamic_shared_memory_type = mmap`，共享内存段放在数据目录内。
 - **连接方式：** 数据库角色仍然是 `u171`，通过 peer 映射 `market_metadata_u171`（fanghaizhou → u171）连接，所有客户端的 `user=u171` 不需要改。连接串：`postgresql:///market_metadata?host=%2Fmnt%2Fnvme-raid0-28t%2Ffanghaizhou%2Fpostgresql%2Fdomestic_futures%2F16%2Frun&port=5433&user=u171`。引用旧 socket 路径的代码、配置、文档（本仓库、reference、reference_cme、preprocess 的当前文件）已全部改到新路径；`preprocess/database/` 下按日期归档的历史证据保持原样。
+
+## 依赖统一与构建目录（2026-11-16）
+
+用户同意统一并升级依赖：以 `ly_cme_data` 原来那份更新的 `Cargo.lock` 为基准，整个 workspace 共用一份 lock（其中 196 个包比原来的 `market_replay` 新）。构建目录改到 NVMe 上的 `/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay`，在 `.cargo/config.toml` 里设置；`./target` 是指向它的软链接（`/home` 所在磁盘已用 92%）。
+
+升级前后的验证：
+- Rust 测试逐个一致，`ly_cme_data` 原来的 30 个也包含在内；以前被算了两遍的 4 个测试属于 `cme_tas_export_status`。仍然只有那 2 个已知失败。
+- Python 测试：本仓库 223 个通过，`ly_cme_data` 的 10 个文件都 OK（用 `reference_cme/.venv` 在 `scripts/` 目录下运行 unittest）。
+- 11-16 的 1 分钟表按生产工序重跑，80/80 个文件与生产一致；主力表全量重算后，36/36 个已发布文件逐字节一致；kline 校验 791 个合约，0 根不合格。

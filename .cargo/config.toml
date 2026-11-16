@@ -1,3 +1,7 @@
+[build]
+# Build artifacts live on NVMe (the /home disk is nearly full); ./target is a symlink to it.
+target-dir = "/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay"
+
 # Machine-specific settings (target-dir etc.) belong in ~/.cargo/config.toml.
 [env]
 # Vendored C++ deps (librocksdb-sys) rely on transitive <cstdint> includes that
