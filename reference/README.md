@@ -89,16 +89,9 @@ cp .env.example .env
 PYTHON_BIN=/home/fanghaizhou/market_replay/reference/.venv/bin/python
 ```
 
-迁移旧 SQLite 数据（只执行一次；目标 schema 已有数据时会停止）：
-
-```bash
-set -a; . ./.env; set +a
-"$PYTHON_BIN" scripts/migrate_sqlite_to_postgres.py --sqlite cn_futures_ref.db
-```
-
 **当前分工（2026-11-17 起）：** `/api/v1` 的查询、导出和两个同步接口（`POST /api/v1/sync`、`POST /api/v1/trading-sessions/sync`）由 Rust 实现（仓库根目录 `crates/ref/cn_reference`），直接挂在 `market-replay-server` 进程的 :8765 上，每日同步是它的任务 `cn-reference-daily`（上海 18:15）。本目录的 Python 服务现在以 `cn-reference-ui` 的名字只监听 `127.0.0.1:8766`，由 :8765 把没迁移的路径原样转发过来：网页 `/`、公告、报单费规则、费用估算、`/import`、`/overrides/import`。这些是下一步要迁的功能。下面的表格列出的是完整接口，未标注的都以 :8765 为入口。
 
-日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/{service,job}/`，重启在 `http://127.0.0.1:18313/admin` 操作，说明见仓库根目录 `docs/market_replay_server.md`。每日任务使用 PostgreSQL advisory lock（695102482），重叠运行时只允许一个同步写入；公告人工刷新使用另一个 advisory lock。`scripts/daily_sync.py` 仍可手动运行（同一把锁）。
+日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/{service,job}/`，重启在 `http://127.0.0.1:18313/admin` 操作，说明见仓库根目录 `docs/market_replay_server.md`。每日任务使用 PostgreSQL advisory lock（695102482），重叠运行时只允许一个同步写入；公告人工刷新使用另一个 advisory lock。手动同步用 `cn-reference sync`（同一把锁）。
 
 ## HTTP API
 
@@ -143,8 +136,9 @@ cn_futures_ref/
   api.py         HTTP API 与前端静态资源服务
   server.py      环境变量驱动的服务入口
 scripts/
-  migrate_sqlite_to_postgres.py  SQLite 快照到增量记录的迁移
-  daily_sync.py                  单次手续费与连续竞价时段同步任务
-  daily_scheduler.py             常驻每日调度器（market-replay-server 托管）
-  run-api.sh / run-daily-sync.sh 运行包装（market-replay-server 调用）
+  run-api.sh                     网页、公告、报单费服务的运行包装（market-replay-server 调用，:8766）
+  run-mcp.sh                     MCP 网关运行包装
+  bootstrap.sh                   创建虚拟环境
 ```
+
+每日同步和手动同步现在都用 Rust：`cn-reference sync`（见仓库根目录 `crates/ref/cn_reference`）。原来的 `daily_sync.py`、`daily_scheduler.py`、`run-daily-sync.sh` 和一次性的 SQLite 迁移脚本已于 2026-11-17 删除，需要时可从 git 历史取回。
