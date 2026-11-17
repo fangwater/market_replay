@@ -862,6 +862,7 @@ dependencies = [
  "clap",
  "cn_futures_core",
  "cn_futures_l2",
+ "cn_futures_trim",
  "cn_market_proto",
  "csv",
  "futures-util",

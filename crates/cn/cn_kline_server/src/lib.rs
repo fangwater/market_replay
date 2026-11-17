@@ -27,6 +27,7 @@ use tonic::{Request, Response, Status};
 
 pub mod dominant;
 pub mod intraday;
+pub mod live;
 
 /// A time-range request may span at most this many calendar days.
 const MAX_RANGE_DAYS: i64 = 31;
@@ -51,6 +52,9 @@ pub struct Config {
     pub roll_dir: Option<PathBuf>,
     #[serde(default)]
     pub intraday: Option<intraday::Config>,
+    /// In-progress day rebuilt from the NFS MDL files.
+    #[serde(default)]
+    pub live: Option<live::Config>,
 }
 
 impl Config {
@@ -243,8 +247,18 @@ struct Metadata {
     ticks: Ticks,
 }
 
+fn last_done(state_file: &Path) -> u32 {
+    std::fs::read(state_file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["last_done"].as_str().map(str::to_string))
+        .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+        .map_or(0, yyyymmdd)
+}
+
 struct Service {
     intraday: Option<Arc<intraday::Cache>>,
+    live: Option<Arc<live::Live>>,
     cfg: Config,
     meta: Arc<RwLock<Metadata>>,
 }
@@ -259,12 +273,7 @@ impl Drop for Service {
 
 impl Service {
     fn latest_trading_day(&self) -> u32 {
-        std::fs::read(&self.cfg.daily_state_file)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v["last_done"].as_str().map(str::to_string))
-            .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
-            .map_or(0, yyyymmdd)
+        last_done(&self.cfg.daily_state_file)
     }
 
     fn data_state(&self) -> DataState {
@@ -272,6 +281,8 @@ impl Service {
             source: "baseline_data_1min".into(),
             latest_trading_day: self.latest_trading_day(),
             session_snapshot_as_of: self.cfg.session_as_of.clone(),
+            live_trading_day: 0,
+            live_through_ms: 0,
         }
     }
 
@@ -293,6 +304,10 @@ impl Service {
                 "no archive for {venue} product {product}"
             )));
         }
+        let req_day = match &req.range {
+            Some(Range::TradingDay(d)) => Some(*d),
+            _ => None,
+        };
         // Candidate day files and an optional open-time filter.
         let (days, window): (Vec<NaiveDate>, Option<(i64, i64)>) = match req.range {
             Some(Range::TradingDay(d)) => {
@@ -362,83 +377,80 @@ impl Service {
                 .filter(|r| canonical(&r.contract_id, td) == want)
             {
                 if out_contract.is_none() {
-                    let (tick, source) = meta
-                        .ticks
-                        .lookup(venue, &r.contract_id, td)
-                        .map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
-                    out_contract = Some(Contract {
-                        exchange: exchange as i32,
-                        product: product.clone(),
-                        native_code: r.contract_id.clone(),
-                        canonical_code: want.clone(),
-                        volume_multiple: multiplier,
-                        price_tick: tick,
-                        price_tick_source: source.into(),
-                    });
+                    out_contract = Some(make_contract(
+                        &meta,
+                        exchange,
+                        venue,
+                        &product,
+                        &r.contract_id,
+                        td,
+                        &want,
+                        multiplier,
+                    )?);
                 }
-                if r.volume <= 0.0 && !req.include_empty_minutes {
-                    continue;
-                }
-                let open_ms = r.ts * 1000;
-                if window.is_some_and(|(a, b)| open_ms < a || open_ms > b) {
-                    continue;
-                }
-                let (o, h, l, c) = minute_prices(r.open, r.high, r.low, r.close, r.volume)?;
                 let tick = out_contract.as_ref().expect("set above").price_tick;
-                let vwap = if r.volume > 0.0 {
-                    r.amount / r.volume / multiplier
-                } else {
-                    r.vwap.unwrap_or(f64::NAN)
-                };
-                let (hh, ll, widened) = if r.volume > 0.0 {
-                    widen(h, l, vwap, tick)
-                } else {
-                    (h, l, false)
-                };
-                bars.push(MinuteBar {
-                    open_time_ms: open_ms,
-                    trading_day: td,
-                    open: o,
-                    high: hh,
-                    low: ll,
-                    close: c,
-                    snapshot_high: h,
-                    snapshot_low: l,
-                    volume_lots: r.volume,
-                    turnover_cny: r.amount,
-                    vwap,
-                    snapshot_trades: r.count.max(0.0) as u32,
-                    widened,
-                    mid_price: finite(r.mid_price),
-                    twap: finite(r.twap),
-                    buy_volume_lots: r.buy_volume,
-                    sell_volume_lots: r.sell_volume,
-                    buy_turnover_cny: r.buy_amount,
-                    sell_turnover_cny: r.sell_amount,
-                    buy_vwap: finite(r.buy_vwap),
-                    sell_vwap: finite(r.sell_vwap),
-                    buy_snapshot_trades: r.buy_count,
-                    sell_snapshot_trades: r.sell_count,
-                    avg_interval_turnover_cny: r.avg_amount,
-                    net_buy_turnover_cny: r.net_buy_amount,
-                    net_buy_volume_lots: r.net_buy_volume,
-                    net_buy_pct: finite(r.net_buy_pct),
-                    size_buckets: Some(SizeBuckets {
-                        large_turnover_cny: r.large_order,
-                        medium_turnover_cny: r.medium_order,
-                        small_turnover_cny: r.small_order,
-                        large_buy_cny: r.large_buy,
-                        large_sell_cny: r.large_sell,
-                        medium_buy_cny: r.medium_buy,
-                        medium_sell_cny: r.medium_sell,
-                        small_buy_cny: r.small_buy,
-                        small_sell_cny: r.small_sell,
-                        net_buy_large_cny: r.net_buy_large,
-                        net_buy_medium_cny: r.net_buy_medium,
-                        net_buy_small_cny: r.net_buy_small,
-                    }),
-                    book: r.book.as_ref().map(book5),
-                });
+                if let Some(bar) = make_bar(
+                    r,
+                    td,
+                    multiplier,
+                    tick,
+                    false,
+                    req.include_empty_minutes,
+                    window,
+                )? {
+                    bars.push(bar);
+                }
+            }
+        }
+        // In-progress day: rebuilt from the NFS MDL files (see `live`).
+        let mut live_state = (0u32, 0i64);
+        if let Some(live) = self.live.as_ref().filter(|l| l.serves(&product)) {
+            let last_done = self.latest_trading_day();
+            let want_of = |id: &str, td: u32| canonical(id, td) == canonical(contract, td);
+            match live.bars(dir_name, &product, last_done, want_of, multiplier) {
+                Ok(Some(found)) => {
+                    for lb in found {
+                        let td = yyyymmdd(lb.day);
+                        if req_day.is_some_and(|d| d != td) {
+                            continue;
+                        }
+                        live_state = (td, lb.through_ms);
+                        if out_contract.is_none() {
+                            let want = canonical(contract, td);
+                            out_contract = Some(make_contract(
+                                &meta,
+                                exchange,
+                                venue,
+                                &product,
+                                &lb.native_code,
+                                td,
+                                &want,
+                                multiplier,
+                            )?);
+                        }
+                        let tick = out_contract.as_ref().expect("set above").price_tick;
+                        for r in &lb.minutes {
+                            if let Some(bar) = make_bar(
+                                r,
+                                td,
+                                multiplier,
+                                tick,
+                                true,
+                                req.include_empty_minutes,
+                                window,
+                            )? {
+                                bars.push(bar);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) if req_day.is_some_and(|d| d > last_done) => {
+                    return Err(Status::unavailable(format!(
+                        "in-progress day unavailable: {e:#}"
+                    )));
+                }
+                Err(e) => eprintln!("cn-market: live day failed: {e:#}"),
             }
         }
         bars.sort_by_key(|b| b.open_time_ms);
@@ -451,12 +463,122 @@ impl Service {
         Ok(GetMinuteBarsResponse {
             contract: Some(contract),
             bars,
-            data_state: Some(self.data_state()),
+            data_state: Some(DataState {
+                live_trading_day: live_state.0,
+                live_through_ms: live_state.1,
+                ..self.data_state()
+            }),
         })
     }
 }
 
 pub struct Grpc(Arc<Service>);
+
+#[allow(clippy::too_many_arguments)]
+fn make_contract(
+    meta: &Metadata,
+    exchange: Exchange,
+    venue: &str,
+    product: &str,
+    native: &str,
+    td: u32,
+    canonical_code: &str,
+    multiplier: f64,
+) -> Result<Contract, Status> {
+    let (tick, source) = meta
+        .ticks
+        .lookup(venue, native, td)
+        .map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
+    Ok(Contract {
+        exchange: exchange as i32,
+        product: product.to_string(),
+        native_code: native.to_string(),
+        canonical_code: canonical_code.to_string(),
+        volume_multiple: multiplier,
+        price_tick: tick,
+        price_tick_source: source.into(),
+    })
+}
+
+/// One archive/live minute row -> proto bar. `None` when the minute is
+/// filtered (empty minute not requested, or outside the time window).
+fn make_bar(
+    r: &cn_futures_core::baseline_1min::BaselineMinute,
+    td: u32,
+    multiplier: f64,
+    tick: f64,
+    provisional: bool,
+    include_empty: bool,
+    window: Option<(i64, i64)>,
+) -> Result<Option<MinuteBar>, Status> {
+    if r.volume <= 0.0 && !include_empty {
+        return Ok(None);
+    }
+    let open_ms = r.ts * 1000;
+    if window.is_some_and(|(a, b)| open_ms < a || open_ms > b) {
+        return Ok(None);
+    }
+    let (o, h, l, c) = minute_prices(r.open, r.high, r.low, r.close, r.volume)?;
+    let vwap = if r.volume > 0.0 {
+        r.amount / r.volume / multiplier
+    } else {
+        r.vwap.unwrap_or(f64::NAN)
+    };
+    let (hh, ll, widened) = if r.volume > 0.0 {
+        widen(h, l, vwap, tick)
+    } else {
+        (h, l, false)
+    };
+    Ok(Some(MinuteBar {
+        provisional,
+        size_buckets: if provisional {
+            None
+        } else {
+            Some(SizeBuckets {
+                large_turnover_cny: r.large_order,
+                medium_turnover_cny: r.medium_order,
+                small_turnover_cny: r.small_order,
+                large_buy_cny: r.large_buy,
+                large_sell_cny: r.large_sell,
+                medium_buy_cny: r.medium_buy,
+                medium_sell_cny: r.medium_sell,
+                small_buy_cny: r.small_buy,
+                small_sell_cny: r.small_sell,
+                net_buy_large_cny: r.net_buy_large,
+                net_buy_medium_cny: r.net_buy_medium,
+                net_buy_small_cny: r.net_buy_small,
+            })
+        },
+        open_time_ms: open_ms,
+        trading_day: td,
+        open: o,
+        high: hh,
+        low: ll,
+        close: c,
+        snapshot_high: h,
+        snapshot_low: l,
+        volume_lots: r.volume,
+        turnover_cny: r.amount,
+        vwap,
+        snapshot_trades: r.count.max(0.0) as u32,
+        widened,
+        mid_price: finite(r.mid_price),
+        twap: finite(r.twap),
+        buy_volume_lots: r.buy_volume,
+        sell_volume_lots: r.sell_volume,
+        buy_turnover_cny: r.buy_amount,
+        sell_turnover_cny: r.sell_amount,
+        buy_vwap: finite(r.buy_vwap),
+        sell_vwap: finite(r.sell_vwap),
+        buy_snapshot_trades: r.buy_count,
+        sell_snapshot_trades: r.sell_count,
+        avg_interval_turnover_cny: r.avg_amount,
+        net_buy_turnover_cny: r.net_buy_amount,
+        net_buy_volume_lots: r.net_buy_volume,
+        net_buy_pct: finite(r.net_buy_pct),
+        book: r.book.as_ref().map(book5),
+    }))
+}
 
 fn finite(v: Option<f64>) -> Option<f64> {
     v.filter(|x| x.is_finite())
@@ -571,7 +693,42 @@ pub async fn components(cfg: Config) -> Result<Components> {
         Some(config) => Some(intraday::Cache::start(config).await?),
         None => None,
     };
+    let live = match cfg.live.clone() {
+        Some(live_cfg) => {
+            let (api, as_of) = (cfg.reference_api.clone(), cfg.session_as_of.clone());
+            let sessions = tokio::task::spawn_blocking(move || {
+                cn_futures_trim::sessions::ContinuousSessions::fetch(
+                    &format!("{}/api/v1/trading-sessions", api.trim_end_matches('/')),
+                    Some(&as_of),
+                )
+            })
+            .await?
+            .context("load continuous sessions for the live day")?;
+            let period = live_cfg.background_s;
+            let live = Arc::new(live::Live::new(live_cfg, Arc::new(sessions)));
+            if period > 0 {
+                let (live, state_file) = (live.clone(), cfg.daily_state_file.clone());
+                tokio::spawn(async move {
+                    loop {
+                        let (l, f) = (live.clone(), state_file.clone());
+                        match tokio::task::spawn_blocking(move || l.refresh_all(last_done(&f)))
+                            .await
+                        {
+                            Ok(errors) => errors
+                                .iter()
+                                .for_each(|e| eprintln!("cn-market: live refresh failed: {e}")),
+                            Err(e) => eprintln!("cn-market: live refresh task: {e}"),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(period)).await;
+                    }
+                });
+            }
+            Some(live)
+        }
+        None => None,
+    };
     let grpc = CnFuturesMarketServer::new(Grpc(Arc::new(Service {
+        live,
         cfg,
         meta,
         intraday,

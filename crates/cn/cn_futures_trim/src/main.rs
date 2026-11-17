@@ -1,12 +1,11 @@
 //! Materialize continuous-session-only copies of the existing CN parquet archives.
 
-mod sessions;
-
 use anyhow::{bail, Context, Result};
 use arrow::array::{Array, BooleanArray, Int64Array};
 use arrow::compute::filter_record_batch;
 use chrono::NaiveDate;
 use clap::{Parser, ValueEnum};
+use cn_futures_trim::sessions::{reference_venue, ContinuousSessions, DEFAULT_REFERENCE_API};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -15,7 +14,6 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::Serialize;
 use serde_json::json;
-use sessions::{reference_venue, ContinuousSessions, DEFAULT_REFERENCE_API};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -64,6 +64,19 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 
 客户端用 git + rev 依赖 `cn_market_proto`，方式和 mkt_signal 依赖 core 一样。
 
+## 盘中补缺：当天 bar 直接从 NFS MDL 重算（2026-11-17）
+
+`cn-daily` 16:30 才产出当天 parquet。盘中 `GetMinuteBars` 现在可以补上"最后一个已归档交易日之后"的当天 bar，只读 NFS，不用 SQLite，也不接 ZMQ。ZMQ 仍然只管实盘；这条路径用来补 ZMQ 写盘失败或服务重启造成的缺口，以及给实盘因子起算时取历史（ZMQ 只需缓存一小段，等 MDL 追上后从 gRPC 取，再按时间接上）。
+
+- **配置：** `config/cn_kline_server.toml` 的 `[live]`：`msg_root`；`products`（`["*"]` 或空表示全部六个交易所的全部品种，也可以只列几个）；`min_refresh_ms`（请求触发刷新的最小间隔，默认 2000）；`background_s`（后台刷新周期，默认 5，0 为关闭）；`lookback_days`（默认 16）。不配置 `[live]` 则行为和以前完全一样。
+- **做法：** 用 `source::read_tail` 只读 NFS 文件里新增的完整行（残行留到下次），只保留配置品种的快照（内存里，重启后重读）。每个交易所各自加锁，另有后台任务每 `background_s` 秒追一次文件，所以请求基本都命中已追平的状态。每次请求对被查合约重跑盘后导出的同一条链：`process_instrument` → `synthesize_minutes` → `fill_session_minutes_with_twap` → 按 `session_as_of` 的时段快照裁剪。当天由所在交易所最新目录最后一行的 `TradDay` 决定，必须大于 `last_done`；`cn-daily` 处理完这一天后自动回到读 parquet。
+- **响应：**
+  - 来自 NFS 的 bar 带 `provisional = true`，不含 `size_buckets`（月度阈值要到月底才知道），其余字段和 parquet 同口径。
+  - `DataState.live_trading_day` 是当前补缺的交易日，`live_through_ms` 是 NFS 已追到的最新快照时间（UTC 毫秒）。`open_time + 60s <= live_through_ms` 的 bar 才算走完。NFS 是整点附近分批更新，所以这个时间会滞后于 ZMQ，客户端按它决定从哪里衔接。
+- **验证：** 用 `examples/live_check` 在已收盘的 20261116 和 20261113 上重建 SN，与生产 parquet 比对：共 11,128 根，成交、成交额、OHLC、twap、mid、买卖量逐值一致，缺失和多余都是 0（不做时段裁剪时会多出收盘快照那几分钟）。`examples/live_query` 查真实服务：首次请求读文件约 9 秒，之后约 46 毫秒。
+- **全品种实测（2026-11-17 10:40）：** 除 SN 外，另用 `live_check` 对 20261116 的 IF（中金所）、M（大商所）、CF（郑商所）、SC（能源中心）、SI（广期所）重建，共 19,590 根，与 parquet 逐值一致，缺失和多余为 0。全品种服务启动后约 70 秒预热完成（读六个交易所当天文件），内存约 7.7 GB，之后每次请求 10–70 毫秒。内存随当天快照数线性增长，夜盘加日盘跑满一整天预计是这个数的两到三倍；快照目前每行存两个 String，要省内存可以改成共享品种名。
+- **限制：** 盘中的最后几分钟随 NFS 追赶可能变化，盘后以 parquet 为准；没有 `size_buckets`。
+
 ## 主力合约（2026-11-16 上线）
 
 - **计算：** 全部用 Rust（`crates/cn/cn_futures_roll`）。`cn_futures_roll` 从通联行情提取日终截面，只读到上一个开市日的目录；`cn_roll_replay` 是 preprocess `cn_futures.roll_replay` 的 Rust 移植，默认规则 `local_rqdata_rule0`：持仓超过当前主力 1.1 倍、只切到更远的交割月、不切回。2019-01-01 到 2026-08-26 的 36 个历史输出文件与 Python 逐字节一致，两种规则都验证过。

@@ -445,17 +445,44 @@ fn collect_snapshots<R: Read>(
     let Some(columns) = Columns::from_header(&header) else {
         return Ok(());
     };
+    collect_rows(&mut csv, &columns, trad_day, file_order, 0, None, out)?;
+    Ok(())
+}
+
+/// Parses the data rows of one future-quote CSV into `out`. `row_base` is the
+/// number of data rows already consumed before this reader (so `source_row`
+/// stays the file-wide row number); `products` optionally keeps only those
+/// product ids (compared case-insensitively). Returns the rows consumed.
+fn collect_rows<R: Read>(
+    csv: &mut csv::Reader<R>,
+    columns: &Columns,
+    trad_day: NaiveDate,
+    file_order: u32,
+    row_base: u32,
+    products: Option<&[String]>,
+    out: &mut Vec<Snapshot>,
+) -> Result<u32> {
     if columns.is_combo {
-        return Ok(());
+        return Ok(0);
     }
+    let mut consumed = 0u32;
     for (offset, row) in csv.records().enumerate() {
         let row = row?;
-        let source_row = (offset + 1) as u32;
+        consumed = (offset + 1) as u32;
+        let source_row = row_base + consumed;
         let instrument = cell(&row, Some(columns.instrument)).trim();
         let Some(product) = product_id(instrument) else {
             continue;
         };
         if !is_maintained_product(&product) {
+            continue;
+        }
+        if products.is_some_and(|keep| {
+            !keep.is_empty()
+                && !keep
+                    .iter()
+                    .any(|p| p == "*" || p.eq_ignore_ascii_case(&product))
+        }) {
             continue;
         }
         let Some(trad_key) = compact_day(cell(&row, Some(columns.trad_day))) else {
@@ -501,7 +528,7 @@ fn collect_snapshots<R: Read>(
             ask_sizes: levels(&row, columns.ask_sizes),
         });
     }
-    Ok(())
+    Ok(consumed)
 }
 
 pub fn read_located_file(
@@ -533,6 +560,126 @@ pub fn read_located_file(
     }
     let file = File::open(&located.path).with_context(|| format!("open {:?}", located.path))?;
     collect_snapshots(BufReader::new(file), trad_day, file_order, out)
+}
+
+/// Read position inside one growing `msg` CSV: bytes consumed (always ending
+/// on a line boundary), data rows consumed, and the parsed header.
+#[derive(Debug, Default)]
+pub struct TailState {
+    offset: u64,
+    rows: u32,
+    columns: Option<Columns>,
+}
+
+const TAIL_CHUNK: usize = 64 << 20;
+
+/// Appends the snapshots of `trad_day` found in the complete lines written to
+/// `path` since the previous call. A trailing partial line is left for the
+/// next call; a file that shrank is re-read from the start (the caller must
+/// discard its earlier snapshots in that case, signalled by the `true`
+/// return). `products` keeps only those product ids.
+pub fn read_tail(
+    path: &Path,
+    trad_day: NaiveDate,
+    file_order: u32,
+    products: &[String],
+    state: &mut TailState,
+    out: &mut Vec<Snapshot>,
+) -> Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(path).with_context(|| format!("open {path:?}"))?;
+    let len = file.metadata()?.len();
+    let reset = len < state.offset;
+    if reset {
+        *state = TailState::default();
+    }
+    if state.columns.is_none() {
+        file.seek(SeekFrom::Start(0))?;
+        let mut head = Vec::new();
+        let mut reader = BufReader::new(&file);
+        std::io::BufRead::read_until(&mut reader, b'\n', &mut head)?;
+        if head.last() != Some(&b'\n') {
+            return Ok(reset);
+        }
+        let mut csv = ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(head.as_slice());
+        let header = csv.records().next().transpose()?.unwrap_or_default();
+        let Some(columns) = Columns::from_header(&header) else {
+            bail!("{path:?}: unrecognised MDL header");
+        };
+        state.columns = Some(columns);
+        state.offset = head.len() as u64;
+    }
+    let columns = state.columns.clone().expect("set above");
+    while state.offset < len {
+        file.seek(SeekFrom::Start(state.offset))?;
+        let want = ((len - state.offset) as usize).min(TAIL_CHUNK);
+        let mut buf = vec![0u8; want];
+        file.read_exact(&mut buf)?;
+        let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+            if want < TAIL_CHUNK {
+                break; // only a partial line so far
+            }
+            bail!("{path:?}: line longer than {TAIL_CHUNK} bytes");
+        };
+        buf.truncate(end + 1);
+        let mut csv = ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(buf.as_slice());
+        let n = collect_rows(
+            &mut csv,
+            &columns,
+            trad_day,
+            file_order,
+            state.rows,
+            Some(products),
+            out,
+        )?;
+        state.rows += n;
+        state.offset += buf.len() as u64;
+    }
+    Ok(reset)
+}
+
+/// Trading day of the last complete row of a `msg` CSV (reads only its tail).
+pub fn last_trad_day(path: &Path) -> Result<Option<NaiveDate>> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(path).with_context(|| format!("open {path:?}"))?;
+    let len = file.metadata()?.len();
+    let mut head = Vec::new();
+    std::io::BufRead::read_until(&mut BufReader::new(&file), b'\n', &mut head)?;
+    let mut csv = ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(head.as_slice());
+    let Some(header) = csv.records().next().transpose()? else {
+        return Ok(None);
+    };
+    let Some(columns) = Columns::from_header(&header) else {
+        return Ok(None);
+    };
+    let from = len.saturating_sub(1 << 20).max(head.len() as u64);
+    file.seek(SeekFrom::Start(from))?;
+    let mut buf = Vec::new();
+    file.take(len - from).read_to_end(&mut buf)?;
+    let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+        return Ok(None);
+    };
+    let start = buf[..end]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let mut csv = ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(&buf[start..=end]);
+    let Some(row) = csv.records().next().transpose()? else {
+        return Ok(None);
+    };
+    Ok(compact_day(cell(&row, Some(columns.trad_day)))
+        .and_then(|key| NaiveDate::parse_from_str(&key, "%Y%m%d").ok()))
 }
 
 fn collect_queues<R: Read>(
@@ -743,6 +890,53 @@ mod msg_directory_tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+    use std::io::Write;
+
+    const HEAD: &str =
+        "InstruID,TradDay,ActionDay,UpdateTime,Volume,Turnover,LastPrice,OpenInt,SeqNo\n";
+
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, 17).unwrap()
+    }
+
+    #[test]
+    fn tail_reads_only_complete_new_lines_and_filters_products() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("mdl_22_1_0.csv");
+        fs::write(&path, format!("{HEAD}sn2701,20261117,20261117,09:00:00.5,1,10,100,5,1\ncu2701,20261117,20261117,09:00:00.5,1,10,100,5,2\nsn2701,20261117,20261117,09:00:01,2,20,10")).unwrap();
+        let (mut st, mut out) = (TailState::default(), Vec::new());
+        let products = ["SN".to_string()];
+        assert!(!read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap());
+        assert_eq!(out.len(), 1, "partial line and other products skipped");
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"1,5,3\nsn2701,20261116,20261116,21:00:00,3,30,100,5,4\n")
+            .unwrap();
+        out.clear();
+        read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap();
+        assert_eq!(
+            out.len(),
+            1,
+            "completed line read once; other TradDay skipped"
+        );
+        assert_eq!(out[0].source_row, 3);
+        out.clear();
+        read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap();
+        assert!(out.is_empty(), "nothing new");
+        assert_eq!(
+            last_trad_day(&path).unwrap(),
+            Some(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap())
+        );
+        fs::write(&path, HEAD).unwrap();
+        assert!(
+            read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap(),
+            "shrunk file resets"
         );
     }
 }

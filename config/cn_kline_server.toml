@@ -15,3 +15,10 @@ directory = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/intraday_cache"
 msg_root = "/mnt/nfs/30.3_tonglian_msg"
 zmq_endpoint = "tcp://10.61.20.12:13005"
 retention_days = 7
+
+# In-progress trading day rebuilt from the NFS MDL files (no DB, no ZMQ), all products: fills
+# GetMinuteBars between the last archived day and what NFS has received.
+# Bars are `provisional`; DataState.live_through_ms says how far NFS has caught up.
+[live]
+msg_root = "/mnt/nfs/30.3_tonglian_msg"
+products = ["*"]

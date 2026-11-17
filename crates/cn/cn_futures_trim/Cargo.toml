@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 description = "Parallel materializer for continuous-session-only CN futures parquet"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "trim_cn_futures_continuous_sessions"
 path = "src/main.rs"

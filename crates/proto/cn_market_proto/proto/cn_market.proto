@@ -149,6 +149,10 @@ message MinuteBar {
   SizeBuckets size_buckets = 28;
   // Last two-sided 5-level book inside the minute; unset if none.
   optional Book5 book = 29;
+  // True for bars rebuilt from the in-progress day's NFS MDL files (not yet in
+  // the archive): the newest minutes can still change as NFS catches up and
+  // size_buckets is unset (monthly thresholds unknown until month end).
+  bool provisional = 30;
 }
 
 // Interval-turnover classes, NOT real order sizes: each inferred interval
@@ -199,4 +203,8 @@ message DataState {
   uint32 latest_trading_day = 2;
   // Continuous-session snapshot used to trim the archive.
   string session_snapshot_as_of = 3;
+  // In-progress trading day served from NFS MDL (0 if none) and the newest
+  // snapshot time (UTC ms) read for the requested exchange.
+  uint32 live_trading_day = 4;
+  int64 live_through_ms = 5;
 }
