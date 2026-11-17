@@ -24,6 +24,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Append an external investor-specific CTP query receipt, separate from OpenCTP.
+    ImportAccountRates {
+        file: PathBuf,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        broker: String,
+    },
+    /// Account rates known at an exact timestamp, or a bounded observation history.
+    AccountRates {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        venue: Option<String>,
+        #[arg(long)]
+        instrument: Option<String>,
+        #[arg(long)]
+        as_of: Option<String>,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        end: Option<String>,
+    },
     /// One guarded sync of fees and continuous sessions (the daily job).
     Sync {
         #[arg(long, default_value = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL")]
@@ -157,6 +180,42 @@ async fn run_sync(cli: &Cli, webhook_env: &str, secret_env: &str) -> Result<()> 
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
+        Cmd::ImportAccountRates {
+            file,
+            account,
+            broker,
+        } => {
+            let db = connect(&cli).await?;
+            let result =
+                cn_reference::account_rates::import(&db, &std::fs::read(file)?, account, broker)
+                    .await?;
+            println!("{}", result.dumps(false));
+            Ok(())
+        }
+        Cmd::AccountRates {
+            account,
+            venue,
+            instrument,
+            as_of,
+            start,
+            end,
+        } => {
+            let db = connect(&cli).await?;
+            let result = cn_reference::account_rates::query(
+                &db,
+                cn_reference::account_rates::Query {
+                    account,
+                    venue: venue.as_deref(),
+                    instrument: instrument.as_deref(),
+                    as_of: as_of.as_deref(),
+                    start: start.as_deref(),
+                    end: end.as_deref(),
+                },
+            )
+            .await?;
+            println!("{}", result.dumps(false));
+            Ok(())
+        }
         Cmd::Sync {
             dingtalk_webhook_env,
             dingtalk_secret_env,

@@ -36,9 +36,11 @@ scripts/market_replay_server.sh restart --execute   # 有任务在跑时会拒�
 
 | 路径 | 谁处理 |
 | --- | --- |
-| `GET /api/v1/{health,schema,data-state,trading-sessions,overview,exchanges/*,instruments/*/*,exports/exchange-info,exports/records.csv}` | Rust；响应与 Python 逐字节一致（键序、转义、`Cache-Control: no-store`、错误体 `{"error":{"status","message"}}`，数据错误 400、其他 500、未知 404） |
+| `GET /api/v1/{health,schema,data-state,trading-sessions,overview,exchanges/*,instruments/*/*,exports/exchange-info,exports/records.csv,account-rates}` | Rust；响应与 Python 逐字节一致（键序、转义、`Cache-Control: no-store`、错误体 `{"error":{"status","message"}}`，数据错误 400、其他 500、未知 404） |
 | `POST /api/v1/sync`、`POST /api/v1/trading-sessions/sync` | Rust；OpenCTP 抓取、解析、增量版本合并，返回 201（有新版本）或 200 |
 | 其余所有方法与路径（网页 `/`、公告、报单费规则、`/api/v1/fees/*`、`/import`、`/overrides/import` 等） | 原样转发给 `[reference].fallback`（`cn-reference-ui`，Python，127.0.0.1:18766）：方法、查询串、请求体、状态码、`Content-Type`、`Content-Disposition` 等头都保持；不可达时返回 502 |
+
+账户专属的手续费和保证金记录使用独立表 `account_rate_accounts` / `account_rate_observations`，通过 `cn-reference import-account-rates` 追加外部 CTP 成功查询回执，`GET /api/v1/account-rates` 按账户和观察时间查询；OpenCTP 公共记录不受影响。回测选择与历史时间语义见 [账户费率记录](cn_account_rates.md)。
 
 有意的差异：抓取失败的错误信息文字不同（Rust 用 reqwest，Python 用 urllib，其余字段相同，状态码都是 400）；连续时段在源里消失时，Rust 会写入 `is_active=false` 的墓碑版本（Python 的这条路径要把 dict 写进 JSONB 列，实际会报错，生产里还从没触发过：没有停用的时段）；`Decimal` 运算超过 28 位有效数字时 Python 会舍入，Rust 精确计算（OpenCTP 数据到不了这个长度）。
 

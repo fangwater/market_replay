@@ -19,6 +19,10 @@ curl -fsS http://127.0.0.1:8780/usage.md -o cn-cme-data-guide.md
 
 服务通过本机国内期货 PostgreSQL 16 实例的 Unix socket 连接 `market_metadata`，使用 `u171` peer 认证。项目数据只写入独立 schema `cn_futures_reference`，不会触碰 `public` 中已有的乘数和交易时段表。
 
+## 账户专属费率
+
+创元等账户的 CTP 查询结果独立存储和维护，不覆盖 OpenCTP 参考数据。接口为 `GET /api/v1/account-rates?account=...`，支持带时区的 `asOf` 和观察历史；导入由 Rust `cn-reference import-account-rates` 完成。回测可选择 `fee_policy = "account_snapshot"`。数据粒度、时间语义及操作说明见 [账户费率记录](../docs/cn_account_rates.md)。
+
 ## 增量存储
 
 OpenCTP 同步不保存整表快照，也不归档其整页 HTML。每个合约的每个不同状态是一条增量版本：
@@ -97,6 +101,7 @@ PYTHON_BIN=/home/fanghaizhou/market_replay/reference/.venv/bin/python
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
+| GET | `/api/v1/account-rates` | 独立账户手续费/保证金，按观察时间查询 |
 | GET | `/api/v1/health` | 健康检查 |
 | GET | `/api/v1/data-state?asOf=YYYY-MM-DD` | 增量数据状态 |
 | GET | `/api/v1/trading-sessions?asOf=YYYY-MM-DD&venue=CFFEX&product=IF` | 连续竞价时段 |

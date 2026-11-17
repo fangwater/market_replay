@@ -1,6 +1,7 @@
 //! CN futures reference data: OpenCTP fee / margin / tick table and
 //! continuous-session sync into an incremental PostgreSQL store, plus the
 //! `/api/v1` HTTP API (see `docs/market_replay_server.md`).
+pub mod account_rates;
 pub mod api;
 pub mod dec;
 pub mod json;

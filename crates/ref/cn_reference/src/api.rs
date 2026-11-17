@@ -155,6 +155,22 @@ async fn get_api(
             ("sourceType", J::s(SOURCE_TYPE)),
         ])),
         "/api/v1/schema" => ok(schema_json()),
+        "/api/v1/account-rates" => match value("account") {
+            Some(account) => crate::account_rates::query(
+                db,
+                crate::account_rates::Query {
+                    account,
+                    venue: value("venue"),
+                    instrument: value("instrument"),
+                    as_of,
+                    start: value("start"),
+                    end: value("end"),
+                },
+            )
+            .await
+            .and_then(ok),
+            None => crate::models::data_error("account is required for account-rate queries"),
+        },
         "/api/v1/data-state" => db.data_state(as_of).await.and_then(ok),
         "/api/v1/trading-sessions" => {
             match services::continuous_sessions(db, as_of, value("venue"), value("product")).await {
@@ -234,6 +250,7 @@ async fn get_api(
 
 fn schema_json() -> J {
     let endpoints = [
+        "GET /api/v1/account-rates",
         "GET /api/v1/overview",
         "GET /api/v1/data-state",
         "GET /api/v1/exchanges/{venue}",

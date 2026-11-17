@@ -121,6 +121,28 @@ impl Metadata {
         if let Some(path) = &cfg.metadata_file {
             let m: Self = serde_json::from_reader(std::fs::File::open(path)?)?;
             m.validate()?;
+            if cfg.fee_policy == "account_snapshot" {
+                ensure!(
+                    m.provenance["fee_policy"] == "account_snapshot"
+                        && m.provenance["account_rates"]["accountKey"].as_str()
+                            == cfg.fee_account.as_deref(),
+                    "frozen metadata does not contain the requested account fee source"
+                );
+                let actual = chrono::DateTime::parse_from_rfc3339(
+                    m.provenance["account_rates"]["asOf"]
+                        .as_str()
+                        .context("frozen account metadata omitted asOf")?,
+                )?;
+                let requested = chrono::DateTime::parse_from_rfc3339(
+                    cfg.fee_as_of
+                        .as_deref()
+                        .context("account_snapshot requires fee_as_of")?,
+                )?;
+                ensure!(
+                    actual == requested,
+                    "frozen account metadata has another fee_as_of"
+                );
+            }
             return Ok(m);
         }
         let client = reqwest::blocking::Client::builder()
@@ -139,6 +161,54 @@ impl Metadata {
             .send()?
             .error_for_status()?
             .json()?;
+        let account_snapshot: Option<Value> = if cfg.fee_policy == "account_snapshot" {
+            Some(
+                client
+                    .get(format!("{}/account-rates", cfg.reference_api))
+                    .query(&[
+                        (
+                            "account",
+                            cfg.fee_account
+                                .as_deref()
+                                .context("account_snapshot requires fee_account")?,
+                        ),
+                        (
+                            "asOf",
+                            cfg.fee_as_of
+                                .as_deref()
+                                .context("account_snapshot requires fee_as_of")?,
+                        ),
+                    ])
+                    .send()?
+                    .error_for_status()?
+                    .json()?,
+            )
+        } else {
+            None
+        };
+        let mut account_rates = BTreeMap::new();
+        if let Some(snapshot) = &account_snapshot {
+            ensure!(
+                snapshot["sourceType"] == "CTP_ACCOUNT_QUERY"
+                    && snapshot["accountKey"].as_str() == cfg.fee_account.as_deref(),
+                "account rate response has the wrong source or account"
+            );
+            for row in snapshot["rates"]
+                .as_array()
+                .context("missing account rate rows")?
+            {
+                let venue = row["venue"].as_str().context("account rate venue")?;
+                let instrument = row["instrumentId"]
+                    .as_str()
+                    .context("account rate instrument")?;
+                ensure!(
+                    account_rates
+                        .insert((venue.to_string(), instrument.to_string()), row)
+                        .is_none(),
+                    "duplicate account rate contract"
+                );
+            }
+        }
         let mut windows: BTreeMap<String, Vec<Window>> = BTreeMap::new();
         for r in sessions["sessions"]
             .as_array()
@@ -215,13 +285,26 @@ impl Metadata {
                     fees: match cfg.fee_policy.as_str() {
                         "zero" => Some(Fees::default()),
                         "unknown" => None,
+                        "account_snapshot" => account_rates
+                            .get(&(venue.to_string(), contract.to_string()))
+                            .and_then(|row| fees(&row["fees"])),
                         _ => fees(&r["fees"]),
                     },
-                    fee_source: format!(
-                        "{}:{}",
-                        cfg.fee_policy,
-                        r["sourceDate"].as_str().unwrap_or("unknown")
-                    ),
+                    fee_source: if cfg.fee_policy == "account_snapshot" {
+                        let row = account_rates.get(&(venue.to_string(), contract.to_string()));
+                        format!(
+                            "account_snapshot:{}:{}",
+                            cfg.fee_account.as_deref().unwrap_or_default(),
+                            row.and_then(|r| r["observedAt"].as_str())
+                                .unwrap_or("missing")
+                        )
+                    } else {
+                        format!(
+                            "{}:{}",
+                            cfg.fee_policy,
+                            r["sourceDate"].as_str().unwrap_or("unknown")
+                        )
+                    },
                     windows: w.clone(),
                 };
                 let canonical = mdl_replay::line::canonical_contract(
@@ -242,6 +325,13 @@ impl Metadata {
                 s.fees = None;
                 s.fee_source = "ambiguous_product_fees".into();
             }
+            if cfg.fee_policy == "account_snapshot" {
+                s.fees = None;
+                s.fee_source = format!(
+                    "account_snapshot:{}:contract_required",
+                    cfg.fee_account.as_deref().unwrap_or_default()
+                );
+            }
             products.insert(p, s);
         }
         let m = Self {
@@ -249,7 +339,7 @@ impl Metadata {
             historical_exact: false,
             products,
             contracts,
-            provenance: serde_json::json!({"overview":overview,"sessions":sessions,"multiplier_source":"market_metadata.public.domestic_future_product_multipliers","fee_policy":cfg.fee_policy}),
+            provenance: serde_json::json!({"overview":overview,"sessions":sessions,"multiplier_source":"market_metadata.public.domestic_future_product_multipliers","fee_policy":cfg.fee_policy,"account_rates":account_snapshot}),
         };
         m.validate()?;
         Ok(m)
@@ -281,11 +371,14 @@ impl Metadata {
         Ok(())
     }
     pub fn spec(&self, c: &str) -> Result<Spec> {
-        self.contracts
+        let spec = self
+            .contracts
             .get(&c.to_ascii_lowercase())
             .or_else(|| self.products.get(&crate::product(c)))
             .cloned()
-            .with_context(|| format!("missing verified multiplier/tick/session for {c}"))
+            .with_context(|| format!("missing verified multiplier/tick/session for {c}"))?;
+        ensure!(!spec.fee_source.starts_with("account_snapshot:") || spec.fees.is_some(), "missing account-specific fee observation for {c}; choose an observed contract or another explicit fee policy");
+        Ok(spec)
     }
 }
 
@@ -331,5 +424,58 @@ impl Dominants {
             dir.display()
         );
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    fn metadata() -> Metadata {
+        let mut s = Spec {
+            product: "SN".into(),
+            exchange: "xsge".into(),
+            venue: "SHFE".into(),
+            multiplier: 1.,
+            tick: 10.,
+            fees: Some(Fees::default()),
+            fee_source: "account_snapshot:test_account:2026-11-17T02:35:56Z".into(),
+            windows: vec![Window {
+                begin: 9 * 3600,
+                end: 15 * 3600,
+            }],
+        };
+        let contracts = BTreeMap::from([("sn2612".into(), s.clone())]);
+        s.fees = None;
+        s.fee_source = "account_snapshot:test_account:contract_required".into();
+        Metadata {
+            reference_as_of: "2026-11-17".into(),
+            historical_exact: false,
+            products: BTreeMap::from([("SN".into(), s)]),
+            contracts,
+            provenance: serde_json::json!({"fee_policy":"reference_snapshot"}),
+        }
+    }
+    #[test]
+    fn account_fees_cannot_fall_back_to_another_delivery_month() {
+        let m = metadata();
+        assert!(m.spec("sn2612").unwrap().fees.is_some());
+        assert!(m.spec("sn2701").is_err());
+    }
+    #[test]
+    fn selecting_account_fees_rejects_frozen_openctp_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("metadata.json");
+        serde_json::to_writer(std::fs::File::create(&path).unwrap(), &metadata()).unwrap();
+        let cfg = Config {
+            fee_policy: "account_snapshot".into(),
+            fee_account: Some("test_account".into()),
+            fee_as_of: Some("2026-11-17T04:00:00Z".into()),
+            metadata_file: Some(path),
+            ..Config::default()
+        };
+        assert!(Metadata::load(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("requested account fee source"));
     }
 }

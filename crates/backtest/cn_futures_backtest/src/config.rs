@@ -38,6 +38,8 @@ pub struct Config {
     pub reference_as_of: String,
     /// An explicit reference snapshot is an assumption, not historical exact fees.
     pub fee_policy: String,
+    pub fee_account: Option<String>,
+    pub fee_as_of: Option<String>,
     pub metadata_file: Option<PathBuf>,
     pub output_root: PathBuf,
     pub replay_speed: f64,
@@ -75,6 +77,8 @@ impl Default for Config {
             reference_api: "http://127.0.0.1:8765/api/v1".into(),
             reference_as_of: "2026-11-17".into(),
             fee_policy: "reference_snapshot".into(),
+            fee_account: None,
+            fee_as_of: None,
             metadata_file: None,
             output_root: "/mnt/nvme-raid0-28t/fanghaizhou/backtest".into(),
             replay_speed: 0.0,
@@ -172,9 +176,27 @@ impl Config {
             "unknown input_mode"
         );
         ensure!(
-            ["reference_snapshot", "unknown", "zero"].contains(&self.fee_policy.as_str()),
+            ["reference_snapshot", "account_snapshot", "unknown", "zero"]
+                .contains(&self.fee_policy.as_str()),
             "unknown fee_policy"
         );
+        if self.fee_policy == "account_snapshot" {
+            ensure!(
+                self.fee_account.as_deref().is_some_and(|s| !s.is_empty()),
+                "account_snapshot requires fee_account"
+            );
+            chrono::DateTime::parse_from_rfc3339(
+                self.fee_as_of
+                    .as_deref()
+                    .context("account_snapshot requires fee_as_of")?,
+            )
+            .context("fee_as_of requires a timezone-qualified timestamp")?;
+        } else {
+            ensure!(
+                self.fee_account.is_none() && self.fee_as_of.is_none(),
+                "fee_account/fee_as_of require account_snapshot"
+            );
+        }
         ensure!(
             self.reprice_ms > 0 && self.max_child_lots > 0 && self.quote_age_ms > 0,
             "positive reprice_ms, child lots and quote age required"
