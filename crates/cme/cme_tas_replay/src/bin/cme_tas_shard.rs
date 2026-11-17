@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use cme_tas_replay::shard::{
     period_dir_name, shard_file_name, CsvGroup, TasShardEntry, TasShardManifest, TasShardSource,
-    SHARD_MANIFEST_VERSION,
+    ZstdShardWriter, SHARD_MANIFEST_VERSION,
 };
 use cme_tas_replay::validate_period;
 use csv::StringRecord;
@@ -13,14 +13,12 @@ use rayon::ThreadPoolBuilder;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use zstd::stream::write::Encoder as ZstdEncoder;
 
 const INPUT_BUFFER_BYTES: usize = 16 * 1024 * 1024;
-const OUTPUT_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(name = "cme_tas_shard")]
@@ -88,13 +86,9 @@ struct SourceResult {
 }
 
 struct OpenShard {
-    final_path: PathBuf,
-    partial_path: PathBuf,
+    writer: ZstdShardWriter,
     original_part: u16,
     shard_index: u32,
-    encoder: ZstdEncoder<'static, BufWriter<File>>,
-    rows: u64,
-    data_bytes: u64,
     first_group: CsvGroup,
 }
 
@@ -107,85 +101,37 @@ impl OpenShard {
         first_group: CsvGroup,
         zstd_level: i32,
     ) -> Result<Self> {
-        let file_name = shard_file_name(original_part, shard_index);
-        let final_path = output_dir.join(&file_name);
-        let partial_path = output_dir.join(format!("{file_name}.partial"));
-        let file = File::create(&partial_path)
-            .with_context(|| format!("create TAS shard {}", partial_path.display()))?;
-        let writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
-        let mut encoder = ZstdEncoder::new(writer, zstd_level)
-            .with_context(|| format!("create zstd encoder for {}", partial_path.display()))?;
-        encoder
-            .include_checksum(true)
-            .with_context(|| format!("enable zstd checksum for {}", partial_path.display()))?;
-        encoder
-            .write_all(header_bytes)
-            .with_context(|| format!("write TAS header to {}", partial_path.display()))?;
-        if !header_bytes.ends_with(b"\n") {
-            encoder.write_all(b"\n")?;
-        }
+        let final_path = output_dir.join(shard_file_name(original_part, shard_index));
         Ok(Self {
-            final_path,
-            partial_path,
+            writer: ZstdShardWriter::create(final_path, header_bytes, zstd_level)?,
             original_part,
             shard_index,
-            encoder,
-            rows: 0,
-            data_bytes: 0,
             first_group,
         })
     }
 
+    fn rows(&self) -> u64 {
+        self.writer.rows
+    }
+
     fn write_row(&mut self, row: &[u8]) -> Result<()> {
-        self.encoder
-            .write_all(row)
-            .with_context(|| format!("write TAS shard {}", self.partial_path.display()))?;
-        self.rows = self
-            .rows
-            .checked_add(1)
-            .context("TAS shard row count overflow")?;
-        self.data_bytes = self
-            .data_bytes
-            .checked_add(row.len() as u64)
-            .context("TAS shard byte count overflow")?;
-        Ok(())
+        self.writer.write_row(row)
     }
 
     fn finish(self, last_group: CsvGroup) -> Result<TasShardEntry> {
-        let mut writer = self
-            .encoder
-            .finish()
-            .with_context(|| format!("finish zstd shard {}", self.partial_path.display()))?;
-        writer
-            .flush()
-            .with_context(|| format!("flush zstd shard {}", self.partial_path.display()))?;
-        writer
-            .get_ref()
-            .sync_data()
-            .with_context(|| format!("sync zstd shard {}", self.partial_path.display()))?;
-        drop(writer);
-        fs::rename(&self.partial_path, &self.final_path).with_context(|| {
-            format!(
-                "publish TAS shard {} -> {}",
-                self.partial_path.display(),
-                self.final_path.display()
-            )
-        })?;
-        let compressed_bytes = fs::metadata(&self.final_path)
-            .with_context(|| format!("stat TAS shard {}", self.final_path.display()))?
-            .len();
+        let written = self.writer.finish()?;
         Ok(TasShardEntry {
-            file: self
+            file: written
                 .final_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow!("non-UTF8 TAS shard path {}", self.final_path.display()))?
+                .ok_or_else(|| anyhow!("non-UTF8 TAS shard path {}", written.final_path.display()))?
                 .to_string(),
             original_part: self.original_part,
             shard_index: self.shard_index,
-            rows: self.rows,
-            data_bytes: self.data_bytes,
-            compressed_bytes,
+            rows: written.rows,
+            data_bytes: written.data_bytes,
+            compressed_bytes: written.compressed_bytes,
             first_group: self.first_group,
             last_group,
         })
@@ -412,7 +358,7 @@ fn shard_source(job: &SourceJob, config: &ShardConfig) -> Result<SourceResult> {
             .checked_add(line.len() as u64)
             .context("TAS source byte count overflow")?;
 
-        if writer.rows >= config.rows_per_shard && pending_cut_group.is_none() {
+        if writer.rows() >= config.rows_per_shard && pending_cut_group.is_none() {
             pending_cut_group = Some(match parsed_group.take() {
                 Some(group) => group,
                 None => parse_group(&line, job.group_columns)?,
@@ -659,7 +605,7 @@ mod tests {
     use super::*;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use tempfile::TempDir;
 
     #[test]

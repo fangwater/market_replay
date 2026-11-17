@@ -2,11 +2,112 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use zstd::stream::write::Encoder as ZstdEncoder;
+
+const SHARD_OUTPUT_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 pub const SHARD_MANIFEST_VERSION: u32 = 1;
 pub const SHARD_MANIFEST_FILE: &str = "manifest.json";
+
+/// A zstd CSV shard being written: header line first, then rows. The bytes
+/// written are `zstd(level, checksum)` of `header [+ "\n"] + rows`, published by
+/// rename only after `sync_data`. Shared by `cme_tas_shard` and the LSEG L2
+/// slicer (`lseg_l2_slice`) so both produce shards the same way.
+pub struct ZstdShardWriter {
+    final_path: PathBuf,
+    partial_path: PathBuf,
+    encoder: ZstdEncoder<'static, BufWriter<File>>,
+    pub rows: u64,
+    pub data_bytes: u64,
+}
+
+/// What `ZstdShardWriter::finish` reports.
+pub struct ShardWritten {
+    pub final_path: PathBuf,
+    pub rows: u64,
+    pub data_bytes: u64,
+    pub compressed_bytes: u64,
+}
+
+impl ZstdShardWriter {
+    pub fn create(final_path: PathBuf, header_bytes: &[u8], zstd_level: i32) -> Result<Self> {
+        let file_name = final_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("shard path has no UTF-8 file name")?
+            .to_string();
+        let partial_path = final_path.with_file_name(format!("{file_name}.partial"));
+        let file = File::create(&partial_path)
+            .with_context(|| format!("create shard {}", partial_path.display()))?;
+        let writer = BufWriter::with_capacity(SHARD_OUTPUT_BUFFER_BYTES, file);
+        let mut encoder = ZstdEncoder::new(writer, zstd_level)
+            .with_context(|| format!("create zstd encoder for {}", partial_path.display()))?;
+        encoder
+            .include_checksum(true)
+            .with_context(|| format!("enable zstd checksum for {}", partial_path.display()))?;
+        encoder
+            .write_all(header_bytes)
+            .with_context(|| format!("write header to {}", partial_path.display()))?;
+        if !header_bytes.ends_with(b"\n") {
+            encoder.write_all(b"\n")?;
+        }
+        Ok(Self {
+            final_path,
+            partial_path,
+            encoder,
+            rows: 0,
+            data_bytes: 0,
+        })
+    }
+
+    pub fn write_row(&mut self, row: &[u8]) -> Result<()> {
+        self.encoder
+            .write_all(row)
+            .with_context(|| format!("write shard {}", self.partial_path.display()))?;
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .context("shard row count overflow")?;
+        self.data_bytes = self
+            .data_bytes
+            .checked_add(row.len() as u64)
+            .context("shard byte count overflow")?;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<ShardWritten> {
+        let mut writer = self
+            .encoder
+            .finish()
+            .with_context(|| format!("finish zstd shard {}", self.partial_path.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("flush zstd shard {}", self.partial_path.display()))?;
+        writer
+            .get_ref()
+            .sync_data()
+            .with_context(|| format!("sync zstd shard {}", self.partial_path.display()))?;
+        drop(writer);
+        std::fs::rename(&self.partial_path, &self.final_path).with_context(|| {
+            format!(
+                "publish shard {} -> {}",
+                self.partial_path.display(),
+                self.final_path.display()
+            )
+        })?;
+        let compressed_bytes = std::fs::metadata(&self.final_path)
+            .with_context(|| format!("stat shard {}", self.final_path.display()))?
+            .len();
+        Ok(ShardWritten {
+            final_path: self.final_path,
+            rows: self.rows,
+            data_bytes: self.data_bytes,
+            compressed_bytes,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CsvGroup {
@@ -289,5 +390,56 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("splits group"));
+    }
+}
+
+#[cfg(test)]
+mod zstd_writer_tests {
+    use super::*;
+    use std::io::Read;
+
+    /// The shared writer must emit exactly the bytes the original inline
+    /// `cme_tas_shard` code produced: zstd(level, checksum) of header [+ \n] + rows.
+    #[test]
+    fn shared_shard_writer_matches_the_original_inline_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        for (header, level) in [(&b"#RIC,Date-Time\n"[..], 1), (&b"#RIC,Date-Time"[..], 3)] {
+            let rows: Vec<Vec<u8>> = (0..1000)
+                .map(|i| format!("R{},2026-11-09T00:00:{:02}Z\n", i % 7, i % 60).into_bytes())
+                .collect();
+            let path = dir.path().join(format!("w{level}.csv.zst"));
+            let mut w = ZstdShardWriter::create(path.clone(), header, level).unwrap();
+            for r in &rows {
+                w.write_row(r).unwrap();
+            }
+            let written = w.finish().unwrap();
+            assert_eq!(written.rows, 1000);
+            assert!(!path
+                .with_file_name(format!("w{level}.csv.zst.partial"))
+                .exists());
+
+            // the original sequence of calls
+            let mut buf = Vec::new();
+            let mut enc = ZstdEncoder::new(&mut buf, level).unwrap();
+            enc.include_checksum(true).unwrap();
+            enc.write_all(header).unwrap();
+            if !header.ends_with(b"\n") {
+                enc.write_all(b"\n").unwrap();
+            }
+            for r in &rows {
+                enc.write_all(r).unwrap();
+            }
+            enc.finish().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), buf);
+            assert_eq!(written.compressed_bytes, buf.len() as u64);
+
+            let mut text = String::new();
+            zstd::stream::read::Decoder::new(File::open(&path).unwrap())
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert!(text.starts_with("#RIC,Date-Time\n"));
+            assert_eq!(text.lines().count(), 1001);
+        }
     }
 }

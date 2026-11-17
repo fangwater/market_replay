@@ -69,6 +69,9 @@ pub type Book = [f64; BOOK_FIELDS];
 pub struct Params {
     pub freq_ns: i64,
     pub gap_ns: i64,
+    /// Always true in production; `false` only for the `profile` stage that
+    /// measures time stamp parsing and bucketing without the book parse.
+    pub parse_books: bool,
 }
 impl Params {
     /// `freq_ms` must divide one UTC day so that the grid repeats every day.
@@ -82,7 +85,13 @@ impl Params {
         Ok(Self {
             freq_ns: freq_ms as i64 * 1_000_000,
             gap_ns: gap_s as i64 * 1_000_000_000,
+            parse_books: true,
         })
+    }
+    /// Profiling only: skip parsing the book of a finished grid point (no rows).
+    pub fn without_book_parse(mut self) -> Self {
+        self.parse_books = false;
+        self
     }
     pub fn file_name(&self) -> String {
         format!("l2_{}ms.parquet", self.freq_ns / 1_000_000)
@@ -122,19 +131,24 @@ pub fn day_number(day: &str) -> Result<i64> {
     Ok(days_from_civil(y, m, d))
 }
 
-struct TsParser {
+pub struct TsParser {
     date: [u8; 10],
     days: i64,
 }
+impl Default for TsParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl TsParser {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             date: [0; 10],
             days: 0,
         }
     }
     /// `YYYY-MM-DDTHH:MM:SS[.f{1,9}]Z` -> UTC nanoseconds.
-    fn parse(&mut self, s: &[u8]) -> Result<i64> {
+    pub fn parse(&mut self, s: &[u8]) -> Result<i64> {
         ensure!(
             s.len() >= 20
                 && s[10] == b'T'
@@ -178,7 +192,7 @@ impl TsParser {
     }
 }
 
-fn parse_book(line: &[u8], out: &mut Book) -> Result<()> {
+pub fn parse_book(line: &[u8], out: &mut Book) -> Result<()> {
     ensure!(!line.contains(&b'"'), "quoted fields are not supported");
     let mut n = 0usize;
     for (i, f) in line.split(|b| *b == b',').enumerate() {
@@ -249,6 +263,20 @@ pub struct RicStats {
     pub last_update_ns: i64,
 }
 
+/// Discards every row (profiling).
+pub struct NullSink;
+impl Sink for NullSink {
+    fn begin_ric(&mut self, _: &str) -> Result<bool> {
+        Ok(true)
+    }
+    fn row(&mut self, _: u64, _: u64, _: bool, _: &Book) -> Result<()> {
+        Ok(())
+    }
+    fn end_ric(&mut self, _: &RicStats) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub trait Sink {
     /// `false` = skip this RIC (its rows are not parsed).
     fn begin_ric(&mut self, ric: &str) -> Result<bool>;
@@ -256,7 +284,6 @@ pub trait Sink {
     fn end_ric(&mut self, stats: &RicStats) -> Result<()>;
 }
 
-#[derive(Default)]
 struct Open {
     ric: String,
     wanted: bool,
@@ -266,10 +293,34 @@ struct Open {
     bucket_anchor: bool,
     line: Vec<u8>,
     line_t: i64,
+    /// Updates decoded from the RocksDB carry their book; text rows keep the line.
+    pbook: Book,
+    has_pbook: bool,
     has_bucket: bool,
     emitted: Option<Book>,
     session_first_g: i64,
     session_last_g: i64,
+}
+
+impl Default for Open {
+    fn default() -> Self {
+        Self {
+            ric: String::new(),
+            wanted: false,
+            stats: RicStats::default(),
+            prev_t: None,
+            bucket: 0,
+            bucket_anchor: false,
+            line: Vec::new(),
+            line_t: 0,
+            pbook: [f64::NAN; BOOK_FIELDS],
+            has_pbook: false,
+            has_bucket: false,
+            emitted: None,
+            session_first_g: 0,
+            session_last_g: 0,
+        }
+    }
 }
 
 fn finish_bucket(o: &mut Open, p: &Params, sink: &mut dyn Sink, book: &mut Book) -> Result<()> {
@@ -277,9 +328,13 @@ fn finish_bucket(o: &mut Open, p: &Params, sink: &mut dyn Sink, book: &mut Book)
         return Ok(());
     }
     o.stats.buckets += 1;
-    if o.wanted {
-        parse_book(&o.line, book)
-            .with_context(|| format!("RIC {} at update {}", o.ric, o.line_t))?;
+    if o.wanted && p.parse_books {
+        if o.has_pbook {
+            *book = o.pbook;
+        } else {
+            parse_book(&o.line, book)
+                .with_context(|| format!("RIC {} at update {}", o.ric, o.line_t))?;
+        }
         let changed = o.emitted.as_ref().is_none_or(|e| !same(e, book));
         if changed || o.bucket_anchor {
             sink.row(
@@ -308,6 +363,90 @@ fn close_ric(o: &mut Open, p: &Params, sink: &mut dyn Sink, book: &mut Book) -> 
         sink.end_ric(&o.stats)?;
     }
     Ok(())
+}
+
+/// Bookkeeping of one update (time order, grid bucket, session, counters).
+/// The caller then stores the update's book (text line or decoded book).
+fn register_update(
+    o: &mut Open,
+    t: i64,
+    p: &Params,
+    sink: &mut dyn Sink,
+    book: &mut Book,
+) -> Result<()> {
+    if let Some(prev) = o.prev_t {
+        ensure!(
+            t >= prev,
+            "RIC {}: Date-Time goes backwards ({t} < {prev})",
+            o.ric
+        );
+    }
+    let g = (t + p.freq_ns - 1).div_euclid(p.freq_ns);
+    let first_ever = o.prev_t.is_none();
+    let after_gap = o.prev_t.is_some_and(|prev| t - prev >= p.gap_ns);
+    if o.has_bucket && g != o.bucket {
+        finish_bucket(o, p, sink, book)?;
+    }
+    if first_ever {
+        o.stats.first_update_ns = t;
+        o.session_first_g = g;
+        o.stats.sessions = 1;
+    } else if after_gap {
+        o.stats.active_grid_points += (o.session_last_g - o.session_first_g + 1) as u64;
+        o.session_first_g = g;
+        o.stats.sessions += 1;
+    }
+    if !o.has_bucket {
+        o.has_bucket = true;
+        o.bucket = g;
+        o.bucket_anchor = first_ever || after_gap;
+    }
+    o.session_last_g = g;
+    o.stats.updates += 1;
+    o.stats.last_update_ns = t;
+    o.prev_t = Some(t);
+    Ok(())
+}
+
+/// One RIC being sliced from already decoded updates (the RocksDB extract).
+pub struct RicRun {
+    open: Open,
+    book: Book,
+}
+
+impl RicRun {
+    pub fn new(ric: &str, sink: &mut dyn Sink) -> Result<Self> {
+        let wanted = sink.begin_ric(ric)?;
+        Ok(Self {
+            open: Open {
+                ric: ric.to_string(),
+                wanted,
+                stats: RicStats {
+                    ric: ric.to_string(),
+                    ..Default::default()
+                },
+                has_pbook: true,
+                ..Default::default()
+            },
+            book: [f64::NAN; BOOK_FIELDS],
+        })
+    }
+    /// False when the sink skips this RIC (existing output): no need to decode.
+    pub fn wanted(&self) -> bool {
+        self.open.wanted
+    }
+    pub fn update(&mut self, t: i64, book: &Book, p: &Params, sink: &mut dyn Sink) -> Result<()> {
+        register_update(&mut self.open, t, p, sink, &mut self.book)?;
+        if self.open.wanted {
+            self.open.pbook = *book;
+            self.open.line_t = t;
+        }
+        Ok(())
+    }
+    pub fn finish(mut self, p: &Params, sink: &mut dyn Sink) -> Result<RicStats> {
+        close_ric(&mut self.open, p, sink, &mut self.book)?;
+        Ok(self.open.stats)
+    }
 }
 
 /// Streams one source file (UTC day `day_start_ns .. +DAY_NS`) through `sink`.
@@ -386,39 +525,7 @@ pub fn slice_stream<R: BufRead>(
             open.ric,
             String::from_utf8_lossy(ts_b)
         );
-        if let Some(prev) = open.prev_t {
-            ensure!(
-                t >= prev,
-                "RIC {}: Date-Time goes backwards ({})",
-                open.ric,
-                String::from_utf8_lossy(ts_b)
-            );
-        }
-        let g = (t + p.freq_ns - 1).div_euclid(p.freq_ns);
-        let first_ever = open.prev_t.is_none();
-        let after_gap = open.prev_t.is_some_and(|prev| t - prev >= p.gap_ns);
-        if open.has_bucket && g != open.bucket {
-            finish_bucket(&mut open, p, sink, &mut book)?;
-        }
-        if first_ever {
-            open.stats.first_update_ns = t;
-            open.session_first_g = g;
-            open.stats.sessions = 1;
-        } else if after_gap {
-            open.stats.active_grid_points +=
-                (open.session_last_g - open.session_first_g + 1) as u64;
-            open.session_first_g = g;
-            open.stats.sessions += 1;
-        }
-        if !open.has_bucket {
-            open.has_bucket = true;
-            open.bucket = g;
-            open.bucket_anchor = first_ever || after_gap;
-        }
-        open.session_last_g = g;
-        open.stats.updates += 1;
-        open.stats.last_update_ns = t;
-        open.prev_t = Some(t);
+        register_update(&mut open, t, p, sink, &mut book)?;
         if open.wanted {
             open.line.clear();
             open.line.extend_from_slice(&line);
@@ -553,7 +660,7 @@ impl Builders {
 /// Where a RIC's rows go and which exchange directory it belongs to.
 pub struct Layout {
     pub out_root: PathBuf,
-    pub exchange_of: BTreeMap<String, String>,
+    pub exchange_of: Arc<BTreeMap<String, String>>,
     pub default_exchange: Option<String>,
     pub day: String,
     pub force: bool,
@@ -954,7 +1061,7 @@ mod tests {
             let t = tempfile::tempdir().unwrap();
             let layout = Layout {
                 out_root: t.path().to_path_buf(),
-                exchange_of: BTreeMap::new(),
+                exchange_of: Arc::new(BTreeMap::new()),
                 default_exchange: Some("cme".into()),
                 day: day(),
                 force: false,

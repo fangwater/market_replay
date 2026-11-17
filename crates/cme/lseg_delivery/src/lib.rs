@@ -1,4 +1,8 @@
 pub mod catalog;
+pub mod l2_batch;
+pub mod l2_db;
+pub mod l2_extract;
+pub mod l2_layout;
 pub mod l2_slice;
 pub mod limits;
 pub mod merge;
