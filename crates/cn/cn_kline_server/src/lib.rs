@@ -28,6 +28,7 @@ use tonic::{Request, Response, Status};
 pub mod dominant;
 pub mod intraday;
 pub mod live;
+pub mod live_seg;
 
 /// A time-range request may span at most this many calendar days.
 const MAX_RANGE_DAYS: i64 = 31;
@@ -741,11 +742,31 @@ pub async fn components(cfg: Config) -> Result<Components> {
             let live = Arc::new(live::Live::new(live_cfg, Arc::new(sessions)));
             if period > 0 {
                 let (live, state_file) = (live.clone(), cfg.daily_state_file.clone());
+                let meta = meta.clone();
                 tokio::spawn(async move {
                     loop {
-                        let (l, f) = (live.clone(), state_file.clone());
-                        match tokio::task::spawn_blocking(move || l.refresh_all(last_done(&f)))
-                            .await
+                        let (l, f, m) = (live.clone(), state_file.clone(), meta.clone());
+                        match tokio::task::spawn_blocking(move || {
+                            let multiplier = |product: &str| {
+                                m.read().ok().and_then(|g| {
+                                    g.multipliers
+                                        .get(product)
+                                        .filter(|x| {
+                                            x.verified
+                                                && x.volume_multiple.is_finite()
+                                                && x.volume_multiple > 0.0
+                                        })
+                                        .map(|x| x.volume_multiple)
+                                })
+                            };
+                            l.refresh_all(
+                                last_done(&f),
+                                &live::Finalizer {
+                                    multiplier: &multiplier,
+                                },
+                            )
+                        })
+                        .await
                         {
                             Ok(errors) => errors
                                 .iter()

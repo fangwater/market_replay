@@ -571,6 +571,27 @@ pub struct TailState {
     columns: Option<Columns>,
 }
 
+impl TailState {
+    /// Resume reading at a stored position: `offset` must be a line start and
+    /// `rows` the number of data rows before it (so `source_row` stays the
+    /// file-wide row number). The header is read again on the first call.
+    pub fn resume_at(offset: u64, rows: u32) -> Self {
+        Self {
+            offset,
+            rows,
+            columns: None,
+        }
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+}
+
 const TAIL_CHUNK: usize = 64 << 20;
 
 /// Appends the snapshots of `trad_day` found in the complete lines written to
@@ -586,10 +607,26 @@ pub fn read_tail(
     state: &mut TailState,
     out: &mut Vec<Snapshot>,
 ) -> Result<bool> {
+    read_tail_limited(path, trad_day, file_order, products, state, None, out)
+}
+
+/// [`read_tail`] that stops at byte `limit` (a stored line-boundary position)
+/// instead of the current end of file: used to replay a known range, and to
+/// bound how much one call parses (and holds) at a time.
+pub fn read_tail_limited(
+    path: &Path,
+    trad_day: NaiveDate,
+    file_order: u32,
+    products: &[String],
+    state: &mut TailState,
+    limit: Option<u64>,
+    out: &mut Vec<Snapshot>,
+) -> Result<bool> {
     use std::io::{Seek, SeekFrom};
     let mut file = File::open(path).with_context(|| format!("open {path:?}"))?;
-    let len = file.metadata()?.len();
-    let reset = len < state.offset;
+    let file_len = file.metadata()?.len();
+    let len = limit.map_or(file_len, |l| l.min(file_len));
+    let reset = file_len < state.offset;
     if reset {
         *state = TailState::default();
     }
@@ -610,7 +647,9 @@ pub fn read_tail(
             bail!("{path:?}: unrecognised MDL header");
         };
         state.columns = Some(columns);
-        state.offset = head.len() as u64;
+        if state.offset == 0 {
+            state.offset = head.len() as u64;
+        }
     }
     let columns = state.columns.clone().expect("set above");
     while state.offset < len {
@@ -938,5 +977,51 @@ mod tail_tests {
             read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap(),
             "shrunk file resets"
         );
+    }
+
+    #[test]
+    fn limited_reads_and_resume_keep_file_wide_row_numbers() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("mdl_22_1_0.csv");
+        let line = |n: u32| format!("sn2701,20261117,20261117,09:00:0{n},{n},10,100,5,{n}\n");
+        let mut text = HEAD.to_string();
+        for n in 1..=6 {
+            text.push_str(&line(n));
+        }
+        fs::write(&path, &text).unwrap();
+        let products = ["SN".to_string()];
+        let after_three = (HEAD.len() + (1..=3).map(|n| line(n).len()).sum::<usize>()) as u64;
+
+        let (mut st, mut out) = (TailState::default(), Vec::new());
+        read_tail_limited(
+            &path,
+            day(),
+            0,
+            &products,
+            &mut st,
+            Some(after_three),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            out.iter().map(|s| s.source_row).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!((st.offset(), st.rows()), (after_three, 3));
+        out.clear();
+        read_tail(&path, day(), 0, &products, &mut st, &mut out).unwrap();
+        assert_eq!(
+            out.iter().map(|s| s.source_row).collect::<Vec<_>>(),
+            [4, 5, 6]
+        );
+
+        // A restart resumes from the stored position (header re-read, rows kept).
+        let (mut resumed, mut again) = (TailState::resume_at(after_three, 3), Vec::new());
+        read_tail(&path, day(), 0, &products, &mut resumed, &mut again).unwrap();
+        assert_eq!(
+            again.iter().map(|s| s.source_row).collect::<Vec<_>>(),
+            [4, 5, 6]
+        );
+        assert_eq!(again[0].seq, 4);
     }
 }

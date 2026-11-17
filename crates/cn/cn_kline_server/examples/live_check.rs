@@ -1,12 +1,86 @@
-//! Rebuild a finished trading day with the live (NFS tail) chain and compare
-//! it with the production parquet.
-//! usage: live_check <msg_root> <baseline_root> <exchange_dir> <product> <YYYYMMDD> <multiplier>
-use cn_futures_l2::export_1min::read_day_parquet;
+//! Rebuild a finished trading day with the live chains and compare with the
+//! production parquet:
+//!  * one-shot chain (`live::compute`), as before;
+//!  * segmented chain: the day's snapshots (in file order) go through
+//!    `ContractState` (cuts at >= 30 min gaps, carry between segments), each
+//!    segment is written to parquet and read back like a persisted segment;
+//!  * event level: concatenated segment trades / depths / open interest equal
+//!    the one-shot machine output.
+//!
+//! Usage (env `AS_OF=<session_as_of>`):
+//!
+//! `live_check <msg_root> <baseline_root> <exchange_dir> <product> <YYYYMMDD> <multiplier>`
+use cn_futures_core::events::{
+    process_instrument, process_instrument_resumable, InstrumentCarry, Snapshot,
+};
+use cn_futures_l2::baseline_1min::BaselineMinute;
+use cn_futures_l2::export_1min::{read_day_parquet, write_day_parquet};
 use cn_futures_l2::source::{read_tail, source_files_for_day, TailState};
 use cn_futures_l2::Exchange;
 use cn_kline_server::live::compute;
+use cn_kline_server::live_seg::{minute_ceil, ContractState, Ctx, Params, Row};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+fn same(g: &BaselineMinute, w: &BaselineMinute) -> bool {
+    let eq = |x: f64, y: f64| (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-9 * (1.0 + y.abs());
+    let oe = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => eq(x, y),
+        (None, None) => true,
+        _ => false,
+    };
+    eq(g.volume, w.volume)
+        && eq(g.amount, w.amount)
+        && oe(g.open, w.open)
+        && oe(g.high, w.high)
+        && oe(g.low, w.low)
+        && oe(g.close, w.close)
+        && oe(g.twap, w.twap)
+        && oe(g.mid_price, w.mid_price)
+        && eq(g.buy_volume, w.buy_volume)
+        && eq(g.sell_volume, w.sell_volume)
+}
+
+#[derive(Default)]
+struct Tally {
+    compared: usize,
+    mismatched: usize,
+    missing: usize,
+    extra: usize,
+}
+
+fn compare(
+    id: &str,
+    label: &str,
+    got: &[BaselineMinute],
+    want: &BTreeMap<i64, &BaselineMinute>,
+    t: &mut Tally,
+) {
+    let got: BTreeMap<i64, &BaselineMinute> = got.iter().map(|r| (r.ts, r)).collect();
+    for (ts, w) in want {
+        match got.get(ts) {
+            None => {
+                t.missing += 1;
+                if t.missing < 6 {
+                    println!("{label} {id} missing ts {ts}");
+                }
+            }
+            Some(g) => {
+                t.compared += 1;
+                if !same(g, w) {
+                    t.mismatched += 1;
+                    if t.mismatched < 6 {
+                        println!(
+                            "{label} {id} ts {ts} differs: v={} a={} / prod v={} a={}",
+                            g.volume, g.amount, w.volume, w.amount
+                        );
+                    }
+                }
+            }
+        }
+    }
+    t.extra += got.keys().filter(|k| !want.contains_key(k)).count();
+}
 
 fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
@@ -19,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         Some(&std::env::var("AS_OF")?),
     )?;
     let files = source_files_for_day(ex, day, None, Some(Path::new(msg)), None, 16)?;
-    let mut snaps: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    let mut snaps: BTreeMap<String, Vec<Snapshot>> = BTreeMap::new();
     let t = std::time::Instant::now();
     for (order, f) in files.iter().enumerate() {
         let mut out = Vec::new();
@@ -42,68 +116,90 @@ fn main() -> anyhow::Result<()> {
             .join(product)
             .join(format!("{}.parquet", a[5])),
     )?;
-    let (mut bars, mut bad, mut extra, mut missing) = (0, 0, 0, 0);
-    for (id, mut v) in snaps {
-        let live = compute(&id, &mut v, ex, mult, day, &sessions)?;
-        let want: BTreeMap<i64, _> = prod
+    let venue = cn_futures_trim::sessions::reference_venue(exd)?;
+    let matcher = sessions.matcher(venue, product)?;
+    let keep = |ts: i64| matcher.contains_ts(ts);
+    let tmp = tempfile::tempdir()?;
+    let (mut one, mut seg) = (Tally::default(), Tally::default());
+    let (mut events_ok, mut events_bad, mut multi_seg, mut max_rows_after) = (0, 0, 0, 0usize);
+    for (id, v) in snaps {
+        let want: BTreeMap<i64, &BaselineMinute> = prod
             .iter()
             .filter(|r| r.contract_id == id)
             .map(|r| (r.ts, r))
             .collect();
-        let got: BTreeMap<i64, _> = live.iter().map(|r| (r.ts, r)).collect();
-        for (ts, w) in &want {
-            match got.get(ts) {
-                None => {
-                    missing += 1;
-                    if missing < 6 {
-                        println!("{id} missing ts {ts}");
-                    }
-                }
-                Some(g) => {
-                    bars += 1;
-                    let eq = |x: f64, y: f64| {
-                        (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-9 * (1.0 + y.abs())
-                    };
-                    let oe = |x: Option<f64>, y: Option<f64>| match (x, y) {
-                        (Some(x), Some(y)) => eq(x, y),
-                        (None, None) => true,
-                        _ => false,
-                    };
-                    let ok = eq(g.volume, w.volume)
-                        && eq(g.amount, w.amount)
-                        && oe(g.open, w.open)
-                        && oe(g.high, w.high)
-                        && oe(g.low, w.low)
-                        && oe(g.close, w.close)
-                        && oe(g.twap, w.twap)
-                        && oe(g.mid_price, w.mid_price)
-                        && eq(g.buy_volume, w.buy_volume)
-                        && eq(g.sell_volume, w.sell_volume);
-                    if !ok {
-                        bad += 1;
-                        if bad < 6 {
-                            println!(
-                                "{id} ts {ts} differs: live v={} a={} / prod v={} a={}",
-                                g.volume, g.amount, w.volume, w.amount
-                            );
-                        }
-                    }
-                }
-            }
+        // one-shot
+        let live = compute(&id, &mut v.clone(), ex, mult, day, &sessions)?;
+        compare(&id, "one-shot", &live, &want, &mut one);
+
+        // segmented, snapshots in file order
+        let mut st = ContractState::default();
+        for s in &v {
+            st.push(Row::of(s), false);
         }
-        for (k, g) in got.iter().filter(|(k, _)| !want.contains_key(k)) {
-            if g.volume > 0.0 {
-                println!(
-                    "extra with volume {id} {} vol={}",
-                    chrono::DateTime::from_timestamp(*k + 8 * 3600, 0)
-                        .unwrap()
-                        .format("%H:%M"),
-                    g.volume
-                );
-            }
+        let p = Params {
+            margin_ns: 0,
+            tail_quiet_ns: 0,
+        };
+        let cuts = st.plan_cuts(i64::MAX / 4, i64::MAX / 4, true, p);
+        let ctx = Ctx {
+            instrument: &id,
+            exchange: ex,
+            multiplier: mult,
+            day,
+            in_session: &keep,
+        };
+        let (segments, _) = st.compute_segments(&cuts, &ctx)?;
+        if segments.len() > 1 {
+            multi_seg += 1;
         }
-        extra += got.keys().filter(|k| !want.contains_key(k)).count();
+        let mut got = Vec::new();
+        for (i, s) in segments.iter().enumerate() {
+            let path = tmp.path().join(format!("{id}_{i}.parquet"));
+            write_day_parquet(&path, &s.minutes)?;
+            got.extend(read_day_parquet(&path)?);
+        }
+        compare(&id, "segmented", &got, &want, &mut seg);
+
+        // event level: sliced + carry == one pass
+        let mut all: Vec<Snapshot> = v.clone();
+        let whole = process_instrument(&mut all, ex)?;
+        let mut sorted: Vec<Snapshot> = v.clone();
+        sorted.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        let mut carry = InstrumentCarry::default();
+        let (mut tr, mut de, mut oi) = (Vec::new(), Vec::new(), Vec::new());
+        let mut start = 0usize;
+        for &(c, _) in &cuts {
+            let end = start
+                + sorted[start..]
+                    .partition_point(|s| s.event_time.timestamp_nanos_opt().unwrap() < c);
+            let mut slice = sorted[start..end].to_vec();
+            let out = process_instrument_resumable(&mut slice, ex, &mut carry, true)?;
+            tr.extend(out.trades);
+            de.extend(out.depths);
+            oi.extend(out.open_ints);
+            max_rows_after = max_rows_after.max(end - start);
+            start = end;
+        }
+        let ok = format!("{tr:?}") == format!("{:?}", whole.trades)
+            && format!("{de:?}") == format!("{:?}", whole.depths)
+            && format!("{oi:?}") == format!("{:?}", whole.open_ints);
+        if ok {
+            events_ok += 1;
+        } else {
+            events_bad += 1;
+            println!("event-level mismatch {id}");
+        }
+        let _ = minute_ceil(0);
     }
-    println!("compared={bars} mismatched={bad} missing_in_live={missing} extra_in_live={extra}");
+    println!(
+        "one-shot : compared={} mismatched={} missing={} extra={}",
+        one.compared, one.mismatched, one.missing, one.extra
+    );
+    println!(
+        "segmented: compared={} mismatched={} missing={} extra={} (contracts with >1 segment: {multi_seg}, largest slice {max_rows_after} rows)",
+        seg.compared, seg.mismatched, seg.missing, seg.extra
+    );
+    println!("events   : contracts identical={events_ok} different={events_bad}");
     Ok(())
 }
