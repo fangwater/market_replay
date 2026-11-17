@@ -17,9 +17,99 @@ service CnFuturesMarket {
   rpc GetSizeThresholds(GetSizeThresholdsRequest) returns (GetSizeThresholdsResponse);
   // Continuous-trading windows per product.
   rpc GetTradingSessions(GetTradingSessionsRequest) returns (GetTradingSessionsResponse);
+  // Effective contract choices based on the preceding trading day's close.
+  rpc GetContractSelections(GetContractSelectionsRequest) returns (GetContractSelectionsResponse);
+  // Verified authoritative multipliers; no client-side database access.
+  rpc GetProductMultipliers(GetProductMultipliersRequest) returns (GetProductMultipliersResponse);
+  // Historical raw MDL frames with the replay plan's clock and source order.
+  rpc StreamReplayFrames(GetReplayFramesRequest) returns (stream ReplayFrameBatch);
   // Durable intraday MDL frames, in native channel order. A bounded replay
   // ends at a fixed live watermark; clients overlap it with their ZMQ buffer.
   rpc StreamIntradayFrames(GetIntradayFramesRequest) returns (stream IntradayFrameBatch);
+}
+
+enum ContractSelectionMode {
+  CONTRACT_SELECTION_MODE_UNSPECIFIED = 0;
+  DOMINANT = 1;
+  SECONDARY_OI = 2;
+  FAR_SECONDARY_OI = 3;
+  NEAR_SECONDARY_OI = 4;
+  VOLUME_SECOND = 5;
+}
+
+message GetContractSelectionsRequest {
+  // Unspecified = all exchanges. Products are case-insensitive.
+  Exchange exchange = 1;
+  repeated string products = 2;
+  ContractSelectionMode mode = 3;
+  // Both zero = latest published day per product; otherwise inclusive,
+  // YYYYMMDD, at most 31 calendar days between the bounds.
+  uint32 start_trading_day = 4;
+  uint32 end_trading_day = 5;
+}
+
+message SelectedContract {
+  // Empty with unavailable_reason set means there is no eligible contract.
+  string contract = 1;
+  uint32 ranking_source_day = 2;
+  optional double open_interest = 3;
+  optional double volume_lots = 4;
+  string unavailable_reason = 5;
+}
+
+message ContractSelection {
+  Exchange exchange = 1;
+  string product = 2;
+  uint32 trading_day = 3;
+  string dominant = 4;
+  SelectedContract selected = 5;
+  // Known only AFTER trading_day close; NEVER the effective choice above.
+  SelectedContract scheduled_next = 6;
+  string dominant_rule = 7;
+}
+
+message GetContractSelectionsResponse {
+  ContractSelectionMode mode = 1;
+  repeated ContractSelection rows = 2;
+  string rule_version = 3;
+  // SHA-256 of mode, rule version and returned rows; save with a run.
+  string snapshot_id = 4;
+}
+
+message GetProductMultipliersRequest { repeated string products = 1; }
+message VerifiedProductMultiplier {
+  string product = 1;
+  Exchange exchange = 2;
+  double volume_multiple = 3;
+}
+message GetProductMultipliersResponse {
+  repeated VerifiedProductMultiplier products = 1;
+  string source = 2;
+}
+
+message GetReplayFramesRequest {
+  uint32 trading_day = 1;
+  repeated string contracts = 2;
+  repeated Exchange exchanges = 3;
+  bool allow_partial = 4;
+}
+message ReplayFrame {
+  bytes payload = 1;
+  uint64 cursor = 2;
+  // Natural source date + channel-prefix-max LocalTime, in UTC microseconds.
+  int64 baseline_us = 3;
+  uint32 source_day = 4;
+  string channel = 5;
+  uint64 source_row = 6;
+}
+message ReplayFrameBatch {
+  repeated ReplayFrame frames = 1;
+  // First batch contains bounds/plan/source metadata; no local client paths.
+  string manifest_json = 2;
+  // Required final marker after source stability checks. Without it, fail.
+  bool complete = 3;
+  uint64 frame_count = 4;
+  string frames_sha256 = 5;
 }
 
 message GetIntradayFramesRequest {

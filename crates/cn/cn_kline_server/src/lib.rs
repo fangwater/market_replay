@@ -31,6 +31,8 @@ pub mod dominant;
 pub mod intraday;
 pub mod live;
 pub mod live_seg;
+pub mod replay_api;
+pub mod selection;
 pub mod size_thr;
 
 /// A time-range request may span at most this many calendar days.
@@ -59,6 +61,8 @@ pub struct Config {
     /// In-progress day rebuilt from the NFS MDL files.
     #[serde(default)]
     pub live: Option<live::Config>,
+    #[serde(default)]
+    pub replay: Option<replay_api::Config>,
 }
 
 impl Config {
@@ -278,6 +282,8 @@ fn last_done(state_file: &Path) -> u32 {
 }
 
 struct Service {
+    selection_slots: Arc<tokio::sync::Semaphore>,
+    replay: Option<replay_api::ReplayService>,
     intraday: Option<Arc<intraday::Cache>>,
     live: Option<Arc<live::Live>>,
     cfg: Config,
@@ -711,6 +717,89 @@ fn book5(b: &cn_futures_core::baseline_1min::Book5) -> cn_market_proto::Book5 {
 
 #[tonic::async_trait]
 impl CnFuturesMarket for Grpc {
+    type StreamReplayFramesStream =
+        tokio_stream::wrappers::ReceiverStream<Result<cn_market_proto::ReplayFrameBatch, Status>>;
+    async fn stream_replay_frames(
+        &self,
+        request: Request<cn_market_proto::GetReplayFramesRequest>,
+    ) -> Result<Response<Self::StreamReplayFramesStream>, Status> {
+        self.0
+            .replay
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("historical replay disabled"))?
+            .stream(request.into_inner())
+            .map(Response::new)
+    }
+    async fn get_contract_selections(
+        &self,
+        request: Request<cn_market_proto::GetContractSelectionsRequest>,
+    ) -> Result<Response<cn_market_proto::GetContractSelectionsResponse>, Status> {
+        let req = request.into_inner();
+        selection::validate(&req).map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
+        let root = self
+            .0
+            .cfg
+            .roll_dir
+            .clone()
+            .ok_or_else(|| Status::unavailable("contract selection disabled"))?;
+        let permit = self
+            .0
+            .selection_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("contract selection busy; retry"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            selection::query(&root, req)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
+        .map_err(|e| Status::failed_precondition(format!("{e:#}")))
+    }
+    async fn get_product_multipliers(
+        &self,
+        request: Request<cn_market_proto::GetProductMultipliersRequest>,
+    ) -> Result<Response<cn_market_proto::GetProductMultipliersResponse>, Status> {
+        let wanted: BTreeSet<_> = request
+            .into_inner()
+            .products
+            .into_iter()
+            .map(|p| p.to_ascii_uppercase())
+            .collect();
+        let meta = self.0.meta.read().unwrap();
+        let mut products = Vec::new();
+        for (p, m) in &meta.multipliers {
+            if !wanted.is_empty() && !wanted.contains(p) {
+                continue;
+            }
+            if !m.verified || !m.volume_multiple.is_finite() || m.volume_multiple <= 0.0 {
+                if wanted.contains(p) {
+                    return Err(Status::failed_precondition(format!(
+                        "unverified multiplier {p}"
+                    )));
+                }
+                continue;
+            }
+            products.push(cn_market_proto::VerifiedProductMultiplier {
+                product: p.clone(),
+                exchange: selection::exchange(&m.exchange)
+                    .map_err(|e| Status::internal(e.to_string()))? as i32,
+                volume_multiple: m.volume_multiple,
+            });
+        }
+        if !wanted.is_empty() && products.len() != wanted.len() {
+            return Err(Status::not_found("missing requested multiplier"));
+        }
+        products.sort_by(|a, b| a.product.cmp(&b.product));
+        Ok(Response::new(
+            cn_market_proto::GetProductMultipliersResponse {
+                products,
+                source: "market_metadata.public.domestic_future_product_multipliers;verified=true"
+                    .into(),
+            },
+        ))
+    }
     type StreamIntradayFramesStream =
         tokio_stream::wrappers::ReceiverStream<Result<cn_market_proto::IntradayFrameBatch, Status>>;
     async fn stream_intraday_frames(
@@ -917,6 +1006,8 @@ pub async fn components(cfg: Config) -> Result<Components> {
         None => None,
     };
     let grpc = CnFuturesMarketServer::new(Grpc(Arc::new(Service {
+        selection_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        replay: cfg.replay.clone().map(replay_api::ReplayService::new),
         live,
         cfg,
         meta,
@@ -1032,6 +1123,8 @@ mod tests {
             archive,
             thresholds,
             Service {
+                selection_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+                replay: None,
                 intraday: None,
                 live,
                 cfg,

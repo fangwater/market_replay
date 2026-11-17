@@ -7,6 +7,9 @@ start = "2026-11-13"
 end = "2026-11-13"
 products = ["RB", "SN"]
 execution = "maker"
+market_grpc = "http://127.0.0.1:18312"
+# dominant | secondary_oi | far_secondary_oi | near_secondary_oi | volume_second
+contract_selection = "dominant"
 md_delay_ms = 0
 order_delay_ms = 10
 cancel_delay_ms = 10

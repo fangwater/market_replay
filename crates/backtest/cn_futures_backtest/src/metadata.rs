@@ -3,11 +3,7 @@ use anyhow::{ensure, Context, Result};
 use chrono::{NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-    process::Command,
-};
+use std::collections::BTreeMap;
 
 pub const SCALE: i128 = 1_000_000;
 pub fn money(value: f64) -> i128 {
@@ -223,24 +219,27 @@ impl Metadata {
                 end: clock(r["time_end"].as_str().context("session end")?)?,
             });
         }
-        let output=Command::new("/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql")
-            .args(["-X","-h","/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run","-p","5433","-U","u171","-d","market_metadata","-A","-t","-F",",","-c","SELECT product,exchange,volume_multiple,verified FROM public.domestic_future_product_multipliers"])
-            .env("PGOPTIONS","-c default_transaction_read_only=on").output().context("read verified multiplier catalog")?;
-        ensure!(
-            output.status.success(),
-            "verified multiplier query failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let mut market = crate::market_api::MarketApi::connect(&cfg.market_grpc)?;
+        let catalog = market.multipliers()?;
         let mut multipliers = BTreeMap::new();
-        for line in std::str::from_utf8(&output.stdout)?.lines() {
-            let p: Vec<_> = line.split(',').collect();
-            ensure!(p.len() == 4, "invalid multiplier row");
-            if p[3] == "t" {
-                multipliers.insert(
-                    p[0].to_ascii_uppercase(),
-                    (p[1].to_string(), p[2].parse::<f64>()?),
-                );
-            }
+        for row in &catalog.products {
+            ensure!(
+                row.volume_multiple.is_finite() && row.volume_multiple > 0.0,
+                "invalid API multiplier for {}",
+                row.product
+            );
+            ensure!(
+                multipliers
+                    .insert(
+                        row.product.to_ascii_uppercase(),
+                        (
+                            crate::market_api::archive_exchange(row.exchange)?.to_string(),
+                            row.volume_multiple
+                        )
+                    )
+                    .is_none(),
+                "duplicate API multiplier"
+            );
         }
         let mut contracts = BTreeMap::new();
         let mut variants: BTreeMap<String, Vec<Spec>> = BTreeMap::new();
@@ -339,7 +338,7 @@ impl Metadata {
             historical_exact: false,
             products,
             contracts,
-            provenance: serde_json::json!({"overview":overview,"sessions":sessions,"multiplier_source":"market_metadata.public.domestic_future_product_multipliers","fee_policy":cfg.fee_policy,"account_rates":account_snapshot}),
+            provenance: serde_json::json!({"overview":overview,"sessions":sessions,"multiplier_source":catalog.source,"market_grpc":cfg.market_grpc,"fee_policy":cfg.fee_policy,"account_rates":account_snapshot}),
         };
         m.validate()?;
         Ok(m)
@@ -379,51 +378,6 @@ impl Metadata {
             .with_context(|| format!("missing verified multiplier/tick/session for {c}"))?;
         ensure!(!spec.fee_source.starts_with("account_snapshot:") || spec.fees.is_some(), "missing account-specific fee observation for {c}; choose an observed contract or another explicit fee policy");
         Ok(spec)
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Dominants {
-    pub days: BTreeMap<u32, BTreeMap<String, String>>,
-    pub hashes: BTreeMap<String, String>,
-}
-impl Dominants {
-    pub fn load(dir: &Path, products: &[String]) -> Result<Self> {
-        let wanted: BTreeSet<_> = products.iter().map(|x| x.to_ascii_uppercase()).collect();
-        let mut out = Self::default();
-        for ex in ["ccfx", "xdce", "xgfe", "xsge", "xsie", "xzce"] {
-            let path = dir.join(format!("{ex}_dominant.csv"));
-            if !path.exists() {
-                continue;
-            }
-            out.hashes
-                .insert(path.display().to_string(), crate::sha256(&path)?);
-            let mut reader = csv::Reader::from_path(&path)?;
-            let h = reader.headers()?.clone();
-            let col = |n: &str| {
-                h.iter()
-                    .position(|x| x == n)
-                    .with_context(|| format!("missing {n}"))
-            };
-            let (d, p, c) = (col("trad_day")?, col("product_id")?, col("instrument_id")?);
-            for r in reader.records() {
-                let r = r?;
-                let product = r[p].to_ascii_uppercase();
-                if (!wanted.is_empty() && !wanted.contains(&product)) || r[c].is_empty() {
-                    continue;
-                }
-                out.days
-                    .entry(crate::day_number(&r[d])?)
-                    .or_default()
-                    .insert(product, r[c].to_ascii_lowercase());
-            }
-        }
-        ensure!(
-            !out.days.is_empty(),
-            "no dominant history in {}",
-            dir.display()
-        );
-        Ok(out)
     }
 }
 

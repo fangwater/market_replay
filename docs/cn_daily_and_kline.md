@@ -112,6 +112,8 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 
 ## 主力合约（2026-11-16 上线）
 
+新增 gRPC `GetContractSelections`，提供主力、OI 次主力、远月/近月 OI 次主力及成交量第二名；均明确区分当日生效与收盘后安排。口径、请求及回测配置见 [合约选择 API](cn_contract_selection.md)。现有主力生成规则及 HTTP 返回保持不变。
+
 - **计算：** 全部用 Rust（`crates/cn/cn_futures_roll`）。`cn_futures_roll` 从通联行情提取日终截面，只读到上一个开市日的目录；`cn_roll_replay` 是 preprocess `cn_futures.roll_replay` 的 Rust 移植，默认规则 `local_rqdata_rule0`：持仓超过当前主力 1.1 倍、只切到更远的交割月、不切回。2019-01-01 到 2026-08-26 的 36 个历史输出文件与 Python 逐字节一致，两种规则都验证过。
 - **数据：** `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/`
   - `eod/<ex>_eod.csv`：2019-01-01 起的累积原始截面。

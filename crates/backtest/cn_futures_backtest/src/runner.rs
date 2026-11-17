@@ -2,13 +2,14 @@ use crate::{
     config::{Config, Task},
     engine::{Engine, Summary},
     input::Input,
-    metadata::{Dominants, Metadata},
+    market_api::MarketApi,
+    metadata::Metadata,
     output::Outputs,
     replay::Replay,
     store::atomic_json,
 };
 use anyhow::{ensure, Context, Result};
-use mdl_replay::plan::Selection;
+use cn_market_proto::GetReplayFramesRequest;
 use serde_json::json;
 use std::{collections::BTreeSet, path::Path};
 
@@ -18,11 +19,35 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
     let metadata = Metadata::load(cfg)?;
     atomic_json(&dir.join("metadata.json"), &metadata)?;
     atomic_json(&dir.join("config.json"), cfg)?;
-    let dominants = Dominants::load(&cfg.roll_dir, &cfg.products)?;
+    let mut market = MarketApi::connect(&cfg.market_grpc)?;
+    let products = if cfg.products.is_empty() && cfg.task != Task::RollCost {
+        Input::open(&cfg.input, &[])?
+            .read()?
+            .context("empty input")?
+            .values
+            .into_keys()
+            .collect()
+    } else if cfg.task == Task::RollCost {
+        vec![crate::product(&cfg.roll.old_contract)]
+    } else {
+        cfg.products.clone()
+    };
+    // Standalone roll experiments choose their two legs explicitly. The
+    // published dominant history supplies only the trading-day calendar.
+    let mut selection_cfg = cfg.clone();
+    if cfg.task == Task::RollCost {
+        selection_cfg.contract_selection = crate::config::ContractSelection::Dominant;
+    }
+    let selections = market.selections(&selection_cfg, products)?;
+    atomic_json(&dir.join("contract_selection.json"), &selections.provenance)?;
     let start = crate::day_number(&cfg.start)?;
     let end = crate::day_number(&cfg.end)?;
-    let days: Vec<_> = dominants.days.range(start..=end).map(|(d, _)| *d).collect();
-    ensure!(!days.is_empty(), "no dominant trading days in range");
+    let days: Vec<_> = selections
+        .days
+        .range(start..=end)
+        .map(|(d, _)| *d)
+        .collect();
+    ensure!(!days.is_empty(), "no selected trading days in range");
     let input_hash = if cfg.task != Task::RollCost {
         Some(crate::sha256(&cfg.input)?)
     } else {
@@ -46,7 +71,7 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
     let mut previous_contracts = BTreeSet::new();
     for day in days {
         ensure!(!cancel(), "cancelled");
-        let mapping = dominants.days[&day].clone();
+        let mapping = selections.days[&day].clone();
         let mut contracts: BTreeSet<_> = mapping.values().cloned().collect();
         contracts.extend(previous_contracts.iter().cloned());
         contracts.extend(engine.required_contracts());
@@ -61,24 +86,22 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
                 cfg.roll.new_contract.to_ascii_lowercase(),
             ]);
         }
-        let mut channels = BTreeSet::new();
+        let mut exchanges = BTreeSet::new();
         for c in &contracts {
             let s = metadata.spec(c)?;
-            let ex = cn_futures_core::session::Exchange::parse(&s.exchange)
-                .context("unknown exchange")?;
-            channels.insert(ex.msg_stem().to_string());
+            exchanges.insert(crate::market_api::exchange(&s.exchange)? as i32);
         }
-        let selection = Selection {
-            trade_day: Some(day.to_string()),
+        let selection = GetReplayFramesRequest {
+            trading_day: day,
             contracts: contracts.into_iter().collect(),
-            channels: channels.into_iter().collect(),
-            ..Default::default()
+            exchanges: exchanges.into_iter().collect(),
+            allow_partial: cfg.allow_partial,
         };
         eprintln!(
             "cn-backtest: prepare {day}, {} contracts",
             selection.contracts.len()
         );
-        let mut replay = Replay::open(cfg, selection)?;
+        let mut replay = Replay::open(cfg, selection, &cancel)?;
         let (first, last) = replay.bounds();
         if final_ts > 0 {
             engine.advance(first, false)?;
@@ -107,11 +130,12 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
             seen += 1;
         }
         replay.verify_sources()?;
-        engine.summary.source_complete &= !replay.plan.summary.partial;
-        source_days.push(json!({"trading_day":day,"plan":replay.plan.summary,"sources":replay.sources(),"stream":replay.hashes()}));
+        engine.summary.source_complete &= replay.manifest["plan"]["partial"] == false;
+        source_days
+            .push(json!({"trading_day":day,"replay":replay.manifest,"stream":replay.hashes()}));
         final_ts = last;
         previous_contracts = mapping.values().cloned().collect();
-        eprintln!("cn-backtest: {day} verified {seen} raw ZMQ frames");
+        eprintln!("cn-backtest: {day} verified {seen} raw API frames");
     }
     if let Some(hash) = &input_hash {
         ensure!(
@@ -135,7 +159,7 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
         .map(|x| String::from_utf8_lossy(&x.stdout).trim().to_string());
     atomic_json(
         &dir.join("manifest.json"),
-        &json!({"schema":"cn-backtest/v1","input_sha256":input_hash,"input":cfg.input,"capital_cny":cfg.capital_cny,"input_mode":cfg.input_mode,"metadata_sha256":crate::sha256(&dir.join("metadata.json"))?,"dominant_sha256":dominants.hashes,"days":source_days,"output_sha256":output_hashes,"rows":counts,"revision":revision,"model":summary.model,"fee_historical_exact":metadata.historical_exact,"conversion_clock":"baseline-capture-producer;fixed-across-execution-delay-scenarios"}),
+        &json!({"schema":"cn-backtest/v2","input_sha256":input_hash,"input":cfg.input,"capital_cny":cfg.capital_cny,"input_mode":cfg.input_mode,"metadata_sha256":crate::sha256(&dir.join("metadata.json"))?,"contract_selection":selections.provenance,"market_grpc":cfg.market_grpc,"days":source_days,"output_sha256":output_hashes,"rows":counts,"revision":revision,"model":summary.model,"fee_historical_exact":metadata.historical_exact,"conversion_clock":"baseline-capture-producer;fixed-across-execution-delay-scenarios"}),
     )?;
     Ok(summary)
 }

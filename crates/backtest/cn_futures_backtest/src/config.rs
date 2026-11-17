@@ -19,6 +19,29 @@ pub enum Execution {
     Taker,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractSelection {
+    #[default]
+    Dominant,
+    SecondaryOi,
+    FarSecondaryOi,
+    NearSecondaryOi,
+    VolumeSecond,
+}
+impl ContractSelection {
+    pub fn proto(self) -> cn_market_proto::ContractSelectionMode {
+        use cn_market_proto::ContractSelectionMode as M;
+        match self {
+            Self::Dominant => M::Dominant,
+            Self::SecondaryOi => M::SecondaryOi,
+            Self::FarSecondaryOi => M::FarSecondaryOi,
+            Self::NearSecondaryOi => M::NearSecondaryOi,
+            Self::VolumeSecond => M::VolumeSecond,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -31,9 +54,8 @@ pub struct Config {
     pub end: String,
     pub products: Vec<String>,
     pub execution: Execution,
-    pub msg_root: PathBuf,
-    pub cache_root: PathBuf,
-    pub roll_dir: PathBuf,
+    pub market_grpc: String,
+    pub contract_selection: ContractSelection,
     pub reference_api: String,
     pub reference_as_of: String,
     /// An explicit reference snapshot is an assumption, not historical exact fees.
@@ -42,7 +64,6 @@ pub struct Config {
     pub fee_as_of: Option<String>,
     pub metadata_file: Option<PathBuf>,
     pub output_root: PathBuf,
-    pub replay_speed: f64,
     pub allow_partial: bool,
     pub md_delay_ms: u64,
     pub compute_delay_ms: u64,
@@ -71,9 +92,8 @@ impl Default for Config {
             end: "2026-11-13".into(),
             products: vec!["RB".into(), "SN".into()],
             execution: Execution::Maker,
-            msg_root: "/mnt/nfs/30.3_tonglian_msg".into(),
-            cache_root: "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/mdl_replay_cache".into(),
-            roll_dir: "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/result".into(),
+            market_grpc: "http://127.0.0.1:18312".into(),
+            contract_selection: ContractSelection::default(),
             reference_api: "http://127.0.0.1:8765/api/v1".into(),
             reference_as_of: "2026-11-17".into(),
             fee_policy: "reference_snapshot".into(),
@@ -81,7 +101,6 @@ impl Default for Config {
             fee_as_of: None,
             metadata_file: None,
             output_root: "/mnt/nvme-raid0-28t/fanghaizhou/backtest".into(),
-            replay_speed: 0.0,
             allow_partial: false,
             md_delay_ms: 0,
             compute_delay_ms: 0,
@@ -206,10 +225,6 @@ impl Config {
             "tick offsets must be nonnegative"
         );
         ensure!(
-            self.replay_speed.is_finite() && self.replay_speed >= 0.0,
-            "invalid replay_speed"
-        );
-        ensure!(
             self.max_pending_events >= 100 && self.max_pending_events <= 2_000_000,
             "event limit must be 100..2000000"
         );
@@ -252,8 +267,8 @@ impl Config {
             );
         }
         ensure!(
-            !self.output_root.starts_with(&self.msg_root) && self.output_root != self.cache_root,
-            "output must be separate from sources/cache"
+            self.market_grpc.starts_with("http://") || self.market_grpc.starts_with("https://"),
+            "market_grpc requires an HTTP(S) endpoint"
         );
         Ok(())
     }
@@ -263,5 +278,23 @@ impl Config {
         } else {
             self.amount_unit_cny
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn source_paths_cannot_reenable_local_data_access() {
+        for key in ["msg_root", "cache_root", "roll_dir"] {
+            assert!(toml::from_str::<Config>(&format!("{key}=\"/some/source\"\n")).is_err());
+        }
+        let cfg: Config = toml::from_str(
+            "market_grpc=\"http://remote:18312\"\ncontract_selection=\"far_secondary_oi\"\n",
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.contract_selection, ContractSelection::FarSecondaryOi);
+        assert!(toml::from_str::<Config>("contract_selection=\"unknown\"\n").is_err());
     }
 }

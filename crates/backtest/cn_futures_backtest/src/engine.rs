@@ -167,6 +167,7 @@ struct RollState {
     old: String,
     new: String,
     initial: i64,
+    initial_new: i64,
     goal: i64,
     amount: f64,
     reference: Option<f64>,
@@ -223,7 +224,7 @@ pub struct Engine<S: Sink> {
     known: BTreeMap<String, i64>,
     targets: BTreeMap<String, Target>,
     theory: BTreeMap<String, Position>,
-    dominants: BTreeMap<String, String>,
+    selected_contracts: BTreeMap<String, String>,
     amounts: BTreeMap<String, (f64, i64)>,
     pending: BTreeMap<String, (f64, i64)>,
     rolls: BTreeMap<String, RollState>,
@@ -263,7 +264,7 @@ impl<S: Sink> Engine<S> {
             known: BTreeMap::new(),
             targets: BTreeMap::new(),
             theory: BTreeMap::new(),
-            dominants: BTreeMap::new(),
+            selected_contracts: BTreeMap::new(),
             amounts: BTreeMap::new(),
             pending: BTreeMap::new(),
             rolls: BTreeMap::new(),
@@ -321,6 +322,7 @@ impl<S: Sink> Engine<S> {
                     old,
                     new,
                     initial: r.initial_lots,
+                    initial_new: 0,
                     goal: r.target_lots.unwrap_or(0),
                     amount: r.target_cny.unwrap_or(0.0),
                     reference: None,
@@ -357,18 +359,59 @@ impl<S: Sink> Engine<S> {
     pub fn input(&mut self, row: InputRow) -> Result<()> {
         self.push(row.ts, 2, Event::Input(row))
     }
-    pub fn begin_day(&mut self, day: u32, dominants: BTreeMap<String, String>) -> Result<()> {
+    /// The API-selected contract may move either forward or backward in maturity.
+    pub fn begin_day(
+        &mut self,
+        day: u32,
+        selected_contracts: BTreeMap<String, String>,
+    ) -> Result<()> {
         self.day = day;
-        for (p, new) in &dominants {
-            if let Some(old) = self.dominants.get(p).filter(|old| *old != new) {
-                let initial = *self.known.get(old).unwrap_or(&0);
-                if initial != 0 {
+        if self.cfg.task != Task::RollCost {
+            for (p, new) in &selected_contracts {
+                if self.selected_contracts.get(p) == Some(new) {
+                    continue;
+                }
+                let obsolete: std::collections::BTreeSet<_> = self
+                    .targets
+                    .keys()
+                    .chain(self.known.keys())
+                    .chain(self.orders.values().map(|o| &o.contract))
+                    .filter(|c| *c != new && crate::product(c) == *p)
+                    .cloned()
+                    .collect();
+                self.cancel_contract(new)?;
+                for old in &obsolete {
+                    self.cancel_contract(old)?;
+                    let spec = self.metadata.spec(old)?;
+                    let reference = self
+                        .markets
+                        .get(old)
+                        .and_then(|q| q.mid(&spec))
+                        .unwrap_or(0.0);
+                    self.targets.insert(
+                        old.clone(),
+                        Target {
+                            lots: 0,
+                            reference,
+                            ts: self.now,
+                            amount: 0.0,
+                        },
+                    );
+                }
+                let held: Vec<_> = obsolete
+                    .iter()
+                    .filter(|old| self.known.get(*old).is_some_and(|q| *q != 0))
+                    .collect();
+                ensure!(held.len()<=1,"{p}: selection changed with multiple unfinished old contracts; reconcile the previous roll before continuing");
+                self.rolls.remove(p);
+                if let Some(old) = held.first() {
                     self.rolls.insert(
                         p.clone(),
                         RollState {
-                            old: old.clone(),
+                            old: (*old).clone(),
                             new: new.clone(),
-                            initial,
+                            initial: self.known[*old],
+                            initial_new: *self.known.get(new).unwrap_or(&0),
                             goal: 0,
                             amount: self.amounts.get(p).map_or(0.0, |x| x.0),
                             reference: None,
@@ -380,19 +423,10 @@ impl<S: Sink> Engine<S> {
                             completed: false,
                         },
                     );
-                    self.targets.insert(
-                        old.clone(),
-                        Target {
-                            lots: 0,
-                            reference: 0.0,
-                            ts: self.now,
-                            amount: 0.0,
-                        },
-                    );
                 }
             }
         }
-        self.dominants = dominants;
+        self.selected_contracts = selected_contracts;
         for (p, (a, t)) in self.amounts.clone() {
             self.pending.insert(p, (a, t));
         }
@@ -557,7 +591,7 @@ impl<S: Sink> Engine<S> {
         let Some(&(amount, input_ts)) = self.pending.get(product) else {
             return Ok(());
         };
-        let Some(contract) = self.dominants.get(product).cloned() else {
+        let Some(contract) = self.selected_contracts.get(product).cloned() else {
             return Ok(());
         };
         let s = self.metadata.spec(&contract)?;
@@ -1141,15 +1175,19 @@ impl<S: Sink> Engine<S> {
             {
                 return Ok(());
             }
-            let denom = r.initial.abs().max(r.goal.abs()).max(1) as f64;
-            let progress = (1.0 - ka.abs() as f64 / r.initial.abs() as f64).max(if r.goal == 0 {
-                1.0
+            let new_delta = r.goal - r.initial_new;
+            let denom = r.initial.abs().max(new_delta.abs()).max(1) as f64;
+            let new_progress = if new_delta == 0 {
+                0.0
             } else {
-                kb.abs() as f64 / r.goal.abs() as f64
-            });
+                (kb - r.initial_new) as f64 / new_delta as f64
+            };
+            let progress = (1.0 - ka.abs() as f64 / r.initial.abs() as f64)
+                .max(new_progress)
+                .clamp(0.0, 1.0);
             let next = (progress + self.cfg.roll.batch_lots as f64 / denom).min(1.0);
             let next_a = sign * (r.initial.abs() as f64 * (1.0 - next)).round() as i64;
-            let next_b = sign * (r.goal.abs() as f64 * next).round() as i64;
+            let next_b = r.initial_new + (new_delta as f64 * next).round() as i64;
             r.batch = Some(Batch {
                 a: next_a,
                 b: next_b,
@@ -1494,6 +1532,49 @@ mod tests {
     fn default_capital_is_five_million_and_raw_values_are_not_normalized() {
         assert_eq!(Config::default().amount(0.02), 100_000.0);
         assert_eq!(Config::default().amount(-0.02), -100_000.0);
+    }
+
+    #[test]
+    fn changing_to_nearer_contract_cancels_unfilled_old_target() {
+        let mut e = engine(config());
+        input(&mut e, 0, 1000.0);
+        feed(&mut e, 0, 1, 100, 100);
+        assert!(e.working("rb2701"));
+        e.begin_day(20261116, BTreeMap::from([("RB".into(), "rb2612".into())]))
+            .unwrap();
+        assert_eq!(e.targets["rb2701"].lots, 0);
+        assert!(e
+            .orders
+            .values()
+            .filter(|o| o.contract == "rb2701")
+            .all(|o| o.cancel_sent));
+        e.advance(start() + 1, true).unwrap();
+        e.quote(quote(100, 2, "rb2612", 99, 101, 100, 100)).unwrap();
+        e.advance(start() + 100_000, true).unwrap();
+        assert_eq!(e.targets["rb2612"].lots, 1);
+        assert!(!e.working("rb2701"));
+        assert!(e.working("rb2612"));
+    }
+
+    #[test]
+    fn changing_to_nearer_contract_rolls_existing_far_position() {
+        let mut e = engine(Config {
+            execution: Execution::Taker,
+            ..config()
+        });
+        input(&mut e, 0, 1000.0);
+        feed(&mut e, 0, 1, 100, 100);
+        assert_eq!(e.known["rb2701"], 1);
+        e.begin_day(20261116, BTreeMap::from([("RB".into(), "rb2612".into())]))
+            .unwrap();
+        assert_eq!(e.rolls["RB"].old, "rb2701");
+        assert_eq!(e.rolls["RB"].new, "rb2612");
+        e.quote(quote(100, 2, "rb2612", 99, 101, 100, 100)).unwrap();
+        e.advance(start() + 100_000, true).unwrap();
+        let summary = e.finish(start() + 200_000).unwrap();
+        assert_eq!(summary.positions["rb2701"], 0);
+        assert_eq!(summary.positions["rb2612"], 1);
+        assert!(summary.roll_complete);
     }
     #[test]
     fn maker_touch_is_not_a_fill_but_strict_trade_through_fills_at_limit() {

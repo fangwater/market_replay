@@ -1,0 +1,5 @@
+# Merge into cn_kline_server.toml only when deploying a server with
+# StreamReplayFrames. GetContractSelections uses the existing roll_dir.
+[replay]
+msg_root = "/mnt/nfs/30.3_tonglian_msg"
+cache_root = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/mdl_replay_cache"
