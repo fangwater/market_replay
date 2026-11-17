@@ -22,3 +22,7 @@ retention_days = 7
 [live]
 msg_root = "/mnt/nfs/30.3_tonglian_msg"
 products = ["*"]
+# Finished session segments (night / morning / afternoon) are computed once, written here and
+# dropped from memory; the manifest lets a restart resume. Partial files of days that
+# cn-daily has published are deleted automatically.
+segment_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/live_segments"

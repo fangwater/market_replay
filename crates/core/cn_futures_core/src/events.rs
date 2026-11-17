@@ -68,12 +68,14 @@ impl QueueSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Book {
-    bid_prices: [Option<f64>; 5],
-    bid_sizes: [Option<f64>; 5],
-    ask_prices: [Option<f64>; 5],
-    ask_sizes: [Option<f64>; 5],
+/// Last two-sided five-level book the event machine saw (public so a resumable
+/// carry state can be stored by callers; not otherwise part of the API).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Book {
+    pub bid_prices: [Option<f64>; 5],
+    pub bid_sizes: [Option<f64>; 5],
+    pub ask_prices: [Option<f64>; 5],
+    pub ask_sizes: [Option<f64>; 5],
 }
 
 impl Book {
@@ -112,7 +114,7 @@ fn book_from_snapshot(snap: &Snapshot) -> Option<Book> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Direction {
+pub enum Direction {
     Buy,
     Sell,
 }
@@ -173,23 +175,58 @@ pub struct InstrumentOutput {
     pub open_ints: Vec<(u32, OiRecord)>,
 }
 
+/// State the snapshot->trade machine carries from one snapshot to the next.
+/// `InstrumentCarry::default()` is the state at the start of a trading day.
+/// Processing a day's snapshots in several consecutive slices, passing the same
+/// carry (and `flush_pending = true` only for a slice that ends at a second
+/// boundary before the next slice's first snapshot), gives exactly the output
+/// of one `process_instrument` call over the whole day.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InstrumentCarry {
+    pub vol_prev: Option<f64>,
+    pub to_prev: Option<f64>,
+    pub last_px: Option<f64>,
+    pub last_dir: Option<Direction>,
+    pub book: Option<Book>,
+    /// Depth record of the latest second, not emitted yet: (second ns, book, instrument).
+    pub pending_depth: Option<(u64, Book, String)>,
+    pub trade_ts: u64,
+    pub trade_seq: u32,
+    pub last_oi: Option<f64>,
+    pub oi_ts: u64,
+    pub oi_seq: u32,
+}
+
 pub fn process_instrument(
     snaps: &mut [Snapshot],
+    exchange: Exchange,
+) -> anyhow::Result<InstrumentOutput> {
+    process_instrument_resumable(snaps, exchange, &mut InstrumentCarry::default(), true)
+}
+
+/// Resumable form of [`process_instrument`]: starts from `carry`, leaves the
+/// state after the last snapshot in it. With `flush_pending` the last second's
+/// depth record is emitted now (end of a slice); otherwise it stays in
+/// `carry.pending_depth` and is emitted by the next call, as in a single pass.
+pub fn process_instrument_resumable(
+    snaps: &mut [Snapshot],
     _exchange: Exchange,
+    carry: &mut InstrumentCarry,
+    flush_pending: bool,
 ) -> anyhow::Result<InstrumentOutput> {
     snaps.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
     let mut out = InstrumentOutput::default();
-    let mut vol_prev: Option<f64> = None;
-    let mut to_prev: Option<f64> = None;
-    let mut last_px: Option<f64> = None;
-    let mut last_dir: Option<Direction> = None;
-    let mut book: Option<Book> = None;
-    let mut pending_depth: Option<(u64, Book, String)> = None;
-    let mut trade_ts = 0u64;
-    let mut trade_seq = 0u32;
-    let mut last_oi: Option<f64> = None;
-    let mut oi_ts = 0u64;
-    let mut oi_seq = 0u32;
+    let mut vol_prev = carry.vol_prev;
+    let mut to_prev = carry.to_prev;
+    let mut last_px = carry.last_px;
+    let mut last_dir = carry.last_dir;
+    let mut book = carry.book;
+    let mut pending_depth = carry.pending_depth.clone();
+    let mut trade_ts = carry.trade_ts;
+    let mut trade_seq = carry.trade_seq;
+    let mut last_oi = carry.last_oi;
+    let mut oi_ts = carry.oi_ts;
+    let mut oi_seq = carry.oi_seq;
 
     for snap in snaps.iter() {
         let prior_book = book;
@@ -302,9 +339,24 @@ pub fn process_instrument(
             trade_seq = trade_seq.saturating_add(1);
         }
     }
-    if let Some((ts, last, instrument)) = pending_depth {
-        out.depths.push(depth_from_book(instrument, ts, last));
+    if flush_pending {
+        if let Some((ts, last, instrument)) = pending_depth.take() {
+            out.depths.push(depth_from_book(instrument, ts, last));
+        }
     }
+    *carry = InstrumentCarry {
+        vol_prev,
+        to_prev,
+        last_px,
+        last_dir,
+        book,
+        pending_depth,
+        trade_ts,
+        trade_seq,
+        last_oi,
+        oi_ts,
+        oi_seq,
+    };
     Ok(out)
 }
 
@@ -432,6 +484,51 @@ mod tests {
             .depths
             .iter()
             .any(|depth| local_hour(depth.ts_utc_ns) == 15));
+    }
+
+    #[test]
+    fn resumable_slices_equal_one_pass_including_direction_carry() {
+        // A flat-price print inside the book spread takes the previous
+        // non-zero direction, which lives across the slice boundary.
+        let mut all = vec![
+            snap(9, 0, 0, 500_000_000, 10.0, 3381.0, 3379.0, 3381.0),
+            snap(9, 0, 1, 0, 20.0, 3380.0, 3379.0, 3382.0),
+            snap(9, 0, 1, 500_000_000, 30.0, 3380.0, 3379.0, 3382.0),
+            snap(9, 0, 2, 0, 31.0, 3380.0, 3379.0, 3382.0),
+            snap(13, 30, 0, 500_000_000, 40.0, 3380.0, 3379.0, 3382.0),
+            snap(13, 30, 1, 0, 41.0, 3380.0, 3379.0, 3382.0),
+        ];
+        all[3].open_int = Some(7.0);
+        all[4].open_int = Some(9.0);
+        let one = process_instrument(&mut all.clone(), Exchange::Xsge).unwrap();
+        let cut = 4; // slice boundary between 09:00:02 and 13:30:00.5
+        let (mut a, mut b) = (all[..cut].to_vec(), all[cut..].to_vec());
+        let mut carry = InstrumentCarry::default();
+        let first = process_instrument_resumable(&mut a, Exchange::Xsge, &mut carry, true).unwrap();
+        assert!(carry.pending_depth.is_none());
+        let second =
+            process_instrument_resumable(&mut b, Exchange::Xsge, &mut carry, true).unwrap();
+        let join = |x: &InstrumentOutput, y: &InstrumentOutput| {
+            (
+                [&x.trades[..], &y.trades[..]].concat(),
+                [&x.depths[..], &y.depths[..]].concat(),
+                [&x.open_ints[..], &y.open_ints[..]].concat(),
+            )
+        };
+        let (trades, depths, ois) = join(&first, &second);
+        assert_eq!(format!("{trades:?}"), format!("{:?}", one.trades));
+        assert_eq!(format!("{depths:?}"), format!("{:?}", one.depths));
+        assert_eq!(format!("{ois:?}"), format!("{:?}", one.open_ints));
+        // Without flushing, the pending depth second moves to the next call.
+        let (mut a, mut b) = (all[..cut].to_vec(), all[cut..].to_vec());
+        let mut carry = InstrumentCarry::default();
+        let first =
+            process_instrument_resumable(&mut a, Exchange::Xsge, &mut carry, false).unwrap();
+        assert!(carry.pending_depth.is_some());
+        let second =
+            process_instrument_resumable(&mut b, Exchange::Xsge, &mut carry, true).unwrap();
+        let (_, depths, _) = join(&first, &second);
+        assert_eq!(format!("{depths:?}"), format!("{:?}", one.depths));
     }
 
     #[test]
