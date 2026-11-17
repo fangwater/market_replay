@@ -20,6 +20,7 @@
 use crate::live_seg::{
     carry_from_json, carry_to_json, minutes_from_output, ContractState, Ctx, Params, Push, Row, NS,
 };
+use crate::size_thr::SizeThresholds;
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use cn_futures_core::segments::SESSION_BREAK_SEC;
@@ -30,10 +31,12 @@ use cn_futures_l2::export_1min::{read_day_parquet, write_day_parquet};
 use cn_futures_l2::source::{last_trad_day, read_tail_limited, source_files_for_day, TailState};
 use cn_futures_l2::Exchange;
 use cn_futures_trim::sessions::{reference_venue, ContinuousSessions};
+use cn_market_proto::{SessionWindow, SizeThreshold};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,6 +59,12 @@ pub struct Config {
     /// (`<dir>/<YYYYMMDD>/<exchange>/...`). Unset: keep the whole day in memory.
     #[serde(default)]
     pub segment_dir: Option<PathBuf>,
+    /// Shared size-class threshold files (`dominant_by_day/<YYYYMM>/<P>.json`,
+    /// written by `fill_1min_size_buckets --export-month` / the monthly job).
+    /// Live trades are classed with the thresholds of the month before their
+    /// own month, exactly like baseline_data_1min step 4. Unset: no size buckets.
+    #[serde(default)]
+    pub size_threshold_dir: Option<PathBuf>,
     /// A segment is only finished when the NFS clock (newest snapshot of the
     /// exchange) is this far past its end.
     #[serde(default = "d_margin")]
@@ -167,6 +176,11 @@ pub struct Finalizer<'a> {
 pub struct Live {
     cfg: Config,
     sessions: Arc<ContinuousSessions>,
+    /// Shared size-class thresholds (prior month, dominant by day); `None` when
+    /// `size_threshold_dir` is not configured.
+    size: Option<Arc<SizeThresholds>>,
+    /// Per exchange: the in-progress day (YYYYMMDD, 0 = none) and `through_ms`.
+    progress: HashMap<&'static str, (AtomicU32, AtomicI64)>,
     /// One lock per exchange so a cold read of one file never blocks another.
     state: HashMap<&'static str, Mutex<Option<DayState>>>,
 }
@@ -195,6 +209,14 @@ fn now_ns() -> i64 {
         .map_or(0, |d| d.as_nanos() as i64)
 }
 
+/// `(begin_sec, end_sec)` pairs of a product's windows as proto messages.
+pub fn session_windows_of(windows: Vec<(u32, u32)>) -> Vec<SessionWindow> {
+    windows
+        .into_iter()
+        .map(|(begin_sec, end_sec)| SessionWindow { begin_sec, end_sec })
+        .collect()
+}
+
 fn yyyymmdd(d: NaiveDate) -> u32 {
     use chrono::Datelike;
     (d.year() * 10000) as u32 + d.month() * 100 + d.day()
@@ -205,12 +227,63 @@ impl Live {
     /// was trimmed with (`session_as_of`), so live bars match the final file.
     pub fn new(cfg: Config, sessions: Arc<ContinuousSessions>) -> Self {
         Self {
+            size: cfg
+                .size_threshold_dir
+                .clone()
+                .map(|d| Arc::new(SizeThresholds::new(d))),
             cfg,
             sessions,
+            progress: ALL_EXCHANGES
+                .iter()
+                .map(|e| (e.as_str(), (AtomicU32::new(0), AtomicI64::new(0))))
+                .collect(),
             state: ALL_EXCHANGES
                 .iter()
                 .map(|e| (e.as_str(), Mutex::new(None)))
                 .collect(),
+        }
+    }
+
+    /// `(p50, p90)` lookup for the trades of `product` (per trade: thresholds of
+    /// the month before the trade's Shanghai month); `None` when not configured.
+    fn size_fn(&self, product: &str) -> Option<impl Fn(u64) -> Option<(f64, f64)> + '_> {
+        let thr = self.size.as_ref()?;
+        let product = product.to_string();
+        Some(move |ts_ns: u64| thr.for_trade(&product, ts_ns))
+    }
+
+    /// Whether the thresholds of the minute opening at `minute_ts_sec` exist.
+    pub fn has_size_thresholds(&self, product: &str, minute_ts_sec: i64) -> bool {
+        self.size
+            .as_ref()
+            .is_some_and(|s| s.month_for_minute(product, minute_ts_sec).is_some())
+    }
+
+    /// `GetMinuteBarsResponse.size_thresholds`: the product's entry for the
+    /// current Shanghai month, and the next month's only once it exists.
+    pub fn size_thresholds(&self, product: &str, now_ms: i64) -> Vec<SizeThreshold> {
+        let Some(size) = self.size.as_ref() else {
+            return Vec::new();
+        };
+        size.entries(product, now_ms)
+            .into_iter()
+            .map(|(applies_month, p50, p90)| SizeThreshold {
+                applies_month,
+                p50_turnover_cny: p50,
+                p90_turnover_cny: p90,
+            })
+            .collect()
+    }
+
+    /// `GetMinuteBarsResponse.sessions`: the product's active continuous windows
+    /// from the session snapshot, in segment order.
+    pub fn session_windows(&self, exchange_dir: &str, product: &str) -> Vec<SessionWindow> {
+        let Ok(venue) = reference_venue(exchange_dir) else {
+            return Vec::new();
+        };
+        match self.sessions.matcher(venue, product) {
+            Ok(m) => session_windows_of(m.windows()),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -313,6 +386,42 @@ impl Live {
     /// contracts and save the manifest when due. Returns `Some(more)`; `None`
     /// when no trading day newer than `last_done` is open here.
     fn step(
+        &self,
+        exchange: Exchange,
+        last_done: u32,
+        fin: Option<&Finalizer>,
+        st: &mut Option<DayState>,
+    ) -> Result<Option<bool>> {
+        let result = self.step_inner(exchange, last_done, fin, st);
+        // Published lock-free so `GetDataState` stays cheap to poll.
+        let (day, through) = st
+            .as_ref()
+            .map_or((0, 0), |s| (yyyymmdd(s.day), s.through_ms));
+        if let Some((d, t)) = self.progress.get(exchange.as_str()) {
+            d.store(day, Ordering::Relaxed);
+            t.store(through, Ordering::Relaxed);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub fn set_progress_for_tests(&self, exchange_dir: &str, day: u32, through_ms: i64) {
+        let (d, t) = &self.progress[Exchange::parse(exchange_dir).unwrap().as_str()];
+        d.store(day, Ordering::Relaxed);
+        t.store(through_ms, Ordering::Relaxed);
+    }
+
+    /// The in-progress trading day of an exchange and the newest snapshot time
+    /// (UTC ms) read from NFS for it; `(0, 0)` when no day is open.
+    pub fn exchange_progress(&self, exchange_dir: &str) -> (u32, i64) {
+        Exchange::parse(exchange_dir)
+            .and_then(|e| self.progress.get(e.as_str()))
+            .map_or((0, 0), |(d, t)| {
+                (d.load(Ordering::Relaxed), t.load(Ordering::Relaxed))
+            })
+    }
+
+    fn step_inner(
         &self,
         exchange: Exchange,
         last_done: u32,
@@ -511,12 +620,16 @@ impl Live {
                 continue;
             };
             let keep = |ts: i64| matcher.contains_ts(ts);
+            let size = self.size_fn(&product);
             let ctx = Ctx {
                 instrument: &id,
                 exchange,
                 multiplier,
                 day: s.day,
                 in_session: &keep,
+                size: size
+                    .as_ref()
+                    .map(|f| f as &dyn Fn(u64) -> Option<(f64, f64)>),
             };
             let finished = c
                 .compute_segments(&cuts, &ctx)
@@ -691,6 +804,7 @@ impl Live {
         let venue = reference_venue(exchange.as_str())?;
         let matcher = self.sessions.matcher(venue, product)?;
         let keep = |ts: i64| matcher.contains_ts(ts);
+        let size = self.size_fn(product);
         let mut out = Vec::new();
         for (id, state) in picked {
             let ctx = Ctx {
@@ -699,6 +813,9 @@ impl Live {
                 multiplier,
                 day,
                 in_session: &keep,
+                size: size
+                    .as_ref()
+                    .map(|f| f as &dyn Fn(u64) -> Option<(f64, f64)>),
             };
             let mut minutes = match self.day_dir(day, exchange) {
                 Some(dir) => read_persisted(&dir.join(&id))?,
@@ -767,7 +884,7 @@ fn manifest_doc(
         })
         .collect();
     json!({
-        "version": 1, "day": day.format("%Y%m%d").to_string(),
+        "version": 2, "day": day.format("%Y%m%d").to_string(),
         "through_ms": through_ms, "files": files, "contracts": contracts,
     })
 }
@@ -787,7 +904,7 @@ fn load_manifest(path: &Path, day: NaiveDate) -> Result<Option<Manifest>> {
         Err(e) => return Err(e.into()),
     };
     let v: Value = serde_json::from_slice(&bytes).context("manifest json")?;
-    if v["version"] != 1 || v["day"].as_str() != Some(&day.format("%Y%m%d").to_string()) {
+    if v["version"] != 2 || v["day"].as_str() != Some(&day.format("%Y%m%d").to_string()) {
         bail!("manifest version/day mismatch");
     }
     let mut files = Vec::new();
@@ -828,6 +945,7 @@ pub fn compute(
     multiplier: f64,
     day: NaiveDate,
     sessions: &ContinuousSessions,
+    size: Option<&dyn Fn(u64) -> Option<(f64, f64)>>,
 ) -> Result<Vec<BaselineMinute>> {
     let product = product_id(instrument).context("product of instrument")?;
     let matcher = sessions.matcher(reference_venue(exchange.as_str())?, &product)?;
@@ -838,6 +956,7 @@ pub fn compute(
         multiplier,
         day,
         in_session: &keep,
+        size,
     };
     minutes_from_output(&ctx, process_instrument(snaps, exchange)?)
 }

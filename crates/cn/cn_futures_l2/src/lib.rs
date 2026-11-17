@@ -8,12 +8,14 @@
 pub use cn_futures_core::{baseline_1min, codec, events, session, universe};
 
 pub mod db;
+pub mod dominant_table;
 pub mod export_1min;
 pub mod export_1s;
 pub mod export_hfq;
 pub mod export_ylabel;
 pub mod hfq;
 pub mod multipliers;
+pub mod size_thresholds;
 pub mod source;
 pub mod ylabel_1m;
 

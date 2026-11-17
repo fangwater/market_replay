@@ -93,8 +93,13 @@ impl ContinuousSessions {
             .with_context(|| format!("continuous-session API returned failure for {url}"))?
             .text()
             .context("read continuous-session API response")?;
+        Self::parse(&body)
+    }
+
+    /// Builds the snapshot from the body of `/api/v1/trading-sessions`.
+    pub fn parse(body: &str) -> Result<Self> {
         let provenance: Value =
-            serde_json::from_str(&body).context("continuous-session API response is not JSON")?;
+            serde_json::from_str(body).context("continuous-session API response is not JSON")?;
         let response: SessionApiResponse = serde_json::from_value(provenance.clone())
             .context("continuous-session API response does not match its contract")?;
         Self::from_response(response, provenance)
@@ -237,6 +242,16 @@ impl ContinuousSessions {
 }
 
 impl SessionMatcher<'_> {
+    /// The product's active continuous windows in segment order as
+    /// `(begin_sec, end_sec)`: Asia/Shanghai seconds since midnight, the end
+    /// exclusive; `end_sec <= begin_sec` means the window runs past midnight.
+    pub fn windows(&self) -> Vec<(u32, u32)> {
+        self.windows
+            .iter()
+            .map(|w| (w.begin_sec, w.end_sec))
+            .collect()
+    }
+
     /// If `ts_sec` lies within `slack_sec` of the end of a continuous window
     /// whose following break is at least `min_break_sec` long, returns that
     /// window end (epoch seconds). Used to prove that no more rows can belong
@@ -365,6 +380,21 @@ mod break_end_tests {
             end_sec: end,
             crosses_midnight: crosses,
         }
+    }
+
+    #[test]
+    fn windows_are_exposed_as_second_pairs_in_segment_order() {
+        let ws = windows();
+        let m = SessionMatcher { windows: &ws };
+        assert_eq!(
+            m.windows(),
+            vec![
+                (21 * 3600, 3600), // night: end <= begin runs past midnight
+                (9 * 3600, 10 * 3600 + 900),
+                (10 * 3600 + 1800, 11 * 3600 + 1800),
+                (13 * 3600 + 1800, 15 * 3600),
+            ]
+        );
     }
 
     // Commodity-like day: night 21:00-01:00, 09:00-10:15, 10:30-11:30, 13:30-15:00.

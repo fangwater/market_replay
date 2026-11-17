@@ -101,6 +101,14 @@ schedule = { tz = "Asia/Shanghai", at = ["14:00"], month_days = [2] }
 timeout_minutes = 600
 
 [[job]]
+name = "size-thresholds-monthly"
+description = "大小单分类阈值（上个自然月，主力逐日合并）：只读 RocksDB，≤4 个并发，写 size_thresholds/dominant_by_day/<YYYYMM>/<品种>.json；实时 gRPC 和 baseline_data_1min 工序 4 共用"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/home/fanghaizhou/market_replay/scripts/export_size_thresholds.sh"
+schedule = { tz = "Asia/Shanghai", at = ["06:00"], month_days = [1] }
+timeout_minutes = 90
+
+[[job]]
 name = "cn-reference-daily"
 description = "国内期货参考数据：OpenCTP 手续费保证金与连续交易时段同步（钉钉）"
 cwd = "/home/fanghaizhou/market_replay"

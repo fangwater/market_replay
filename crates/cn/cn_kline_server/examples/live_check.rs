@@ -7,7 +7,7 @@
 //!  * event level: concatenated segment trades / depths / open interest equal
 //!    the one-shot machine output.
 //!
-//! Usage (env `AS_OF=<session_as_of>`):
+//! Usage (env `AS_OF=<session_as_of>`, optional `SIZE_DIR=<size threshold dir>`):
 //!
 //! `live_check <msg_root> <baseline_root> <exchange_dir> <product> <YYYYMMDD> <multiplier>`
 use cn_futures_core::events::{
@@ -22,14 +22,32 @@ use cn_kline_server::live_seg::{minute_ceil, ContractState, Ctx, Params, Row};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-fn same(g: &BaselineMinute, w: &BaselineMinute) -> bool {
+fn same(g: &BaselineMinute, w: &BaselineMinute, with_size: bool) -> bool {
     let eq = |x: f64, y: f64| (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-9 * (1.0 + y.abs());
     let oe = |x: Option<f64>, y: Option<f64>| match (x, y) {
         (Some(x), Some(y)) => eq(x, y),
         (None, None) => true,
         _ => false,
     };
-    eq(g.volume, w.volume)
+    let sizes_ok = !with_size
+        || [
+            (g.large_order, w.large_order),
+            (g.medium_order, w.medium_order),
+            (g.small_order, w.small_order),
+            (g.large_buy, w.large_buy),
+            (g.large_sell, w.large_sell),
+            (g.medium_buy, w.medium_buy),
+            (g.medium_sell, w.medium_sell),
+            (g.small_buy, w.small_buy),
+            (g.small_sell, w.small_sell),
+            (g.net_buy_large, w.net_buy_large),
+            (g.net_buy_medium, w.net_buy_medium),
+            (g.net_buy_small, w.net_buy_small),
+        ]
+        .iter()
+        .all(|(x, y)| eq(*x, *y));
+    sizes_ok
+        && eq(g.volume, w.volume)
         && eq(g.amount, w.amount)
         && oe(g.open, w.open)
         && oe(g.high, w.high)
@@ -55,6 +73,7 @@ fn compare(
     got: &[BaselineMinute],
     want: &BTreeMap<i64, &BaselineMinute>,
     t: &mut Tally,
+    with_size: bool,
 ) {
     let got: BTreeMap<i64, &BaselineMinute> = got.iter().map(|r| (r.ts, r)).collect();
     for (ts, w) in want {
@@ -67,7 +86,7 @@ fn compare(
             }
             Some(g) => {
                 t.compared += 1;
-                if !same(g, w) {
+                if !same(g, w, with_size) {
                     t.mismatched += 1;
                     if t.mismatched < 6 {
                         println!(
@@ -92,6 +111,15 @@ fn main() -> anyhow::Result<()> {
         "http://127.0.0.1:8765/api/v1/trading-sessions",
         Some(&std::env::var("AS_OF")?),
     )?;
+    // SIZE_DIR=<threshold dir>: classify trades with the shared prior-month
+    // dominant-by-day thresholds exactly like the live path and compare the 12
+    // size-bucket columns too (the baseline file must then be filled by the new tool).
+    let thresholds = std::env::var("SIZE_DIR")
+        .ok()
+        .map(|d| cn_kline_server::size_thr::SizeThresholds::new(d.into()));
+    let with_size = thresholds.is_some();
+    let size_fn = |ts: u64| thresholds.as_ref().and_then(|t| t.for_trade(product, ts));
+    let size: Option<&dyn Fn(u64) -> Option<(f64, f64)>> = with_size.then_some(&size_fn);
     let files = source_files_for_day(ex, day, None, Some(Path::new(msg)), None, 16)?;
     let mut snaps: BTreeMap<String, Vec<Snapshot>> = BTreeMap::new();
     let t = std::time::Instant::now();
@@ -129,8 +157,8 @@ fn main() -> anyhow::Result<()> {
             .map(|r| (r.ts, r))
             .collect();
         // one-shot
-        let live = compute(&id, &mut v.clone(), ex, mult, day, &sessions)?;
-        compare(&id, "one-shot", &live, &want, &mut one);
+        let live = compute(&id, &mut v.clone(), ex, mult, day, &sessions, size)?;
+        compare(&id, "one-shot", &live, &want, &mut one, with_size);
 
         // segmented, snapshots in file order
         let mut st = ContractState::default();
@@ -150,6 +178,7 @@ fn main() -> anyhow::Result<()> {
             multiplier: mult,
             day,
             in_session: &keep,
+            size,
         };
         let (segments, _) = st.compute_segments(&cuts, &ctx)?;
         if segments.len() > 1 {
@@ -161,7 +190,7 @@ fn main() -> anyhow::Result<()> {
             write_day_parquet(&path, &s.minutes)?;
             got.extend(read_day_parquet(&path)?);
         }
-        compare(&id, "segmented", &got, &want, &mut seg);
+        compare(&id, "segmented", &got, &want, &mut seg, with_size);
 
         // event level: sliced + carry == one pass
         let mut all: Vec<Snapshot> = v.clone();

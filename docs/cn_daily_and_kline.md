@@ -13,7 +13,7 @@
 | 回放 | `cn_futures_l2` | 把通联 msg 写入生产 RocksDB；已经是 `done` 的交易日直接跳过 |
 | 导出 | `export_baseline_1min` | RocksDB → staging（未裁剪），staging 在 NVMe 上 |
 | 时段裁剪 | `trim_cn_futures_continuous_sessions` | staging → 生产 `baseline_data_1min`。时段快照固定为 `session_as_of = 2026-09-08`，必须和生产目录 `_provenance` 里的记录一致，否则工具会拒绝执行；生产目录里已有的文件不会覆盖，`--overwrite` 时才覆盖 |
-| 大小单分桶 | `fill_1min_size_buckets --start 月初 --end D` | 阈值按完整自然月的 P50/P90 计算，所以每次重算当月 1 号到 D 的全部文件；每个月只跑一次 |
+| 大小单分桶 | `fill_1min_size_buckets --start <本次第一天> --end <本次最后一天>` | **从 2026-11-01 起的新规则**（和实时 gRPC bar 同一套文件）：阈值 = 上一个完整上海自然月里**主力合约逐交易日合并**（换月前用旧主力、换月后用新主力）的区间成交额 P50/P90，按每笔成交所属月份取上月的阈值。只改写 `--start/--end` 范围内的日文件（必须显式给出，没有全历史模式）；某品种上月没有阈值（新上市、没有主力成交）时该品种当天文件保持原样并在输出里打印 `MISSING-THRESHOLDS`，绝不编造。2026-10-31 及以前的文件仍是旧的"同月、品种全部合约合并"阈值，**不重算** |
 | 审计与通知 | 内置 | 统计文件数、行数、有成交分钟数、合约数、各所文件数，VWAP 落在快照高低价外的比例，与上一交易日相比缺少或新增的品种，以及没有已验证乘数的品种。结果写入 `logs/cn_daily/cn_daily_YYYYMMDD_audit.json`，然后发钉钉 |
 
 规则：
@@ -51,7 +51,7 @@ target/release/cn-daily audit --config config/cn_daily.toml --day 2026-11-13
   - `high/low` 会在 tick 网格上扩展到包含 `vwap`：快照每秒 2 或 4 次，会漏掉快照之间的成交和大商所组合腿价成交，而真实成交区间一定包含 VWAP，并且落在 tick 网格上，所以扩展后的值不会超出真实范围。扩展过的 bar 带 `widened = true`。
   - `mid_price`（2026-11-16 新增，proto 字段 14，optional）：取自 parquet 的 `mid_price`，等于这一分钟内最后一个双边五档快照的 `(bid0 + ask0) / 2`，也就是 bar 收盘时的中间价，不是 `open_time` 时刻的因果值。这一分钟没有双边盘口时不设值。20261116 全部 133,165 根 bar 都有值，并且都落在半 tick 网格上。
   - baseline 其余字段（2026-11-16 新增，proto 字段 15–29）：`twap`，买卖方向拆分的手数、成交额、VWAP 和区间笔数，`avg_interval_turnover_cny`，净买入额、净买入量和净买入占比，`size_buckets`（大中小三档的成交额、买卖额和净额），以及 `book`（区间内最后一个双边五档快照）。全部原样取自 parquet，不另做计算。
-    - **大中小单不是真实订单大小：** 把相邻快照的累计成交量、成交额做差，得到一条推算的区间成交；再按"品种 × 上海自然月"区间成交额的 P50、P90 分档（≥P90 为大，P50～P90 为中，<P50 为小）。阈值用的是整个自然月的数据，月底之前的日期并不满足因果性，实时侧要自己对齐阈值的时间口径。
+    - **大中小单不是真实订单大小：** 把相邻快照的累计成交量、成交额做差，得到一条推算的区间成交；再按品种的 P50、P90 分档（≥P90 为大，P50～P90 为中，<P50 为小）。**2026-11-01 起**阈值是上一个完整上海自然月里主力合约逐交易日合并的区间成交额分位数，按每笔成交所属月份取上月的阈值，所以事先已知、满足因果性，实时 bar 和 `baseline_data_1min` 用的是同一套文件（`<size_thresholds>/dominant_by_day/<YYYYMM>/<品种>.json`）。2026-10-31 及以前的文件仍是旧规则（同一自然月、品种所有合约合并，月底之前不满足因果性），没有重算。当前生效的数值用 `GetSizeThresholds` 取。
     - 验证：用 `kline_check` 逐根对照 parquet，20261116 和 20261113 共 264,166 根 bar，所有字段完全一致，五档全部存在。
 - 元数据（乘数和最小变动价位）每小时刷新一次；刷新失败时保留旧数据。
 
@@ -86,12 +86,29 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
   - **内存：** 12:27 临时实例 2.4 GB，线上旧设计同一时刻 4.4 GB。段落盘后内存只与"当前最大的未收口段"有关（上午段约 2.5 小时），不再随全天增长。**整天的峰值没有实测，估计在 3 GB 上下，旧设计整天预计 8–12 GB。**
   - **预热：** 无 manifest 的首次装载约 90 秒（分步读，落盘了 625 个段文件）；重启读 manifest 后约 45 秒（只重放检查点之后的范围，此时上午段还没收口所以重放范围较大，收口后更短）。
 - **响应：**
-  - 来自 NFS 的 bar 带 `provisional = true`，不含 `size_buckets`（月度阈值要到月底才知道），其余字段和 parquet 同口径。
+  - 来自 NFS 的 bar 带 `provisional = true`，其余字段和 parquet 同口径。`size_buckets` 现在有了：配置 `[live] size_threshold_dir` 后，实时成交按上一个完整月的主力逐日阈值分档（见下"实时大小分类阈值"）；该品种没有阈值、或某分钟有成交却没有被分档（例如落盘时文件还不存在）时，`size_buckets` 不设值，不用 0 冒充。
   - `DataState.live_trading_day` 是当前补缺的交易日，`live_through_ms` 是 NFS 已追到的最新快照时间（UTC 毫秒）。`open_time + 60s <= live_through_ms` 的 bar 才算走完。NFS 是整点附近分批更新，所以这个时间会滞后于 ZMQ，客户端按它决定从哪里衔接。
 - **验证：** 用 `examples/live_check` 在已收盘的 20261116 和 20261113 上重建 SN，与生产 parquet 比对：共 11,128 根，成交、成交额、OHLC、twap、mid、买卖量逐值一致，缺失和多余都是 0（不做时段裁剪时会多出收盘快照那几分钟）。`examples/live_query` 查真实服务：首次请求读文件约 9 秒，之后约 46 毫秒。
 - **全品种实测（2026-11-17 10:40）：** 除 SN 外，另用 `live_check` 对 20261116 的 IF（中金所）、M（大商所）、CF（郑商所）、SC（能源中心）、SI（广期所）重建，共 19,590 根，与 parquet 逐值一致，缺失和多余为 0。全品种服务启动后约 70 秒预热完成（读六个交易所当天文件），之后每次请求 10–70 毫秒。内存随当天快照数线性增长。内存里每行快照用紧凑结构（24 个 f64 加两个整数，约 216 字节，缺失值用 NaN，合约名只作为表的键）存放，请求时才还原成 `Snapshot`；最初版本直接存 `Snapshot`（两个 String 加 24 个 `Option<f64>`，约 540 字节），同一时刻实测 9.05 GB，改后 3.84 GB，同一批合约的 bar 摘要逐一相同。启动时 `wait_reference_api` 先等参考数据 API 的 `/api/v1/health` 就绪（它是 Python 子进程，比主进程晚几秒），避免第一次取元数据时报 `Connection refused` 再等 5 秒重试。
 - **落盘延迟（2026-11-17）：** 最后一段（午休、收盘、夜盘收盘前的那一段）不再只靠 2 小时静默，而是用交易时段表证明：合约最后一行落在某个"后面至少隔 30 分钟才开盘"的连续时段末尾（`SessionMatcher::break_end`，10:15 的 15 分钟茶歇不算），文件已读到末尾，并且墙钟已过最后一行 `delay_s`（默认 600 秒），就落盘，切点取时段结束后 `tail_grace_s`（默认 300 秒），这样收盘后几秒写入的收盘快照仍归本段；之后再到的更早的行会被标为迟到并重建该交易所。2 小时静默规则保留作兜底。
-- **限制：** 盘中的最后几分钟随 NFS 追赶可能变化，盘后以 parquet 为准；没有 `size_buckets`。
+- **限制：** 盘中的最后几分钟随 NFS 追赶可能变化，盘后以 parquet 为准。
+- **清单版本（2026-11-17）：** `manifest.json` 版本从 1 升到 2：升级后第一次启动会丢弃当天已落盘的旧段（它们没有分桶列）并从文件重建，约 90 秒。
+
+### 独立的查询接口
+
+分桶阈值和交易时段不再塞进 `GetMinuteBars`，各有一个接口（契约在 `cn_market.proto`）：
+
+- `GetSizeThresholds(exchange, product)`：`product` 为空 = 该交易所全部品种。每个品种返回当前上海自然月的 `applies_month` 和 P50/P90（成交额，人民币，含乘数），下个月的文件已存在时再多一条；没有阈值的品种返回空列表。未知交易所或品种返回 `NOT_FOUND`。数值来自和 bar 计算完全相同的阈值文件（懒加载、缓存，缺失的文件每 5 分钟重新找一次）。
+- `GetTradingSessions(exchange, product)`：`product` 为空 = 全部。返回 `snapshot_as_of` 和每个品种按段序的连续竞价窗口 `{begin_sec, end_sec}`（上海零点起的秒数，结束不含，`end_sec <= begin_sec` 表示跨过零点）。来自 `session_as_of` 对应的时段快照，需要配置 `[live]`（否则 `UNAVAILABLE`）。
+- `GetDataState(exchange)`：带交易所时，`live_trading_day` / `live_through_ms` 描述这个交易所；不带则为 0。这两个值由后台线程发布到原子变量，轮询很便宜。`open_time + 60 秒 <= live_through_ms` 的分钟是走完的。
+
+### 实时大小分类阈值（2026-11-17，和 baseline_data_1min 同一定义）
+
+- **文件：** `<size_threshold_dir>/dominant_by_day/<YYYYMM>/<品种>.json`，`{"basis":"dominant_by_day","product","source_month","p50","p90","samples","days",...}`，原子写入。默认目录 `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/size_thresholds`。
+- **口径：** 对"来源月"里每个交易日取当天主力合约（`roll/result/<ex>_dominant.csv` 的 `instrument_id`，郑商所三位/四位码按 `canonical` 对齐）的全部区间成交额，逐日合并，取线性 P50/P90（和 numpy 默认一致）。周五夜盘归周一的交易日（`trad_day_from_ts`），所以换月日周五夜盘算新主力。一笔成交用"它自己上海时间所在月的上一个月"的阈值，所以跨月的夜盘也是对的。
+- **生成：** `scripts/export_size_thresholds.sh [YYYYMM]`（默认上一个自然月）：对 `baseline_data_1min` 里的每个品种调用 `fill_1min_size_buckets --product P --export-month YYYYMM`，最多 4 个并发，只读 RocksDB，已有有效文件就跳过（`FORCE=1` 重算）。算不出来的品种（新上市、上月没有主力成交）列在 `_failed.txt`，两处使用方都不设分桶、不编造。每月 1 日上海 06:00 由任务 `size-thresholds-monthly` 生成上个月。
+- **单次 `fill_1min_size_buckets` 缺文件时：** 自己用 RocksDB 加主力表算出来并写入同一个文件，所以工序 4 不依赖月任务一定先跑过。
+- **月初注意：** 上个月最后一个周五夜盘（上期所/能源中心，过零点后）要到下周一回放后才进 RocksDB；月初 1 日的导出可能缺这几笔。需要精确时用 `FORCE=1` 在回放之后重导一次。
 
 ## 主力合约（2026-11-16 上线）
 
@@ -107,9 +124,10 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
   - MCP（8780）工具 `cn_dominant_contracts`，HTTP 调用形式是 `/api/cn_dominant_contracts?product=RB`。
 - **初始化（2026-11-16）：** 以 `cn_roll_replay/2019_20260826` 的原始截面加上 08-27 到 11-13 的缺口截面为输入，重算到 2026-11-13，08-26 及以前已发布的主力行逐行未变。
 
-### 实时大小分类阈值导出
+### 大小分类阈值的导出（取代旧的 `--export-thresholds`）
 
-`fill_1min_size_buckets --product SN --start 2026-10-01 --end 2026-10-31 --export-thresholds /private/path/current.json`
-只读打开 RocksDB，导出一个完整上海自然月的区间成交额 P50/P90 和样本数，
-不覆盖 parquet。云端或本机实时信号可使用上一完整月的这份事实阈值；
-盘后原有当月回填口径保持不变。
+旧的 `--export-thresholds <路径>`（同月、全部合约）已经删除。要单独导出某个品种、某个来源月的阈值：
+
+`fill_1min_size_buckets --product SN --export-month 202610`
+
+写入 `<size_thresholds>/dominant_by_day/202610/SN.json`（只读 RocksDB，不碰 parquet；该月必须已经结束）。`mkt_signal` 的实盘读的 JSON（`product`、`source_month`、`p50`、`p90`、`samples`）是这个文件的子集，字段名不变。

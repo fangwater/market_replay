@@ -17,7 +17,9 @@ use cn_futures_l2::multipliers::{load_multiplier_catalog, ProductMultiplier};
 use cn_market_proto::cn_futures_market_server::{CnFuturesMarket, CnFuturesMarketServer};
 use cn_market_proto::{
     get_minute_bars_request::Range, BookLevel, Contract, DataState, Exchange, GetDataStateRequest,
-    GetMinuteBarsRequest, GetMinuteBarsResponse, MinuteBar, SizeBuckets,
+    GetMinuteBarsRequest, GetMinuteBarsResponse, GetSizeThresholdsRequest,
+    GetSizeThresholdsResponse, GetTradingSessionsRequest, GetTradingSessionsResponse, MinuteBar,
+    ProductSessions, ProductThresholds, SizeBuckets,
 };
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -29,6 +31,7 @@ pub mod dominant;
 pub mod intraday;
 pub mod live;
 pub mod live_seg;
+pub mod size_thr;
 
 /// A time-range request may span at most this many calendar days.
 const MAX_RANGE_DAYS: i64 = 31;
@@ -79,6 +82,37 @@ fn archive_exchange(e: Exchange) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// Upper-case product directories of an exchange in the archive, sorted.
+fn products_in(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_ascii_uppercase))
+        .filter(|n| !n.starts_with('_'))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The requested product (empty = all) out of the exchange's products;
+/// an unknown product is `NOT_FOUND`.
+fn select_products(all: Vec<String>, product: &str) -> Result<Vec<String>, Status> {
+    let product = product.trim();
+    if product.is_empty() {
+        return Ok(all);
+    }
+    let wanted = product.to_ascii_uppercase();
+    if all.contains(&wanted) {
+        Ok(vec![wanted])
+    } else {
+        Err(Status::not_found(format!(
+            "no product {wanted} on this exchange"
+        )))
+    }
+}
+
 fn product_of(code: &str) -> String {
     code.chars()
         .take_while(|c| c.is_ascii_alphabetic())
@@ -88,21 +122,7 @@ fn product_of(code: &str) -> String {
 
 /// Lower-case; CZCE `YMM` widened to `YYMM` using the trading day's decade.
 pub fn canonical(code: &str, trading_day: u32) -> String {
-    let lower = code.trim().to_ascii_lowercase();
-    let letters = lower
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .count();
-    let tail = &lower[letters..];
-    if tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit()) && trading_day > 0 {
-        let year = (trading_day / 10_000) as i32;
-        let mut full = year / 10 * 10 + (tail.as_bytes()[0] - b'0') as i32;
-        if full < year - 1 {
-            full += 10;
-        }
-        return format!("{}{:02}{}", &lower[..letters], full % 100, &tail[1..]);
-    }
-    lower
+    cn_futures_l2::dominant_table::canonical(code, trading_day)
 }
 
 /// Tick table from the reference service: exact instrument, else product-wide.
@@ -287,6 +307,73 @@ impl Service {
         }
     }
 
+    /// `DataState`; with an exchange, its in-progress day and how far NFS has
+    /// been read (both 0 when no day is open or the exchange is unset).
+    fn data_state_of(&self, exchange: Exchange) -> DataState {
+        let (live_trading_day, live_through_ms) = match (archive_exchange(exchange), &self.live) {
+            (Some((dir, _)), Some(live)) => live.exchange_progress(dir),
+            _ => (0, 0),
+        };
+        DataState {
+            live_trading_day,
+            live_through_ms,
+            ..self.data_state()
+        }
+    }
+
+    /// Products of an exchange as listed in the archive (upper-case).
+    fn exchange_products(&self, dir_name: &str) -> Vec<String> {
+        products_in(&self.cfg.baseline_root.join(dir_name))
+    }
+
+    fn size_thresholds(
+        &self,
+        req: GetSizeThresholdsRequest,
+    ) -> Result<GetSizeThresholdsResponse, Status> {
+        let exchange = Exchange::try_from(req.exchange).unwrap_or(Exchange::Unspecified);
+        let (dir_name, _) =
+            archive_exchange(exchange).ok_or_else(|| Status::not_found("unknown exchange"))?;
+        let products = select_products(self.exchange_products(dir_name), &req.product)?;
+        let now_ms = Utc::now().timestamp_millis();
+        Ok(GetSizeThresholdsResponse {
+            products: products
+                .into_iter()
+                .map(|product| ProductThresholds {
+                    thresholds: self
+                        .live
+                        .as_ref()
+                        .map(|l| l.size_thresholds(&product, now_ms))
+                        .unwrap_or_default(),
+                    product,
+                })
+                .collect(),
+        })
+    }
+
+    fn trading_sessions(
+        &self,
+        req: GetTradingSessionsRequest,
+    ) -> Result<GetTradingSessionsResponse, Status> {
+        let exchange = Exchange::try_from(req.exchange).unwrap_or(Exchange::Unspecified);
+        let (dir_name, _) =
+            archive_exchange(exchange).ok_or_else(|| Status::not_found("unknown exchange"))?;
+        let live = self
+            .live
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("trading sessions are not loaded (no [live])"))?;
+        let products = select_products(self.exchange_products(dir_name), &req.product)?;
+        Ok(GetTradingSessionsResponse {
+            snapshot_as_of: self.cfg.session_as_of.clone(),
+            products: products
+                .into_iter()
+                .map(|product| ProductSessions {
+                    windows: live.session_windows(dir_name, &product),
+                    product,
+                })
+                .collect(),
+        })
+    }
+
     fn bars(&self, req: GetMinuteBarsRequest) -> Result<GetMinuteBarsResponse, Status> {
         let exchange = Exchange::try_from(req.exchange).unwrap_or(Exchange::Unspecified);
         let (dir_name, venue) = archive_exchange(exchange)
@@ -398,6 +485,7 @@ impl Service {
                     false,
                     req.include_empty_minutes,
                     window,
+                    false,
                 )? {
                     bars.push(bar);
                 }
@@ -439,6 +527,7 @@ impl Service {
                                 true,
                                 req.include_empty_minutes,
                                 window,
+                                live.has_size_thresholds(&product, r.ts),
                             )? {
                                 bars.push(bar);
                             }
@@ -501,8 +590,44 @@ fn make_contract(
     })
 }
 
+/// The `size_buckets` of one minute. Archive minutes always carry their columns
+/// (from the file). A live minute carries them only when the product's
+/// thresholds exist and the minute is classified: an empty minute, or one whose
+/// trades were classed (`large + medium + small > 0`); otherwise unset.
+fn size_buckets_for(
+    r: &cn_futures_core::baseline_1min::BaselineMinute,
+    provisional: bool,
+    thresholds: bool,
+) -> Option<SizeBuckets> {
+    if provisional {
+        if !thresholds {
+            return None;
+        }
+        let classed = r.large_order + r.medium_order + r.small_order;
+        if r.volume > 0.0 && (classed <= 0.0 || !classed.is_finite()) {
+            return None;
+        }
+    }
+    Some(SizeBuckets {
+        large_turnover_cny: r.large_order,
+        medium_turnover_cny: r.medium_order,
+        small_turnover_cny: r.small_order,
+        large_buy_cny: r.large_buy,
+        large_sell_cny: r.large_sell,
+        medium_buy_cny: r.medium_buy,
+        medium_sell_cny: r.medium_sell,
+        small_buy_cny: r.small_buy,
+        small_sell_cny: r.small_sell,
+        net_buy_large_cny: r.net_buy_large,
+        net_buy_medium_cny: r.net_buy_medium,
+        net_buy_small_cny: r.net_buy_small,
+    })
+}
+
 /// One archive/live minute row -> proto bar. `None` when the minute is
 /// filtered (empty minute not requested, or outside the time window).
+/// `thresholds`: the product's size thresholds exist (live bars only).
+#[allow(clippy::too_many_arguments)]
 fn make_bar(
     r: &cn_futures_core::baseline_1min::BaselineMinute,
     td: u32,
@@ -511,6 +636,7 @@ fn make_bar(
     provisional: bool,
     include_empty: bool,
     window: Option<(i64, i64)>,
+    thresholds: bool,
 ) -> Result<Option<MinuteBar>, Status> {
     if r.volume <= 0.0 && !include_empty {
         return Ok(None);
@@ -532,24 +658,7 @@ fn make_bar(
     };
     Ok(Some(MinuteBar {
         provisional,
-        size_buckets: if provisional {
-            None
-        } else {
-            Some(SizeBuckets {
-                large_turnover_cny: r.large_order,
-                medium_turnover_cny: r.medium_order,
-                small_turnover_cny: r.small_order,
-                large_buy_cny: r.large_buy,
-                large_sell_cny: r.large_sell,
-                medium_buy_cny: r.medium_buy,
-                medium_sell_cny: r.medium_sell,
-                small_buy_cny: r.small_buy,
-                small_sell_cny: r.small_sell,
-                net_buy_large_cny: r.net_buy_large,
-                net_buy_medium_cny: r.net_buy_medium,
-                net_buy_small_cny: r.net_buy_small,
-            })
-        },
+        size_buckets: size_buckets_for(r, provisional, thresholds),
         open_time_ms: open_ms,
         trading_day: td,
         open: o,
@@ -630,9 +739,35 @@ impl CnFuturesMarket for Grpc {
 
     async fn get_data_state(
         &self,
-        _request: Request<GetDataStateRequest>,
+        request: Request<GetDataStateRequest>,
     ) -> Result<Response<DataState>, Status> {
-        Ok(Response::new(self.0.data_state()))
+        let exchange =
+            Exchange::try_from(request.into_inner().exchange).unwrap_or(Exchange::Unspecified);
+        Ok(Response::new(self.0.data_state_of(exchange)))
+    }
+
+    async fn get_size_thresholds(
+        &self,
+        request: Request<GetSizeThresholdsRequest>,
+    ) -> Result<Response<GetSizeThresholdsResponse>, Status> {
+        let svc = self.0.clone();
+        let req = request.into_inner();
+        tokio::task::spawn_blocking(move || svc.size_thresholds(req))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map(Response::new)
+    }
+
+    async fn get_trading_sessions(
+        &self,
+        request: Request<GetTradingSessionsRequest>,
+    ) -> Result<Response<GetTradingSessionsResponse>, Status> {
+        let svc = self.0.clone();
+        let req = request.into_inner();
+        tokio::task::spawn_blocking(move || svc.trading_sessions(req))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map(Response::new)
     }
 }
 
@@ -835,6 +970,225 @@ pub async fn serve(cfg: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn minute(
+        volume: f64,
+        large: f64,
+        medium: f64,
+        small: f64,
+    ) -> cn_futures_core::baseline_1min::BaselineMinute {
+        let trade = cn_futures_core::baseline_1min::PrintTrade {
+            ts_utc_ns: 1_794_880_800 * 1_000_000_000,
+            price: 1.0,
+            volume: volume.max(1.0),
+            amount: 1.0,
+            aggressor: 1,
+        };
+        let mut row =
+            cn_futures_core::baseline_1min::synthesize_minutes("sn2701", &[trade], &[], 1.0)
+                .unwrap()
+                .remove(0);
+        row.volume = volume;
+        (row.large_order, row.medium_order, row.small_order) = (large, medium, small);
+        row
+    }
+
+    const SESSIONS_JSON: &str = r#"{"dataState":{"as_of":"2026-11-15","latest_start_ts":"x",
+        "latest_update_ts":"x","session_count":3,"product_count":2,"venue_count":1,"version_count":3},
+        "timezone":"Asia/Shanghai","sessions":[
+        {"venue":"SHFE","product_id":"SN","segment_no":2,"time_begin":"09:00:00","time_end":"10:15:00","crosses_midnight":false,"is_active":true},
+        {"venue":"SHFE","product_id":"SN","segment_no":1,"time_begin":"21:00:00","time_end":"01:00:00","crosses_midnight":true,"is_active":true},
+        {"venue":"SHFE","product_id":"CU","segment_no":1,"time_begin":"09:00:00","time_end":"10:15:00","crosses_midnight":false,"is_active":true}]}"#;
+
+    /// A service over a temp archive with products SN and CU on SHFE (and an
+    /// ignored `_provenance` directory); `live` adds the live config with the
+    /// given threshold directory.
+    fn test_service(live: bool) -> (tempfile::TempDir, tempfile::TempDir, Service) {
+        let archive = tempfile::tempdir().unwrap();
+        for p in ["xsge/SN", "xsge/CU", "xsge/_tmp", "_provenance"] {
+            std::fs::create_dir_all(archive.path().join(p)).unwrap();
+        }
+        let thresholds = tempfile::tempdir().unwrap();
+        let cfg: Config = toml::from_str(&format!(
+            "listen=\"x\"\nbaseline_root=\"{}\"\ndaily_state_file=\"/none\"\nreference_api=\"http://x\"\nsession_as_of=\"2026-11-15\"\n",
+            archive.path().display()
+        ))
+        .unwrap();
+        let live = live.then(|| {
+            let live_cfg: live::Config = toml::from_str(&format!(
+                "msg_root=\"/none\"\nproducts=[\"*\"]\nsize_threshold_dir=\"{}\"\n",
+                thresholds.path().display()
+            ))
+            .unwrap();
+            let sessions =
+                cn_futures_trim::sessions::ContinuousSessions::parse(SESSIONS_JSON).unwrap();
+            Arc::new(live::Live::new(live_cfg, Arc::new(sessions)))
+        });
+        let meta = Arc::new(RwLock::new(Metadata {
+            multipliers: HashMap::new(),
+            ticks: Ticks::default(),
+        }));
+        (
+            archive,
+            thresholds,
+            Service {
+                intraday: None,
+                live,
+                cfg,
+                meta,
+            },
+        )
+    }
+
+    fn write_prior_month_thresholds(dir: &Path, product: &str, p50: f64, p90: f64) -> (u32, u32) {
+        let now = Utc::now().timestamp_millis();
+        let applies = cn_futures_l2::size_thresholds::month_of_ns(now as u64 * 1_000_000);
+        let source = cn_futures_l2::size_thresholds::prior_month(applies);
+        cn_futures_l2::size_thresholds::write(
+            dir,
+            product,
+            &cn_futures_l2::size_thresholds::Thr {
+                source_month: source,
+                p50,
+                p90,
+                samples: 7,
+                days: 2,
+            },
+            &[],
+        )
+        .unwrap();
+        (applies, source)
+    }
+
+    #[test]
+    fn size_thresholds_rpc_lists_products_and_leaves_missing_ones_empty() {
+        let (_a, thr, svc) = test_service(true);
+        let (applies, _) = write_prior_month_thresholds(thr.path(), "SN", 100.0, 900.0);
+        let req = |product: &str| GetSizeThresholdsRequest {
+            exchange: Exchange::Shfe as i32,
+            product: product.into(),
+        };
+        // Empty product = every product of the exchange (sorted, `_` dirs ignored).
+        let all = svc.size_thresholds(req("")).unwrap().products;
+        assert_eq!(
+            all.iter().map(|p| p.product.as_str()).collect::<Vec<_>>(),
+            vec!["CU", "SN"]
+        );
+        assert!(
+            all[0].thresholds.is_empty(),
+            "CU has no thresholds: empty list"
+        );
+        assert_eq!(all[1].thresholds.len(), 1);
+        let t = &all[1].thresholds[0];
+        assert_eq!(
+            (t.applies_month, t.p50_turnover_cny, t.p90_turnover_cny),
+            (applies, 100.0, 900.0)
+        );
+        // One product, case-insensitive.
+        let one = svc.size_thresholds(req("sn")).unwrap().products;
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].product, "SN");
+        // Unknown product / unknown or unspecified exchange: NOT_FOUND.
+        assert_eq!(
+            svc.size_thresholds(req("ZZ")).unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        let none = GetSizeThresholdsRequest {
+            exchange: 0,
+            product: String::new(),
+        };
+        assert_eq!(
+            svc.size_thresholds(none).unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        // Without a [live] section there are no thresholds at all, still a valid answer.
+        let (_a2, _t2, bare) = test_service(false);
+        let r = bare.size_thresholds(req("SN")).unwrap().products;
+        assert!(r[0].thresholds.is_empty());
+    }
+
+    #[test]
+    fn trading_sessions_rpc_returns_windows_in_segment_order() {
+        let (_a, _t, svc) = test_service(true);
+        let req = |product: &str| GetTradingSessionsRequest {
+            exchange: Exchange::Shfe as i32,
+            product: product.into(),
+        };
+        let all = svc.trading_sessions(req("")).unwrap();
+        assert_eq!(all.snapshot_as_of, "2026-11-15");
+        assert_eq!(all.products.len(), 2);
+        let sn = all.products.iter().find(|p| p.product == "SN").unwrap();
+        let pairs: Vec<(u32, u32)> = sn
+            .windows
+            .iter()
+            .map(|w| (w.begin_sec, w.end_sec))
+            .collect();
+        // Segment 1 is the night window (end <= begin: past midnight), then segment 2.
+        assert_eq!(pairs, vec![(21 * 3600, 3600), (9 * 3600, 10 * 3600 + 900)]);
+        assert_eq!(svc.trading_sessions(req("cu")).unwrap().products.len(), 1);
+        assert_eq!(
+            svc.trading_sessions(req("ZZ")).unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        let (_a2, _t2, bare) = test_service(false);
+        assert_eq!(
+            bare.trading_sessions(req("SN")).unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+    }
+
+    #[test]
+    fn data_state_describes_the_requested_exchange_only() {
+        let (_a, _t, svc) = test_service(true);
+        // No live day open: zeros, with or without an exchange.
+        let d = svc.data_state_of(Exchange::Shfe);
+        assert_eq!((d.live_trading_day, d.live_through_ms), (0, 0));
+        assert_eq!(svc.data_state_of(Exchange::Unspecified).live_trading_day, 0);
+        assert_eq!(d.session_snapshot_as_of, "2026-11-15");
+        // An open day on SHFE shows for SHFE only.
+        svc.live
+            .as_ref()
+            .unwrap()
+            .set_progress_for_tests("xsge", 20261117, 1_794_890_000_000);
+        let shfe = svc.data_state_of(Exchange::Shfe);
+        assert_eq!(
+            (shfe.live_trading_day, shfe.live_through_ms),
+            (20261117, 1_794_890_000_000)
+        );
+        assert_eq!(svc.data_state_of(Exchange::Dce).live_trading_day, 0);
+        assert_eq!(svc.data_state_of(Exchange::Unspecified).live_through_ms, 0);
+    }
+
+    #[test]
+    fn live_minutes_carry_size_buckets_only_when_thresholds_exist_and_are_classified() {
+        // No thresholds: unset, whatever the minute holds.
+        assert!(size_buckets_for(&minute(5.0, 0.0, 9.0, 0.0), true, false).is_none());
+        // Thresholds + classified trades: set.
+        let b = size_buckets_for(&minute(5.0, 0.0, 9.0, 0.0), true, true).unwrap();
+        assert_eq!(b.medium_turnover_cny, 9.0);
+        // Thresholds but a traded minute with nothing classified (e.g. segment
+        // persisted before the files existed): unset rather than fake zeros.
+        assert!(size_buckets_for(&minute(5.0, 0.0, 0.0, 0.0), true, true).is_none());
+        // An empty minute is a genuine zero once thresholds exist.
+        let empty = size_buckets_for(&minute(0.0, 0.0, 0.0, 0.0), true, true).unwrap();
+        assert_eq!(
+            empty.large_turnover_cny + empty.medium_turnover_cny + empty.small_turnover_cny,
+            0.0
+        );
+    }
+
+    #[test]
+    fn archive_minutes_always_keep_the_columns_of_their_file() {
+        let b = size_buckets_for(&minute(5.0, 1.0, 2.0, 3.0), false, false).unwrap();
+        assert_eq!(
+            (
+                b.large_turnover_cny,
+                b.medium_turnover_cny,
+                b.small_turnover_cny
+            ),
+            (1.0, 2.0, 3.0)
+        );
+    }
 
     #[test]
     fn requested_empty_minutes_preserve_carried_or_missing_prices() {

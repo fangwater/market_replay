@@ -25,8 +25,8 @@ use cn_futures_core::events::{
 use cn_futures_core::segments::{book_valid, trad_day_from_ts, SESSION_BREAK_SEC};
 use cn_futures_core::universe::product_id;
 use cn_futures_l2::baseline_1min::{
-    fill_session_minutes_with_twap, minute_segments_from_seconds, synthesize_minutes,
-    BaselineMinute, PrintTrade,
+    fill_session_minutes_with_twap, minute_left_sec, minute_segments_from_seconds,
+    synthesize_minutes, BaselineMinute, PrintTrade, SizeBuckets,
 };
 use cn_futures_l2::{split_depth_segments, Exchange};
 use serde_json::{json, Value};
@@ -317,6 +317,45 @@ pub struct Ctx<'a> {
     pub day: NaiveDate,
     /// Continuous-session filter on a minute's UTC second (the archive's trim).
     pub in_session: &'a dyn Fn(i64) -> bool,
+    /// `(p50, p90)` for a trade at this UTC ns, `None` when the thresholds of
+    /// its prior month do not exist (the minute then keeps zero size buckets).
+    pub size: Option<&'a dyn Fn(u64) -> Option<(f64, f64)>>,
+}
+
+/// Sets the 12 size-bucket columns of `rows` from `trades` exactly like the
+/// baseline_data_1min step (`fill_1min_size_buckets`): each trade is classed
+/// with the thresholds of its own month's prior month and added per minute.
+/// Minutes without a classified trade keep their zeros.
+pub fn apply_size_buckets(
+    rows: &mut [BaselineMinute],
+    trades: &[PrintTrade],
+    size: &dyn Fn(u64) -> Option<(f64, f64)>,
+) {
+    let mut by_minute: std::collections::HashMap<i64, SizeBuckets> =
+        std::collections::HashMap::new();
+    for t in trades {
+        if let Some((p50, p90)) = size(t.ts_utc_ns) {
+            by_minute
+                .entry(minute_left_sec(t.ts_utc_ns))
+                .or_default()
+                .add(t.amount, t.aggressor, p50, p90);
+        }
+    }
+    for row in rows {
+        let Some(b) = by_minute.get(&row.ts) else {
+            continue;
+        };
+        row.large_order = b.large_order;
+        row.medium_order = b.medium_order;
+        row.small_order = b.small_order;
+        row.large_buy = b.large_buy;
+        row.large_sell = b.large_sell;
+        row.medium_buy = b.medium_buy;
+        row.medium_sell = b.medium_sell;
+        row.small_buy = b.small_buy;
+        row.small_sell = b.small_sell;
+        (row.net_buy_large, row.net_buy_medium, row.net_buy_small) = b.nets();
+    }
 }
 
 /// Same chain as `export_1min::export_product`, minus RocksDB.
@@ -346,7 +385,10 @@ pub fn minutes_from_output(ctx: &Ctx, out: InstrumentOutput) -> Result<Vec<Basel
     let sec_segs = split_depth_segments(&depth_secs, ctx.exchange, ctx.instrument);
     let min_segs = minute_segments_from_seconds(&sec_segs);
     let sparse = synthesize_minutes(ctx.instrument, &trades, &depths, ctx.multiplier)?;
-    let filled = fill_session_minutes_with_twap(ctx.instrument, sparse, &min_segs, &trades)?;
+    let mut filled = fill_session_minutes_with_twap(ctx.instrument, sparse, &min_segs, &trades)?;
+    if let Some(size) = ctx.size {
+        apply_size_buckets(&mut filled, &trades, size);
+    }
     Ok(filled
         .into_iter()
         .filter(|r| trad_day_from_ts(r.ts) == ctx.day && (ctx.in_session)(r.ts))
@@ -486,7 +528,88 @@ mod tests {
             multiplier: 10.0,
             day: day(),
             in_session: keep,
+            size: None,
         }
+    }
+
+    fn print(ts_s: i64, amount: f64, aggressor: u8) -> PrintTrade {
+        PrintTrade {
+            ts_utc_ns: ts_s as u64 * NS as u64,
+            price: 100.0,
+            volume: 1.0,
+            amount,
+            aggressor,
+        }
+    }
+
+    fn minute_rows(trades: &[PrintTrade]) -> Vec<BaselineMinute> {
+        synthesize_minutes("sn2701", trades, &[], 1.0).unwrap()
+    }
+
+    #[test]
+    fn size_buckets_split_every_trade_exactly_and_respect_the_boundaries() {
+        let base = 1_794_880_800; // a minute boundary
+        let trades = vec![
+            print(base + 1, 99.5, 1),   // < p50: small, buyer
+            print(base + 2, 100.0, 2),  // == p50: medium, seller
+            print(base + 3, 199.5, 1),  // < p90: medium, buyer
+            print(base + 4, 200.0, 2),  // == p90: large, seller
+            print(base + 5, 300.0, 0),  // unknown side: large, split 50/50
+            print(base + 6, 0.0, 1),    // not a positive amount: ignored
+            print(base + 61, 150.0, 1), // next minute
+        ];
+        let mut rows = minute_rows(&trades);
+        let size = |_: u64| Some((100.0, 200.0));
+        apply_size_buckets(&mut rows, &trades, &size);
+        let m0 = &rows[0];
+        assert_eq!(
+            (m0.small_order, m0.medium_order, m0.large_order),
+            (99.5, 299.5, 500.0)
+        );
+        assert_eq!((m0.small_buy, m0.small_sell), (99.5, 0.0));
+        assert_eq!((m0.medium_buy, m0.medium_sell), (199.5, 100.0));
+        assert_eq!((m0.large_buy, m0.large_sell), (150.0, 350.0));
+        // The three classes add up to the minute's classified turnover.
+        assert_eq!(
+            m0.small_order + m0.medium_order + m0.large_order,
+            99.5 + 100.0 + 199.5 + 200.0 + 300.0
+        );
+        assert_eq!(
+            (m0.net_buy_large, m0.net_buy_medium, m0.net_buy_small),
+            (150.0 - 350.0, 199.5 - 100.0, 99.5)
+        );
+        let m1 = &rows[1];
+        assert_eq!(
+            (m1.medium_order, m1.small_order, m1.large_order),
+            (150.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn size_buckets_stay_zero_without_thresholds_and_follow_the_trades_own_month() {
+        let base = 1_794_880_800;
+        let trades = vec![print(base + 1, 150.0, 1), print(base + 61, 150.0, 1)];
+        let mut none = minute_rows(&trades);
+        apply_size_buckets(&mut none, &trades, &|_| None);
+        assert!(none
+            .iter()
+            .all(|r| r.large_order + r.medium_order + r.small_order == 0.0));
+        // Thresholds are chosen per trade: the second minute gets a different pair.
+        let split_at = (base + 60) as u64 * NS as u64;
+        let by_time = |ts: u64| {
+            Some(if ts < split_at {
+                (100.0, 200.0)
+            } else {
+                (10.0, 100.0)
+            })
+        };
+        let mut rows = minute_rows(&trades);
+        apply_size_buckets(&mut rows, &trades, &by_time);
+        assert_eq!(
+            rows[0].medium_order, 150.0,
+            "150 is medium under (100, 200)"
+        );
+        assert_eq!(rows[1].large_order, 150.0, "150 is large under (10, 100)");
     }
 
     fn rows(snaps: &[Snapshot]) -> Vec<Row> {

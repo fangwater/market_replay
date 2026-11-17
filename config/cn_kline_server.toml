@@ -32,3 +32,7 @@ segment_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/live_segments"
 # + tail_grace_s. tail_quiet_s (2 h) stays as the fallback.
 delay_s = 600
 tail_grace_s = 300
+# Shared size-class threshold files (dominant contract by trading day, complete preceding
+# month; the same files baseline_data_1min step 4 uses). A trade of month M is classed with
+# month M-1's thresholds; a product without a file keeps its bars without size_buckets.
+size_threshold_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/size_thresholds"

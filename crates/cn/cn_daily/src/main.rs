@@ -5,11 +5,12 @@
 //!   2. `export_baseline_1min`               RocksDB -> staging parquet (untrimmed)
 //!   3. `trim_cn_futures_continuous_sessions` staging -> production baseline_data_1min
 //!      (fixed session snapshot, the one recorded in the archive's _provenance)
-//!   4. `fill_1min_size_buckets`             month-to-date size buckets (whole-month thresholds)
+//!   4. `fill_1min_size_buckets`             size buckets of exactly this run's days, thresholds =
+//!      dominant-by-day P50/P90 of the complete preceding month (shared with the live bars)
 //!   5. audit + DingTalk summary; any failure stops the run and is notified.
 
 use anyhow::{bail, ensure, Context, Result};
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveTime, Utc};
 use chrono_tz::Asia::Shanghai;
 use clap::{Parser, Subcommand};
 use cn_futures_l2::export_1min::read_day_parquet;
@@ -366,9 +367,11 @@ fn roll_replay_steps(cfg: &Config, root: &Path, end: NaiveDate) -> Vec<Step> {
         .collect()
 }
 
-/// Size buckets use whole-calendar-month thresholds: re-fill month-to-date
-/// once per month touched by this run (cheap for daily runs, linear for backfills).
-fn fill_step(cfg: &Config, month_start: NaiveDate, end: NaiveDate) -> Step {
+/// Size buckets use the shared dominant-by-day thresholds of the complete
+/// preceding month (`cn_futures_l2::size_thresholds`). The tool rewrites exactly
+/// `[first, last]` — the days processed by this run — and nothing else, so days
+/// filled by an older rule are never touched.
+fn fill_step(cfg: &Config, first: NaiveDate, last: NaiveDate) -> Step {
     Step {
         name: "大小单分桶",
         bin: "fill_1min_size_buckets",
@@ -378,24 +381,19 @@ fn fill_step(cfg: &Config, month_start: NaiveDate, end: NaiveDate) -> Step {
             "--root".into(),
             cfg.baseline_root.display().to_string(),
             "--start".into(),
-            month_start.format("%Y-%m-%d").to_string(),
+            first.format("%Y-%m-%d").to_string(),
             "--end".into(),
-            end.format("%Y-%m-%d").to_string(),
+            last.format("%Y-%m-%d").to_string(),
             "--workers".into(),
             cfg.fill_workers.to_string(),
         ],
     }
 }
 
-/// (month start, last processed day) per calendar month, ascending.
-fn fill_ranges(days: &[NaiveDate]) -> Vec<(NaiveDate, NaiveDate)> {
-    let mut out: BTreeMap<NaiveDate, NaiveDate> = BTreeMap::new();
-    for d in days {
-        let m = d.with_day(1).expect("day 1");
-        let e = out.entry(m).or_insert(*d);
-        *e = (*e).max(*d);
-    }
-    out.into_iter().collect()
+/// The one range this run fills: first and last processed day (the pending days
+/// are consecutive trading days after `last_done`, so nothing else lies between).
+fn fill_range(days: &[NaiveDate]) -> Option<(NaiveDate, NaiveDate)> {
+    Some((*days.iter().min()?, *days.iter().max()?))
 }
 
 fn bin_dir(cfg: &Config) -> Result<PathBuf> {
@@ -636,9 +634,9 @@ fn run(
                 println!("{d} {} {} {}", s.name, s.bin, s.args.join(" "));
             }
         }
-        for (m, e) in fill_ranges(&days) {
-            let s = fill_step(cfg, m, e);
-            println!("{e} {} {} {}", s.name, s.bin, s.args.join(" "));
+        if let Some((first, last)) = fill_range(&days) {
+            let s = fill_step(cfg, first, last);
+            println!("{last} {} {} {}", s.name, s.bin, s.args.join(" "));
         }
         return Ok(());
     }
@@ -715,14 +713,14 @@ fn run(
         eprintln!("cn-daily: {day} replay/export/trim ok");
         done.push((day, a, timings));
     }
-    for (month_start, end) in fill_ranges(&days) {
-        let step = fill_step(cfg, month_start, end);
+    if let Some((first, end)) = fill_range(&days) {
+        let step = fill_step(cfg, first, end);
         let log = cfg
             .log_dir
             .join(format!("cn_daily_fill_{}.log", end.format("%Y%m%d")));
         match run_step(&bins, &step, &log) {
             Ok(secs) => {
-                // Attribute the month's fill time to its last processed day.
+                // Attribute the fill time to the last processed day.
                 if let Some((_, _, t)) = done.iter_mut().rev().find(|(d, _, _)| *d == end) {
                     t.push((step.name, secs));
                 }
@@ -908,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_use_month_start_for_size_buckets() {
+    fn size_buckets_fill_exactly_the_days_of_this_run() {
         let cfg: Config = toml::from_str(
             "msg_root=\"/m\"\nrocksdb_dir=\"/r\"\nbaseline_root=\"/b\"\nstaging_root=\"/s\"\n\
              log_dir=\"/l\"\nstate_file=\"/st.json\"\nsession_api=\"http://x\"\n\
@@ -929,25 +927,29 @@ mod tests {
             .iter()
             .map(|d| parse_day(d).unwrap())
             .collect();
-        let r = fill_ranges(&days);
+        // One range: the first and last day of the run, never the month start.
+        let (first, last) = fill_range(&days).unwrap();
         assert_eq!(
-            r,
-            vec![
-                (
-                    parse_day("20261001").unwrap(),
-                    parse_day("20261030").unwrap()
-                ),
-                (
-                    parse_day("20261101").unwrap(),
-                    parse_day("20261113").unwrap()
-                ),
-            ]
+            (first, last),
+            (
+                parse_day("20261029").unwrap(),
+                parse_day("20261113").unwrap()
+            )
         );
-        let fill = fill_step(&cfg, r[1].0, r[1].1).args;
+        assert!(fill_range(&[]).is_none());
+        let one = [parse_day("20261117").unwrap()];
+        assert_eq!(
+            fill_range(&one),
+            Some((
+                parse_day("20261117").unwrap(),
+                parse_day("20261117").unwrap()
+            ))
+        );
+        let fill = fill_step(&cfg, first, last).args;
         let i = fill.iter().position(|a| a == "--start").unwrap();
         assert_eq!(
             (fill[i + 1].as_str(), fill[i + 3].as_str()),
-            ("2026-11-01", "2026-11-13")
+            ("2026-10-29", "2026-11-13")
         );
     }
 }

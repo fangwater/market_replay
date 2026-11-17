@@ -1,23 +1,40 @@
-//! Overlay 12 size-bucket columns onto baseline_data_1min.
+//! Overlay 12 size-bucket columns onto baseline_data_1min day files.
 //!
-//! Thresholds are per product, Shanghai calendar month, linear P50/P90 of L2
-//! inferred trade amounts. Amounts themselves are not adjusted.
+//! One definition, shared with the live gRPC bars (see
+//! `cn_futures_l2::size_thresholds`): a trade is classed large / medium / small
+//! by `P50` / `P90` of the interval amounts of the DOMINANT contract by trading
+//! day (merged across rolls) over the COMPLETE PRECEDING Shanghai calendar month
+//! of the trade's own timestamp. Amounts themselves are not adjusted.
+//!
+//! An explicit `--start` and `--end` are required and only day files inside
+//! that range are rewritten: files of earlier days keep whatever rule filled
+//! them (the old same-month all-contract thresholds before 2026-11-17).
+//! A product/day whose prior-month thresholds do not exist (new listing, no
+//! dominant trades) is left exactly as it is and reported as
+//! `MISSING-THRESHOLDS`; thresholds are never invented.
+//!
+//! `--export-month YYYYMM --product P` only ensures the threshold file of that
+//! source month (used by the monthly job); no parquet is touched.
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration, NaiveDate, TimeZone};
 use chrono_tz::Asia::Shanghai;
 use clap::Parser;
-use cn_futures_l2::baseline_1min::{linear_percentile, minute_left_sec, SizeBuckets};
+use cn_futures_core::segments::trad_day_from_ts;
+use cn_futures_l2::baseline_1min::{minute_left_sec, SizeBuckets};
 use cn_futures_l2::codec::{decode_key, decode_trade, encode_key, KIND_TRADE};
 use cn_futures_l2::db::{
     open_rocksdb_read_only, L2Db, DEFAULT_ROCKSDB_DIR, FORBIDDEN_ROCKSDB_MARK,
 };
 use cn_futures_l2::export_1min::{read_day_parquet, write_day_parquet};
 use cn_futures_l2::export_1s::parse_product_cf;
+use cn_futures_l2::size_thresholds::{
+    self as thresholds, month_of_ns, prior_month, DEFAULT_DIR, DEFAULT_DOMINANT_DIR,
+};
 use cn_futures_l2::source::parse_day;
 use cn_futures_l2::universe::is_maintained_product;
 use rocksdb::{Direction, IteratorMode};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,25 +52,24 @@ struct Args {
     workers: usize,
     #[arg(long)]
     product: Option<String>,
-    /// Only overlay day files with TradDay >= start (YYYY-MM-DD or YYYYMMDD).
-    /// Thresholds stay whole-calendar-month, so a daily run should pass the
-    /// first day of the month to keep earlier days consistent.
+    /// First TradDay to overlay (YYYY-MM-DD or YYYYMMDD). Required.
     #[arg(long)]
     start: Option<String>,
-    /// Only overlay day files with TradDay <= end.
+    /// Last TradDay to overlay. Required; days outside the range are never rewritten.
     #[arg(long)]
     end: Option<String>,
-    /// Read-only export of one product's monthly thresholds. Does not overlay parquet.
+    /// Directory of the shared threshold files (`dominant_by_day/<YYYYMM>/<P>.json`).
+    #[arg(long, default_value = DEFAULT_DIR)]
+    threshold_dir: PathBuf,
+    /// Roll replay results (`<exchange>_dominant.csv`) that define the dominant contract.
+    #[arg(long, default_value = DEFAULT_DOMINANT_DIR)]
+    dominant_dir: PathBuf,
+    /// Only ensure the threshold file whose SOURCE month is this YYYYMM (needs --product).
     #[arg(long)]
-    export_thresholds: Option<PathBuf>,
-}
-
-fn year_month(ts_utc_ns: u64) -> u32 {
-    let local = Shanghai
-        .timestamp_opt((ts_utc_ns / 1_000_000_000) as i64, 0)
-        .single()
-        .expect("unix second");
-    local.year() as u32 * 100 + local.month()
+    export_month: Option<u32>,
+    /// With --export-month: recompute even when a valid file exists.
+    #[arg(long)]
+    force: bool,
 }
 
 fn day_of(path: &Path) -> Option<NaiveDate> {
@@ -64,8 +80,8 @@ fn list_product_days(
     root: &Path,
     exchange: &str,
     product: &str,
-    range: Option<(NaiveDate, NaiveDate)>,
-) -> Result<Vec<PathBuf>> {
+    range: (NaiveDate, NaiveDate),
+) -> Result<Vec<(NaiveDate, PathBuf)>> {
     let dir = root.join(exchange).join(product);
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -76,13 +92,10 @@ fn list_product_days(
         if path.extension().and_then(|ext| ext.to_str()) != Some("parquet") {
             continue;
         }
-        if let Some((start, end)) = range {
-            match day_of(&path) {
-                Some(day) if day >= start && day <= end => {}
-                _ => continue,
-            }
+        match day_of(&path) {
+            Some(day) if day >= range.0 && day <= range.1 => out.push((day, path)),
+            _ => {}
         }
-        out.push(path);
     }
     out.sort();
     Ok(out)
@@ -107,18 +120,51 @@ fn exchange_of_product(root: &Path, product: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn scan_product_trades(
+fn midnight_ns(day: NaiveDate) -> u64 {
+    Shanghai
+        .from_local_datetime(&day.and_hms_opt(0, 0, 0).expect("midnight"))
+        .single()
+        .expect("Shanghai has no DST")
+        .timestamp_nanos_opt()
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
+/// Column families of a product that can hold trades of `[first, last]`
+/// (a trade's timestamp is at most 4 days before its trading day).
+fn cfs_for(all: &[(i32, String)], first: NaiveDate, last: NaiveDate) -> Vec<String> {
+    let lo = (first - Duration::days(4)).year();
+    let hi = (last + Duration::days(1)).year();
+    let mut names: Vec<String> = all
+        .iter()
+        .filter(|(y, _)| *y >= lo && *y <= hi)
+        .map(|(_, n)| n.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Trades of the overlay range, bucketed per (instrument, minute); days whose
+/// prior-month thresholds are missing are reported in the second value.
+#[allow(clippy::too_many_arguments)]
+fn scan_range(
     db: &L2Db,
-    cf_names: &[String],
-    months: Option<(u32, u32)>,
-    collect_buckets: bool,
+    product: &str,
+    all_cfs: &[(i32, String)],
+    range: (NaiveDate, NaiveDate),
+    threshold_dir: &Path,
+    dominant_dir: &Path,
 ) -> Result<(
-    HashMap<u32, (f64, f64, usize)>,
     HashMap<(String, i64), SizeBuckets>,
+    HashMap<NaiveDate, BTreeSet<u32>>,
 )> {
-    let mut amounts: HashMap<u32, Vec<f64>> = HashMap::new();
-    let mut trades: Vec<(String, u64, f64, u8)> = Vec::new();
-    for cf_name in cf_names {
+    let cf_names = cfs_for(all_cfs, range.0, range.1);
+    let lo = midnight_ns(range.0 - Duration::days(4));
+    let hi = midnight_ns(range.1 + Duration::days(1));
+    let mut cache: HashMap<u32, Option<thresholds::Thr>> = HashMap::new();
+    let mut buckets: HashMap<(String, i64), SizeBuckets> = HashMap::new();
+    let mut missing: HashMap<NaiveDate, BTreeSet<u32>> = HashMap::new();
+    for cf_name in &cf_names {
         let cf = db
             .cf_handle(cf_name)
             .ok_or_else(|| anyhow::anyhow!("missing cf {cf_name}"))?;
@@ -129,8 +175,11 @@ fn scan_product_trades(
             if kind != KIND_TRADE {
                 break;
             }
-            let month = year_month(ts_ns);
-            if months.is_some_and(|(start, end)| month < start || month > end) {
+            if ts_ns < lo || ts_ns >= hi {
+                continue;
+            }
+            let day = trad_day_from_ts((ts_ns / 1_000_000_000) as i64);
+            if day < range.0 || day > range.1 {
                 continue;
             }
             let rec = decode_trade(&value)?;
@@ -138,35 +187,31 @@ fn scan_product_trades(
             if !(amount.is_finite() && amount > 0.0) {
                 continue;
             }
-            amounts.entry(year_month(ts_ns)).or_default().push(amount);
-            if collect_buckets {
-                trades.push((id, ts_ns, amount, rec.aggressor));
+            let source = prior_month(month_of_ns(ts_ns));
+            if let std::collections::hash_map::Entry::Vacant(slot) = cache.entry(source) {
+                let (first, last) = thresholds::month_days(source)?;
+                let ensure_cfs = cfs_for(all_cfs, first, last);
+                slot.insert(thresholds::ensure(
+                    db,
+                    &ensure_cfs,
+                    product,
+                    source,
+                    threshold_dir,
+                    dominant_dir,
+                    false,
+                )?);
             }
+            let Some(thr) = cache[&source].as_ref() else {
+                missing.entry(day).or_default().insert(source);
+                continue;
+            };
+            buckets
+                .entry((id, minute_left_sec(ts_ns)))
+                .or_default()
+                .add(amount, rec.aggressor, thr.p50, thr.p90);
         }
     }
-    let mut thresholds = HashMap::new();
-    for (month, mut values) in amounts {
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let Some(p50) = linear_percentile(&values, 0.5) else {
-            continue;
-        };
-        let Some(p90) = linear_percentile(&values, 0.9) else {
-            continue;
-        };
-        thresholds.insert(month, (p50, p90, values.len()));
-    }
-    let mut buckets: HashMap<(String, i64), SizeBuckets> = HashMap::new();
-    for (id, ts_ns, amount, aggressor) in trades {
-        let Some(&(p50, p90, _)) = thresholds.get(&year_month(ts_ns)) else {
-            continue;
-        };
-        let key = (id, minute_left_sec(ts_ns));
-        buckets
-            .entry(key)
-            .or_default()
-            .add(amount, aggressor, p50, p90);
-    }
-    Ok((thresholds, buckets))
+    Ok((buckets, missing))
 }
 
 fn overlay_day(path: &Path, buckets: &HashMap<(String, i64), SizeBuckets>) -> Result<u64> {
@@ -224,30 +269,13 @@ fn main() -> Result<()> {
     if args.workers == 0 {
         bail!("--workers must be positive");
     }
-    let range = match (&args.start, &args.end) {
-        (None, None) => None,
-        (Some(s), Some(e)) => {
-            let (s, e) = (parse_day(s)?, parse_day(e)?);
-            if s > e {
-                bail!("--start must not be after --end");
-            }
-            Some((s, e))
-        }
-        _ => bail!("give both --start and --end, or neither"),
-    };
     let db = open_rocksdb_read_only(&args.rocksdb_dir)?;
     let names = L2Db::list_cf(&rocksdb::Options::default(), &args.rocksdb_dir)?;
-    let mut by_product: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_product: HashMap<String, Vec<(i32, String)>> = HashMap::new();
     for name in names {
         let Some((year, product)) = parse_product_cf(&name) else {
             continue;
         };
-        // Year CFs outside the range cannot hold trades of the overlaid months.
-        if let Some((start, end)) = range {
-            if year < start.year() || year > end.year() {
-                continue;
-            }
-        }
         if !is_maintained_product(&product) {
             continue;
         }
@@ -256,78 +284,105 @@ fn main() -> Result<()> {
                 continue;
             }
         }
-        by_product.entry(product).or_default().push(name);
+        by_product.entry(product).or_default().push((year, name));
     }
-    let mut jobs: Vec<(String, Vec<String>)> = by_product.into_iter().collect();
+    let mut jobs: Vec<(String, Vec<(i32, String)>)> = by_product.into_iter().collect();
     jobs.sort_by(|a, b| a.0.cmp(&b.0));
-    if let Some(output) = &args.export_thresholds {
+
+    if let Some(month) = args.export_month {
         anyhow::ensure!(
             args.product.is_some() && jobs.len() == 1,
-            "threshold export requires one explicit product"
-        );
-        let (start, end) = range.context("threshold export requires --start and --end")?;
-        let months = (
-            start.year() as u32 * 100 + start.month(),
-            end.year() as u32 * 100 + end.month(),
+            "--export-month requires one explicit product"
         );
         anyhow::ensure!(
-            months.0 == months.1
-                && start.day() == 1
-                && end.succ_opt().is_some_and(|d| d.month() != end.month()),
-            "export requires one complete calendar month"
+            args.start.is_none() && args.end.is_none(),
+            "--export-month does not take --start/--end"
         );
-        let (product, cf_names) = &jobs[0];
-        let (thresholds, _) = scan_product_trades(&db, cf_names, Some(months), false)?;
-        let &(p50, p90, samples) = thresholds
-            .get(&months.0)
-            .context("no positive interval amounts in requested month")?;
-        let report = serde_json::json!({"product":product,"source_month":months.0,"p50":p50,"p90":p90,"samples":samples,"source":"cn_futures_l2 inferred interval turnover","column_families":cf_names});
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = output.with_extension("json.new");
-        fs::write(&temporary, serde_json::to_vec_pretty(&report)?)?;
-        fs::rename(temporary, output)?;
-        println!("{report}");
+        let (first, last) = thresholds::month_days(month)?;
+        let today = chrono::Utc::now().with_timezone(&Shanghai).date_naive();
+        anyhow::ensure!(last < today, "month {month} is not finished");
+        let (product, all_cfs) = &jobs[0];
+        let cfs = cfs_for(all_cfs, first, last);
+        let thr = thresholds::ensure(
+            &db,
+            &cfs,
+            product,
+            month,
+            &args.threshold_dir,
+            &args.dominant_dir,
+            args.force,
+        )?
+        .with_context(|| format!("no dominant trades for {product} in {month}"))?;
+        println!(
+            "{}",
+            serde_json::json!({"product":product,"source_month":month,"basis":thresholds::BASIS,
+                "p50":thr.p50,"p90":thr.p90,"samples":thr.samples,"days":thr.days})
+        );
         return Ok(());
     }
-    eprintln!(
-        "fill_1min_size_buckets products={} root={}",
-        jobs.len(),
-        args.root.display()
-    );
-    let db = Arc::new(db);
 
+    let (Some(start), Some(end)) = (&args.start, &args.end) else {
+        bail!(
+            "explicit --start and --end are required (only day files inside the range are \
+             rewritten; there is no whole-history mode)"
+        );
+    };
+    let range = {
+        let (s, e) = (parse_day(start)?, parse_day(end)?);
+        if s > e {
+            bail!("--start must not be after --end");
+        }
+        (s, e)
+    };
+
+    let db = Arc::new(db);
     let root = Arc::new(args.root);
-    let (tx, rx) = crossbeam_channel::unbounded::<(String, Vec<String>)>();
+    let threshold_dir = Arc::new(args.threshold_dir);
+    let dominant_dir = Arc::new(args.dominant_dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<(String, Vec<(i32, String)>)>();
     for job in jobs {
         tx.send(job).expect("enqueue");
     }
     drop(tx);
     let files = Arc::new(AtomicU64::new(0));
     let hits = Arc::new(AtomicU64::new(0));
+    let skipped = Arc::new(AtomicU64::new(0));
     let mut handles = Vec::new();
     for _ in 0..args.workers {
         let rx = rx.clone();
         let db = Arc::clone(&db);
         let root = Arc::clone(&root);
-        let files = Arc::clone(&files);
-        let hits = Arc::clone(&hits);
+        let threshold_dir = Arc::clone(&threshold_dir);
+        let dominant_dir = Arc::clone(&dominant_dir);
+        let (files, hits, skipped) = (Arc::clone(&files), Arc::clone(&hits), Arc::clone(&skipped));
         handles.push(std::thread::spawn(move || -> Result<()> {
-            while let Ok((product, mut cf_names)) = rx.recv() {
-                cf_names.sort();
+            while let Ok((product, all_cfs)) = rx.recv() {
                 let Some(exchange) = exchange_of_product(&root, &product)? else {
                     eprintln!("skip {product}: no baseline_data_1min directory");
                     continue;
                 };
                 let days = list_product_days(&root, &exchange, &product, range)?;
                 if days.is_empty() {
-                    eprintln!("skip {exchange} {product}: empty 1min directory");
                     continue;
                 }
-                let (_thresholds, buckets) = scan_product_trades(&db, &cf_names, None, true)?;
+                let (buckets, missing) = scan_range(
+                    &db,
+                    &product,
+                    &all_cfs,
+                    range,
+                    &threshold_dir,
+                    &dominant_dir,
+                )?;
                 let mut product_hits = 0u64;
-                for path in &days {
+                for (day, path) in &days {
+                    if let Some(months) = missing.get(day) {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "MISSING-THRESHOLDS {exchange} {product} day={day} source_months={months:?} \
+                             (file left unchanged)"
+                        );
+                        continue;
+                    }
                     product_hits += overlay_day(path, &buckets)?;
                     files.fetch_add(1, Ordering::Relaxed);
                 }
@@ -345,9 +400,10 @@ fn main() -> Result<()> {
         handle.join().expect("size-bucket worker")?;
     }
     eprintln!(
-        "fill_1min_size_buckets ok files={} overlay_hits={}",
+        "fill_1min_size_buckets ok files={} overlay_hits={} skipped_missing_thresholds={}",
         files.load(Ordering::Relaxed),
-        hits.load(Ordering::Relaxed)
+        hits.load(Ordering::Relaxed),
+        skipped.load(Ordering::Relaxed)
     );
     Ok(())
 }

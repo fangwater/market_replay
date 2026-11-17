@@ -10,8 +10,13 @@ package cn_market.v1;
 service CnFuturesMarket {
   // Closed one-minute bars of one contract from baseline_data_1min.
   rpc GetMinuteBars(GetMinuteBarsRequest) returns (GetMinuteBarsResponse);
-  // Which trading days are available.
+  // Which trading days are available. With an exchange, also how far the
+  // in-progress day has been read from NFS for that exchange (cheap to poll).
   rpc GetDataState(GetDataStateRequest) returns (DataState);
+  // P50 / P90 for classifying trades by size, per product and month.
+  rpc GetSizeThresholds(GetSizeThresholdsRequest) returns (GetSizeThresholdsResponse);
+  // Continuous-trading windows per product.
+  rpc GetTradingSessions(GetTradingSessionsRequest) returns (GetTradingSessionsResponse);
   // Durable intraday MDL frames, in native channel order. A bounded replay
   // ends at a fixed live watermark; clients overlap it with their ZMQ buffer.
   rpc StreamIntradayFrames(GetIntradayFramesRequest) returns (stream IntradayFrameBatch);
@@ -150,16 +155,21 @@ message MinuteBar {
   // Last two-sided 5-level book inside the minute; unset if none.
   optional Book5 book = 29;
   // True for bars rebuilt from the in-progress day's NFS MDL files (not yet in
-  // the archive): the newest minutes can still change as NFS catches up and
-  // size_buckets is unset (monthly thresholds unknown until month end).
+  // the archive). A bar is final once open_time_ms + 60000 <=
+  // DataState.live_through_ms; later ones can still change as NFS catches up.
+  // size_buckets is unset when the product has no threshold for the month.
   bool provisional = 30;
 }
 
 // Interval-turnover classes, NOT real order sizes: each inferred interval
-// trade is classed by its turnover against the product's P50 / P90 of
-// interval turnover over the whole Shanghai calendar month (>= P90 large,
-// [P50, P90) medium, < P50 small). Thresholds use the full month, so in the
-// archive they are not causal for days before month end.
+// trade is classed by its turnover against the product's P50 / P90 (>= P90
+// large, [P50, P90) medium, < P50 small). Rule for baseline_data_1min from
+// 2026-11-01 and for live bars: P50 / P90 of the interval turnover of the
+// dominant contract of each trading day (merged across rolls) over the
+// complete PRECEDING Shanghai calendar month, applied to each trade by the
+// month of its Shanghai timestamp. Known in advance, causal. Days before
+// 2026-11-01 keep the older rule (same month, all contracts pooled). The
+// numbers in force are in GetMinuteBarsResponse.size_thresholds.
 message SizeBuckets {
   double large_turnover_cny = 1;
   double medium_turnover_cny = 2;
@@ -194,17 +204,75 @@ message GetMinuteBarsResponse {
   DataState data_state = 3;
 }
 
-message GetDataStateRequest {}
+message GetSizeThresholdsRequest {
+  Exchange exchange = 1;
+  // Upper-case product code (RB, AP, IF). Empty = every product of the exchange.
+  string product = 2;
+}
+
+message GetSizeThresholdsResponse {
+  repeated ProductThresholds products = 1;
+}
+
+message ProductThresholds {
+  string product = 1;
+  // The current Shanghai month and, once known, the next one (a night session
+  // can cross a month end). A month without an entry has no threshold: do not
+  // classify trades in it.
+  repeated SizeThreshold thresholds = 2;
+}
+
+message SizeThreshold {
+  // Shanghai calendar month of the trades classified, YYYYMM (e.g. 202611).
+  uint32 applies_month = 1;
+  // Interval turnover in CNY, contract multiplier included.
+  double p50_turnover_cny = 2;
+  double p90_turnover_cny = 3;
+}
+
+message GetTradingSessionsRequest {
+  Exchange exchange = 1;
+  // Empty = every product of the exchange.
+  string product = 2;
+}
+
+message GetTradingSessionsResponse {
+  // Session snapshot the windows come from (same value as
+  // DataState.session_snapshot_as_of).
+  string snapshot_as_of = 1;
+  repeated ProductSessions products = 2;
+}
+
+message ProductSessions {
+  string product = 1;
+  // Active continuous windows, in segment order.
+  repeated SessionWindow windows = 2;
+}
+
+// Asia/Shanghai seconds since midnight; end exclusive. end_sec <= begin_sec
+// means the window runs past midnight (night session).
+message SessionWindow {
+  uint32 begin_sec = 1;
+  uint32 end_sec = 2;
+}
+
+message GetDataStateRequest {
+  // Optional. When set, live_trading_day / live_through_ms describe this
+  // exchange; unset leaves them 0.
+  Exchange exchange = 1;
+}
 
 message DataState {
   // "baseline_data_1min"
   string source = 1;
   // Latest trading day processed by the daily job (0 if unknown).
   uint32 latest_trading_day = 2;
-  // Continuous-session snapshot used to trim the archive.
+  // Continuous-session snapshot used to trim the archive and in `sessions`.
   string session_snapshot_as_of = 3;
   // In-progress trading day served from NFS MDL (0 if none) and the newest
-  // snapshot time (UTC ms) read for the requested exchange.
+  // snapshot time (UTC ms) read for the requested exchange. Minutes with
+  // open_time + 60 s <= live_through_ms are final; the rest come from the
+  // client's own feed.
   uint32 live_trading_day = 4;
   int64 live_through_ms = 5;
 }
