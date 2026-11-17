@@ -96,9 +96,9 @@ set -a; . ./.env; set +a
 "$PYTHON_BIN" scripts/migrate_sqlite_to_postgres.py --sqlite cn_futures_ref.db
 ```
 
-API（默认 `0.0.0.0:8765`）和每日同步调度器由 market_replay 的统一服务进程 `market-replay-server` 托管（服务 `cn-reference-api`、`cn-reference-daily-sync`，见仓库根目录 `docs/market_replay_server.md`），不再单独注册 PM2。日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/service/`，重启在 `http://127.0.0.1:18313/admin` 操作。
+**当前分工（2026-11-17 起）：** `/api/v1` 的查询、导出和两个同步接口（`POST /api/v1/sync`、`POST /api/v1/trading-sessions/sync`）由 Rust 实现（仓库根目录 `crates/ref/cn_reference`），直接挂在 `market-replay-server` 进程的 :8765 上，每日同步是它的任务 `cn-reference-daily`（上海 18:15）。本目录的 Python 服务现在以 `cn-reference-ui` 的名字只监听 `127.0.0.1:8766`，由 :8765 把没迁移的路径原样转发过来：网页 `/`、公告、报单费规则、费用估算、`/import`、`/overrides/import`。这些是下一步要迁的功能。下面的表格列出的是完整接口，未标注的都以 :8765 为入口。
 
-每日 OpenCTP 手续费及交易时段任务在 `Asia/Shanghai` 时区的 18:15 运行。它使用 PostgreSQL advisory lock，重叠运行时只允许一个同步写入。公告人工刷新使用另一个 advisory lock。整机重启后由 PM2 resurrect 拉起 `market-replay-server`，再由它拉起这两个服务。
+日志在 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_server/logs/{service,job}/`，重启在 `http://127.0.0.1:18313/admin` 操作，说明见仓库根目录 `docs/market_replay_server.md`。每日任务使用 PostgreSQL advisory lock（695102482），重叠运行时只允许一个同步写入；公告人工刷新使用另一个 advisory lock。`scripts/daily_sync.py` 仍可手动运行（同一把锁）。
 
 ## HTTP API
 

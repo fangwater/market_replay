@@ -24,6 +24,7 @@ members = [
     "crates/usstock/usstock_nasdaq_baseline",
     "crates/usstock/usstock_aggregate_baseline",
     "crates/web/data_dashboard",
+    "crates/ref/cn_reference",
 ]
 
 [workspace.package]

@@ -67,12 +67,60 @@ fn main() -> Result<()> {
         .block_on(run(cfg))
 }
 
+/// Connects the reference store (retrying while PostgreSQL comes up) and
+/// serves `/api/v1` on its own listener until the stop signal.
+async fn start_reference(
+    r: &config::Reference,
+    stop: watch::Receiver<bool>,
+) -> Result<tokio::task::JoinHandle<()>> {
+    let url = cn_reference::database_url(r.env_file.as_deref())?;
+    let mut tries = 0;
+    let db = loop {
+        match cn_reference::storage::Db::connect(&url, &r.schema).await {
+            Ok(db) => break db,
+            Err(e) if tries < 60 => {
+                tries += 1;
+                eprintln!("market-replay-server: reference store not ready ({e:#}); retry {tries}/60 in 5 s");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            Err(e) => return Err(e.context("reference store never became available")),
+        }
+    };
+    let state = cn_reference::api::AppState::new(db, r.fallback.clone())?;
+    let listen = r.listen.clone();
+    eprintln!(
+        "market-replay-server: reference API on {listen} (fallback {})",
+        r.fallback
+    );
+    // Bind before returning so a port conflict fails startup loudly.
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("bind reference {listen}"))?;
+    Ok(tokio::spawn(async move {
+        let mut stop = stop;
+        if let Err(e) = axum::serve(listener, cn_reference::api::router(state))
+            .with_graceful_shutdown(async move {
+                let _ = stop.wait_for(|v| *v).await;
+            })
+            .await
+        {
+            eprintln!("market-replay-server: reference API stopped: {e}");
+        }
+    }))
+}
+
 async fn run(cfg: config::Config) -> Result<()> {
     let (stop_tx, stop_rx) = watch::channel(false);
     let market_cfg = cn_kline_server::Config::load(&cfg.cn_market.config)?;
     let grpc_addr: SocketAddr = market_cfg.listen.parse().context("cn_market listen")?;
-    // Children first: the market metadata comes from the reference service,
-    // which is one of them.
+    // The reference API lives in this process; start it before anything that
+    // reads it (cn_market metadata, the dashboard) so there is no ordering
+    // race with the Python fallback child.
+    let reference_task = match &cfg.reference {
+        Some(r) => Some(start_reference(r, stop_rx.clone()).await?),
+        None => None,
+    };
+    // Children next: the Python reference fallback is one of them.
     let manager = manager::Manager::new(cfg.clone(), stop_rx.clone())?;
     let tasks = manager.start();
     let mut tries = 0;
@@ -155,6 +203,9 @@ async fn run(cfg: config::Config) -> Result<()> {
     market.refresh.abort();
     let _ = http_task.await;
     let _ = grpc_task.await;
+    if let Some(t) = reference_task {
+        let _ = t.await;
+    }
     eprintln!("market-replay-server: stopped");
     Ok(())
 }

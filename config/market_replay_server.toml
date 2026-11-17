@@ -18,22 +18,23 @@ config = "/home/fanghaizhou/market_replay/config/data_dashboard.toml"
 # gRPC cn_market.v1 listens on this config's `listen` (0.0.0.0:18312).
 config = "/home/fanghaizhou/market_replay/config/cn_kline_server.toml"
 
+[reference]
+# 国内期货参考数据 /api/v1 由本进程（Rust，cn_reference 库）直接服务：查询、
+# 导出、两个同步接口。没有迁移的路径（网页 /、公告、报单费、费用估算、导入）
+# 原样转发给下面的 Python 服务 cn-reference-ui（127.0.0.1:8766）。
+listen = "0.0.0.0:8765"
+fallback = "http://127.0.0.1:8766"
+# Only CN_FUTURES_REF_DATABASE_URL is read from it; it is never logged.
+env_file = "/home/fanghaizhou/market_replay/reference/.env"
+
 # ---- supervised services ----
 [[service]]
-name = "cn-reference-api"
-description = "国内期货参考数据 HTTP（:8765，Python）"
+name = "cn-reference-ui"
+description = "国内期货参考数据：网页、公告、报单费、费用估算（Python，仅本机 :8766，由 :8765 转发）"
 cwd = "/home/fanghaizhou/market_replay/reference"
 command = "/home/fanghaizhou/market_replay/reference/scripts/run-api.sh"
 stop_timeout_s = 10
-env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
-
-[[service]]
-name = "cn-reference-daily-sync"
-description = "国内期货参考数据每日同步（自带调度，上海 18:15）"
-cwd = "/home/fanghaizhou/market_replay/reference"
-command = "/home/fanghaizhou/market_replay/reference/scripts/run-daily-sync.sh"
-stop_timeout_s = 30
-env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
+env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai", CN_FUTURES_REF_HOST = "127.0.0.1", CN_FUTURES_REF_PORT = "8766" }
 
 [[service]]
 name = "cme-reference"
@@ -98,3 +99,12 @@ command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg
 args = ["merge", "--config", "/home/fanghaizhou/market_replay/config/lseg_daily.toml", "--month", "previous", "--delete-sources"]
 schedule = { tz = "Asia/Shanghai", at = ["14:00"], month_days = [2] }
 timeout_minutes = 600
+
+[[job]]
+name = "cn-reference-daily"
+description = "国内期货参考数据：OpenCTP 手续费保证金与连续交易时段同步（钉钉）"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-reference"
+args = ["--env-file", "/home/fanghaizhou/market_replay/reference/.env", "sync"]
+schedule = { tz = "Asia/Shanghai", at = ["18:15"] }
+timeout_minutes = 30
