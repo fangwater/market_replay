@@ -24,6 +24,8 @@ pub struct Config {
     /// `/`, JSON at `/api/dashboard/*`. Omit to serve without it.
     #[serde(default)]
     pub dashboard: Option<Dashboard>,
+    #[serde(default)]
+    pub backtest: Option<Dashboard>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
     #[serde(default, rename = "job")]

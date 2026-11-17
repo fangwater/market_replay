@@ -1,0 +1,30 @@
+[package]
+name = "cn_futures_backtest"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cn-backtest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+arrow-array = "=54.3.1"
+arrow-schema = "=54.3.1"
+parquet = { version = "=54.3.1", default-features = false, features = ["arrow", "zstd", "snap"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+cn_futures_core = { path = "../../core/cn_futures_core" }
+csv = "1.3"
+fs2 = "0.4"
+mdl_replay = { path = "../../mdl_replay" }
+reqwest = { version = "0.12.19", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+zmq = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

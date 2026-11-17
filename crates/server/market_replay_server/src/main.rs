@@ -157,6 +157,10 @@ async fn run(cfg: config::Config) -> Result<()> {
         data_dashboard::spawn_background(state.clone());
         http = http.merge(data_dashboard::router(state));
     }
+    if let Some(b) = &cfg.backtest {
+        let state = backtest_workbench::AppState::new(&b.config)?;
+        http = http.merge(backtest_workbench::router(state));
+    }
     let listener = tokio::net::TcpListener::bind(&cfg.http.listen)
         .await
         .with_context(|| format!("bind {}", cfg.http.listen))?;

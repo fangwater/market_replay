@@ -25,6 +25,8 @@ members = [
     "crates/usstock/usstock_aggregate_baseline",
     "crates/web/data_dashboard",
     "crates/ref/cn_reference",
+    "crates/backtest/cn_futures_backtest",
+    "crates/web/backtest_workbench",
 ]
 
 [workspace.package]

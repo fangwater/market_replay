@@ -412,10 +412,21 @@ impl Manager {
     async fn run_loop(self: Arc<Self>) {
         let mut shutdown = self.shutdown.clone();
         loop {
+            // Reconcile durable backtest work whenever this serial queue is idle
+            // or a previous job finishes. This also recovers a lost wake-up.
+            if let Some(b) = &self.cfg.backtest {
+                let pending = cn_futures_backtest::Config::load(&b.config)
+                    .and_then(|cfg| cn_futures_backtest::store::Store::new(cfg.output_root))
+                    .and_then(|store| store.pending());
+                if matches!(pending, Ok(true)) {
+                    let _ = self.enqueue("cn-backtest-worker", "backtest-pending", None);
+                }
+            }
             let next = self.shared.lock().unwrap().queue.pop_front();
             let Some((name, trigger, slot)) = next else {
                 tokio::select! {
                     _ = self.work.notified() => continue,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
                     _ = shutdown.changed() => break,
                 }
             };

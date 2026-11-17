@@ -1,0 +1,23 @@
+task = "roll_cost"
+capital_cny = 5000000.0
+start = "2026-11-13"
+end = "2026-11-13"
+products = ["RB"]
+execution = "maker"
+reference_as_of = "2026-11-17"
+fee_policy = "reference_snapshot"
+max_child_lots = 1
+
+[roll]
+# Example contracts/window; this is an experiment, not a historical roll claim.
+old_contract = "rb2701"
+new_contract = "rb2705"
+initial_lots = 10
+begin = "2026-11-13 09:00:00"
+deadline = "2026-11-13 10:00:00"
+batch_lots = 1
+spread_improvement_ticks = 0.0
+use_spread_gate = true
+max_exposure_deviation_cny = 100000.0
+max_quote_skew_ms = 1000
+repair_timeout_ms = 2000

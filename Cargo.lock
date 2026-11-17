@@ -430,6 +430,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtest_workbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "axum",
+ "clap",
+ "cn_futures_backtest",
+ "http-body-util",
+ "parquet",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,6 +811,30 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "cn_futures_backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "chrono-tz 0.10.4",
+ "clap",
+ "cn_futures_core",
+ "csv",
+ "fs2",
+ "mdl_replay",
+ "parquet",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+ "zmq",
 ]
 
 [[package]]
@@ -2395,9 +2437,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "backtest_workbench",
  "chrono",
  "chrono-tz 0.10.4",
  "clap",
+ "cn_futures_backtest",
  "cn_kline_server",
  "cn_reference",
  "data_dashboard",

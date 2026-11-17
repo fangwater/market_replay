@@ -1,0 +1,13 @@
+# WIP integration fragment. Do not enable before release and integration checks.
+# Merge these sections into market_replay_server.toml when ready to deploy.
+[backtest]
+config = "/home/fanghaizhou/market_replay/config/cn_backtest.toml"
+
+[[job]]
+name = "cn-backtest-worker"
+description = "期货回测：按手仓位、模拟执行、独立换月成本优化（每次领取一个任务）"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-backtest"
+args = ["worker", "--root", "/mnt/nvme-raid0-28t/fanghaizhou/backtest"]
+schedule = { tz = "Asia/Shanghai", at = [] }
+timeout_minutes = 600
