@@ -5,8 +5,10 @@ use clap::{Parser, Subcommand};
 use flate2::{bufread::GzDecoder, read::MultiGzDecoder};
 use lseg_delivery::{
     l2_batch::{run_batch, BatchConfig},
-    l2_extract::{run_extract, ExtractConfig},
+    l2_db,
+    l2_extract::{run_extract, run_extract_rics, ExtractConfig},
     l2_slice::{day_number, slice_stream, Layout, NullSink, Params, ParquetSink, DAY_NS},
+    l2_stream::{run_stream, Progress, StreamConfig, Unit, UnitKind},
     limits,
 };
 use serde_json::json;
@@ -68,6 +70,43 @@ enum Command {
         /// Wash again although the product-day already has its completion marker.
         #[arg(long)]
         force: bool,
+        /// `stream` (default): one in-memory pass, no shard files; `shards`: the
+        /// TAS-style temporary zstd shard files (kept for comparison).
+        #[arg(long, default_value = "stream")]
+        mode: String,
+        /// Threads (of --workers) that decompress in `stream` mode.
+        #[arg(long, default_value_t = 2)]
+        producers: usize,
+        /// zstd level of the stored blocks (default: the production level 9).
+        #[arg(long)]
+        sst_zstd_level: Option<i32>,
+    },
+    /// Stage 3 for explicit RICs: slices of one frequency for (RIC, UTC day)
+    /// out of one or several databases (a stream/package database, or day databases).
+    ExtractRics {
+        /// Database directories, chronological order.
+        #[arg(long, value_delimiter = ',', required = true)]
+        db_dirs: Vec<PathBuf>,
+        #[arg(long)]
+        out_root: PathBuf,
+        #[arg(long)]
+        exchange_map: Option<PathBuf>,
+        #[arg(long)]
+        default_exchange: Option<String>,
+        #[arg(long, value_delimiter = ',', required = true)]
+        rics: Vec<String>,
+        #[arg(long, value_delimiter = ',', required = true)]
+        days: Vec<String>,
+        #[arg(long, default_value_t = 250)]
+        freq_ms: u64,
+        #[arg(long, default_value_t = 1800)]
+        session_gap_s: u64,
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+        #[arg(long, default_value_t = 256)]
+        cache_mb: usize,
+        #[arg(long)]
+        force: bool,
     },
     /// Stage 3: slices of one frequency from the washed day databases.
     Extract {
@@ -99,6 +138,18 @@ enum Command {
         /// Replace existing output files (default: keep them).
         #[arg(long)]
         force: bool,
+    },
+    /// In-memory micro benchmark of the row parsers on the first `rows` rows of
+    /// a source file (min of 3 repeats, CPU seconds): old `parse_book`,
+    /// `BookParser`, time stamp parser, delta encoder.
+    BenchParse {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value_t = 2_000_000)]
+        rows: usize,
+        /// skip this many rows first (to get into a busy part of the day)
+        #[arg(long, default_value_t = 0)]
+        skip: usize,
     },
     /// Single-threaded cost of one source file, stage by stage (each stage is a
     /// separate pass; differences give the share of each step):
@@ -258,9 +309,104 @@ fn profile(
     Ok(())
 }
 
+fn cpu_total() -> f64 {
+    let (u, s) = cpu_seconds();
+    ((u + s) * 10.0).round() / 10.0
+}
+
+fn bench_parse(input: &Path, rows: usize, skip: usize) -> Result<()> {
+    use lseg_delivery::{
+        l2_layout::Codec2,
+        l2_slice::{parse_book, Book, BookParser, TsParser, BOOK_FIELDS},
+    };
+    let mut r = BufReader::with_capacity(1 << 20, MultiGzDecoder::new(File::open(input)?));
+    let mut line = Vec::new();
+    r.read_until(b'\n', &mut line)?; // header
+    let mut lines: Vec<Vec<u8>> = Vec::with_capacity(rows);
+    let mut seen = 0usize;
+    while lines.len() < rows {
+        line.clear();
+        if r.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        seen += 1;
+        if seen <= skip {
+            continue;
+        }
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        lines.push(line.clone());
+    }
+    let bytes: usize = lines.iter().map(|l| l.len()).sum();
+    println!(
+        "{}",
+        json!({"rows": lines.len(), "avg_line_bytes": bytes / lines.len().max(1)})
+    );
+    let cpu = || {
+        let (u, s) = cpu_seconds();
+        u + s
+    };
+    let best = |f: &mut dyn FnMut()| {
+        let mut b = f64::MAX;
+        for _ in 0..3 {
+            let t = cpu();
+            f();
+            b = b.min(cpu() - t);
+        }
+        b
+    };
+    let n = lines.len() as f64;
+    let ns = |secs: f64| (secs / n * 1e9 * 10.0).round() / 10.0;
+    let mut book: Book = [f64::NAN; BOOK_FIELDS];
+    let t_old = best(&mut || {
+        for l in &lines {
+            parse_book(l, &mut book).unwrap();
+        }
+    });
+    let mut bp = BookParser::new();
+    let t_new = best(&mut || {
+        for l in &lines {
+            bp.parse(l, &mut book).unwrap();
+        }
+    });
+    let mut ts = TsParser::new();
+    let t_ts = best(&mut || {
+        for l in &lines {
+            let ts_b = l.splitn(4, |b| *b == b',').nth(2).unwrap();
+            ts.parse(ts_b).unwrap();
+        }
+    });
+    let mut books: Vec<Book> = Vec::with_capacity(lines.len());
+    let mut bp2 = BookParser::new();
+    for l in &lines {
+        bp2.parse(l, &mut book).unwrap();
+        books.push(book);
+    }
+    let mut out = Vec::with_capacity(1 << 20);
+    let mut codec = Codec2::new();
+    let t_enc = best(&mut || {
+        out.clear();
+        codec = Codec2::new();
+        for (i, b) in books.iter().enumerate() {
+            codec.encode(b, i == 0, &mut out);
+            if out.len() > (1 << 20) {
+                out.clear();
+            }
+        }
+    });
+    println!(
+        "{}",
+        json!({"ns_per_row": {"parse_book_old": ns(t_old), "book_parser": ns(t_new),
+               "ts_parse": ns(t_ts), "delta_encode": ns(t_enc)}})
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
+        Command::BenchParse { input, rows, skip } => bench_parse(&input, rows, skip),
         Command::Profile {
             input,
             day,
@@ -297,6 +443,9 @@ fn main() -> Result<()> {
             zstd_level,
             shard_budget_gib,
             force,
+            mode,
+            producers,
+            sst_zstd_level,
         } => {
             ensure!(
                 (1..=limits::L2_SLICE_WORKERS).contains(&workers),
@@ -312,6 +461,64 @@ fn main() -> Result<()> {
                 .iter()
                 .flat_map(|pr| days.iter().map(move |d| (pr.clone(), d.clone())))
                 .collect();
+            if let Some(l) = sst_zstd_level {
+                l2_db::set_sst_zstd_level(l);
+            }
+            let started = Instant::now();
+            if mode == "stream" {
+                ensure!(workers >= 2, "--workers must be >= 2 in stream mode");
+                let units: Vec<Unit> = jobs
+                    .iter()
+                    .map(|(p, d)| Unit {
+                        gz_bytes: std::fs::metadata(
+                            raw_root.join(p).join(format!("{p}_{d}_normll2.csv.gz")),
+                        )
+                        .map_or(0, |m| m.len()),
+                        kind: UnitKind::Daily {
+                            product: p.clone(),
+                            day: d.clone(),
+                        },
+                    })
+                    .collect();
+                let cfg = StreamConfig {
+                    raw_root,
+                    db_root,
+                    stream_db_root: shard_root.join("_unused"),
+                    workers,
+                    producers,
+                    force,
+                    segment_bytes: lseg_delivery::l2_stream::SEGMENT_BYTES,
+                    block_bytes: lseg_delivery::l2_stream::BLOCK_BYTES,
+                    gate: Arc::new(|| {}),
+                    progress: Arc::new(Progress::default()),
+                };
+                let rep = run_stream(&cfg, units)?;
+                let washed = rep
+                    .results
+                    .iter()
+                    .filter(|v| v["status"] == "washed")
+                    .count();
+                let failed_units = rep
+                    .results
+                    .iter()
+                    .filter(|v| v["status"] == "failed")
+                    .count();
+                println!(
+                    "{}",
+                    json!({"summary": true, "stage": "wash", "mode": "stream", "jobs": jobs.len(),
+                           "washed_files": washed, "failed_units": failed_units,
+                           "failed": rep.failed.is_some(), "seconds": started.elapsed().as_secs(),
+                           "cpu_seconds": cpu_total(), "peak_rss_mib": peak_rss_mib(),
+                           "workers": workers, "producers": producers,
+                           "db_sst_bytes_by_day": rep.db_sst_bytes})
+                );
+                if let Some(e) = rep.failed {
+                    eprintln!("FAILED: {e}");
+                    bail!("wash failed");
+                }
+                ensure!(failed_units == 0, "{failed_units} units failed");
+                return Ok(());
+            }
             let cfg = BatchConfig {
                 raw_root,
                 shard_root,
@@ -322,7 +529,6 @@ fn main() -> Result<()> {
                 shard_budget_bytes: shard_budget_gib << 30,
                 force,
             };
-            let started = Instant::now();
             let report = run_batch(&cfg, jobs.clone())?;
             let washed = report
                 .results
@@ -331,15 +537,66 @@ fn main() -> Result<()> {
                 .count();
             println!(
                 "{}",
-                json!({"summary": true, "stage": "wash", "jobs": jobs.len(), "washed_files": washed,
+                json!({"summary": true, "stage": "wash", "mode": "shards", "jobs": jobs.len(), "washed_files": washed,
                        "failed": report.failed.is_some(), "seconds": started.elapsed().as_secs(),
-                       "peak_rss_mib": peak_rss_mib(), "workers": workers,
+                       "cpu_seconds": cpu_total(), "peak_rss_mib": peak_rss_mib(), "workers": workers,
                        "peak_unwashed_shard_gib": (report.peak_queued_bytes as f64 / (1u64 << 30) as f64 * 100.0).round() / 100.0,
                        "db_sst_bytes_by_day": report.db_sst_bytes})
             );
             if let Some(e) = report.failed {
                 eprintln!("FAILED: {e}");
                 bail!("wash failed");
+            }
+            Ok(())
+        }
+        Command::ExtractRics {
+            db_dirs,
+            out_root,
+            exchange_map,
+            default_exchange,
+            rics,
+            days,
+            freq_ms,
+            session_gap_s,
+            workers,
+            cache_mb,
+            force,
+        } => {
+            ensure!(
+                (1..=limits::L2_SLICE_WORKERS).contains(&workers),
+                "--workers must be 1..={}",
+                limits::L2_SLICE_WORKERS
+            );
+            let params = Params::new(freq_ms, session_gap_s)?;
+            let map = match &exchange_map {
+                Some(m) => load_map(m)?,
+                None => BTreeMap::new(),
+            };
+            ensure!(
+                !map.is_empty() || default_exchange.is_some(),
+                "give --exchange-map or --default-exchange"
+            );
+            let jobs: Vec<(String, String)> = rics
+                .iter()
+                .flat_map(|r| days.iter().map(move |d| (r.clone(), d.clone())))
+                .collect();
+            let cfg = ExtractConfig {
+                db_root: PathBuf::new(),
+                out_root,
+                exchange_of: Arc::new(map),
+                default_exchange,
+                params,
+                force,
+                workers,
+                cache_mb,
+            };
+            let rep = run_extract_rics(&cfg, &db_dirs, jobs)?;
+            for v in &rep.results {
+                println!("{v}");
+            }
+            if let Some(e) = rep.failed {
+                eprintln!("FAILED: {e}");
+                bail!("extract-rics failed");
             }
             Ok(())
         }

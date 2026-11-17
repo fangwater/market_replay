@@ -2397,6 +2397,7 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "memchr",
  "mimalloc",
  "parquet",
  "rayon",

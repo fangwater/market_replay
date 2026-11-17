@@ -192,6 +192,72 @@ impl TsParser {
     }
 }
 
+/// One book field of a row: `k` is the slot (0..BOOK_FIELDS), price slots are
+/// `k % 3 == 0`, the others are sizes / order counts (u32, no sign, no point).
+fn parse_book_field(k: usize, f: &[u8]) -> Result<f64> {
+    Ok(if f.is_empty() {
+        f64::NAN
+    } else if k.is_multiple_of(3) {
+        if let Some(x) = fast_decimal(f) {
+            return Ok(x);
+        }
+        let x: f64 = std::str::from_utf8(f)?
+            .parse()
+            .with_context(|| format!("bad price {:?}", String::from_utf8_lossy(f)))?;
+        ensure!(x.is_finite(), "non-finite price");
+        x
+    } else {
+        let mut x = 0u64;
+        for &c in f {
+            ensure!(
+                c.is_ascii_digit(),
+                "size/order count {:?} is not a non-negative integer",
+                String::from_utf8_lossy(f)
+            );
+            x = x * 10 + (c - b'0') as u64;
+            ensure!(x <= u32::MAX as u64, "size/order count exceeds u32");
+        }
+        x as f64
+    })
+}
+
+const POW10: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// `[-]digits[.digits]` with at most 15 digits: the integer `m` and the power
+/// of ten are both exact in f64, so the single IEEE division is the correctly
+/// rounded result, i.e. exactly what `str::parse::<f64>` returns (Clinger's
+/// fast path). Anything else (exponent, sign `+`, more digits) is `None` and
+/// goes through `str::parse`.
+fn fast_decimal(f: &[u8]) -> Option<f64> {
+    let (neg, d) = match f.first()? {
+        b'-' => (true, &f[1..]),
+        _ => (false, f),
+    };
+    let (mut m, mut digits, mut frac, mut seen_dot) = (0u64, 0usize, 0usize, false);
+    for &c in d {
+        match c {
+            b'0'..=b'9' => {
+                m = m * 10 + (c - b'0') as u64;
+                digits += 1;
+                if digits > 15 {
+                    return None;
+                }
+                frac += seen_dot as usize;
+            }
+            b'.' if !seen_dot => seen_dot = true,
+            _ => return None,
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    let x = m as f64 / POW10[frac];
+    Some(if neg { -x } else { x })
+}
+
 pub fn parse_book(line: &[u8], out: &mut Book) -> Result<()> {
     ensure!(!line.contains(&b'"'), "quoted fields are not supported");
     let mut n = 0usize;
@@ -201,34 +267,172 @@ pub fn parse_book(line: &[u8], out: &mut Book) -> Result<()> {
             continue;
         }
         let k = i - 5;
-        let v = if f.is_empty() {
-            f64::NAN
-        } else if k % 3 == 0 {
-            let x: f64 = std::str::from_utf8(f)?
-                .parse()
-                .with_context(|| format!("bad price {:?}", String::from_utf8_lossy(f)))?;
-            ensure!(x.is_finite(), "non-finite price");
-            x
-        } else {
-            let mut x = 0u64;
-            for &c in f {
-                ensure!(
-                    c.is_ascii_digit(),
-                    "size/order count {:?} is not a non-negative integer",
-                    String::from_utf8_lossy(f)
-                );
-                x = x * 10 + (c - b'0') as u64;
-                ensure!(x <= u32::MAX as u64, "size/order count exceeds u32");
-            }
-            x as f64
-        };
-        out[k] = v;
+        out[k] = parse_book_field(k, f)?;
     }
     ensure!(
         n == CSV_COLUMNS,
         "row has {n} columns, expected {CSV_COLUMNS}"
     );
     Ok(())
+}
+
+/// `parse_book` that reuses work between consecutive rows. Consecutive updates
+/// of a RIC differ in a few of the 60 book fields only (about 3 on real data),
+/// so the row is compared with the previous one: only the stretch between the
+/// shared prefix and the shared suffix is split into fields, and a field whose
+/// text equals the same field of the previous row keeps the value parsed from
+/// that text (identical text parses to the identical value). The result is
+/// bit-for-bit what `parse_book` returns, errors included: whatever the
+/// incremental path does not handle (first row, structural change, bad field)
+/// goes through the full parse.
+pub struct BookParser {
+    prev: Vec<u8>,
+    /// Start of field 3 in `prev` (the book fields come after the time stamp).
+    s_prev: usize,
+    book: Book,
+    valid: bool,
+}
+
+impl Default for BookParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BookParser {
+    pub fn new() -> Self {
+        Self {
+            prev: Vec::with_capacity(1024),
+            s_prev: 0,
+            book: [f64::NAN; BOOK_FIELDS],
+            valid: false,
+        }
+    }
+
+    /// Same contract and same errors as `parse_book`.
+    pub fn parse(&mut self, line: &[u8], out: &mut Book) -> Result<()> {
+        if self.valid {
+            if let Some(r) = self.parse_incremental(line) {
+                if r.is_err() {
+                    self.valid = false;
+                }
+                r?;
+                *out = self.book;
+                return Ok(());
+            }
+        }
+        self.valid = false;
+        self.parse_full(line)?;
+        *out = self.book;
+        Ok(())
+    }
+
+    fn parse_full(&mut self, line: &[u8]) -> Result<()> {
+        ensure!(
+            memchr::memchr(b'"', line).is_none(),
+            "quoted fields are not supported"
+        );
+        let n = memchr::memchr_iter(b',', line).count() + 1;
+        ensure!(
+            n == CSV_COLUMNS,
+            "row has {n} columns, expected {CSV_COLUMNS}"
+        );
+        for (i, f) in line.split(|b| *b == b',').enumerate() {
+            if (5..5 + BOOK_FIELDS).contains(&i) {
+                self.book[i - 5] = parse_book_field(i - 5, f)?;
+            }
+        }
+        self.s_prev = memchr::memchr_iter(b',', line).nth(2).expect("66 columns") + 1;
+        self.prev.clear();
+        self.prev.extend_from_slice(line);
+        self.valid = true;
+        Ok(())
+    }
+
+    /// `None` = not applicable (use the full parse); on `Some(Err)` the caller
+    /// invalidates the state.
+    fn parse_incremental(&mut self, line: &[u8]) -> Option<Result<()>> {
+        const FIRST: usize = 3; // fields before this (RIC, domain, time) are never compared
+        let c2 = memchr::memchr_iter(b',', line).nth(2)?;
+        let s_line = c2 + 1;
+        let (rl, rp) = (&line[s_line..], &self.prev[self.s_prev..]);
+        let (pre, suf) = common_affixes(rl, rp);
+        if pre == rl.len() && rl.len() == rp.len() {
+            // nothing but the head of the row changed
+            self.prev.clear();
+            self.prev.extend_from_slice(line);
+            self.s_prev = s_line;
+            return Some(Ok(()));
+        }
+        let q = rp.len() - suf; // first byte of the shared suffix in `rp`
+                                // the stretch of whole fields that contains every differing byte
+        let a0 = memchr::memrchr(b',', &rl[..pre]).map_or(0, |i| i + 1);
+        let k0 = FIRST + memchr::memchr_iter(b',', &rl[..a0]).count();
+        let lc = q.saturating_sub(1).max(pre).min(rp.len());
+        let e_prev = lc + memchr::memchr(b',', &rp[lc..]).unwrap_or(rp.len() - lc);
+        if e_prev < q {
+            return None; // a delimiter itself changed
+        }
+        let e_line = rl.len() - (rp.len() - e_prev);
+        if e_line < a0 {
+            return None;
+        }
+        let (region_prev, region_line) = (&rp[a0..e_prev], &rl[a0..e_line]);
+        if memchr::memchr(b'"', region_line).is_some() {
+            return None; // the full parse reports it
+        }
+        let mut pieces_prev = region_prev.split(|b| *b == b',');
+        let mut pieces_line = region_line.split(|b| *b == b',');
+        let mut j = k0;
+        loop {
+            match (pieces_prev.next(), pieces_line.next()) {
+                (Some(fp), Some(fl)) => {
+                    if (5..5 + BOOK_FIELDS).contains(&j) && fp != fl {
+                        match parse_book_field(j - 5, fl) {
+                            Ok(x) => self.book[j - 5] = x,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    j += 1;
+                }
+                (None, None) => break,
+                _ => return None, // the number of fields changed
+            }
+        }
+        self.prev.clear();
+        self.prev.extend_from_slice(line);
+        self.s_prev = s_line;
+        Some(Ok(()))
+    }
+}
+
+/// Lengths of the longest common prefix and, without overlapping it, the
+/// longest common suffix of two byte strings (8 bytes at a time).
+fn common_affixes(a: &[u8], b: &[u8]) -> (usize, usize) {
+    let max = a.len().min(b.len());
+    let mut pre = 0;
+    while pre + 8 <= max
+        && u64::from_ne_bytes(a[pre..pre + 8].try_into().expect("8"))
+            == u64::from_ne_bytes(b[pre..pre + 8].try_into().expect("8"))
+    {
+        pre += 8;
+    }
+    while pre < max && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let max_suf = max - pre;
+    let (la, lb) = (a.len(), b.len());
+    let mut suf = 0;
+    while suf + 8 <= max_suf
+        && u64::from_ne_bytes(a[la - suf - 8..la - suf].try_into().expect("8"))
+            == u64::from_ne_bytes(b[lb - suf - 8..lb - suf].try_into().expect("8"))
+    {
+        suf += 8;
+    }
+    while suf < max_suf && a[la - 1 - suf] == b[lb - 1 - suf] {
+        suf += 1;
+    }
+    (pre, suf)
 }
 
 pub fn expected_header() -> String {
@@ -849,6 +1053,227 @@ pub fn write_all(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deterministic xorshift, no dependency.
+    fn rng(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    fn field(k: usize, r: u64) -> String {
+        match (k.is_multiple_of(3), r % 7) {
+            (_, 0) => String::new(),
+            (true, v) => format!(
+                "{}.{}",
+                100 + (r >> 8) % 5,
+                [25, 5, 125, 0, 625, 3, 75][v as usize]
+            ),
+            (false, _) => format!("{}", (r >> 4) % 90_000),
+        }
+    }
+
+    /// Hard cases for the incremental path: first/last book field changing,
+    /// fields growing and shrinking, fields turning empty and back, whole-row
+    /// changes, repeated identical rows, rows differing only in the time stamp.
+    #[test]
+    fn fast_decimal_is_bit_identical_to_str_parse() {
+        let mut st = 0x0123_4567_89ab_cdefu64;
+        let mut cases: Vec<String> = [
+            "0",
+            "-0",
+            "0.0",
+            "-0.0",
+            "5.",
+            ".5",
+            "-.5",
+            "1",
+            "100",
+            "0.1",
+            "0.3",
+            "6989.25",
+            "0.66785",
+            "123456789012345",
+            "1234567890123456",
+            "12345678901234.5",
+            "0.000000000000001",
+            "1e5",
+            "+1",
+            "1.2.3",
+            "-",
+            ".",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for _ in 0..200_000 {
+            let int_digits = (rng(&mut st) % 9) as usize;
+            let frac_digits = (rng(&mut st) % 12) as usize;
+            let mut t = String::new();
+            if rng(&mut st).is_multiple_of(9) {
+                t.push('-');
+            }
+            for _ in 0..int_digits {
+                t.push((b'0' + (rng(&mut st) % 10) as u8) as char);
+            }
+            if frac_digits > 0 || rng(&mut st).is_multiple_of(7) {
+                t.push('.');
+            }
+            for _ in 0..frac_digits {
+                t.push((b'0' + (rng(&mut st) % 10) as u8) as char);
+            }
+            cases.push(t);
+        }
+        let mut fast = 0u32;
+        for t in &cases {
+            let slow = t.parse::<f64>();
+            if let Some(x) = fast_decimal(t.as_bytes()) {
+                fast += 1;
+                let y = slow.unwrap_or_else(|_| panic!("fast accepted {t:?}"));
+                assert_eq!(x.to_bits(), y.to_bits(), "{t:?}");
+            }
+        }
+        assert!(
+            fast > 100_000,
+            "the fast path must cover plain decimals ({fast})"
+        );
+    }
+
+    #[test]
+    fn book_parser_equals_parse_book_under_adversarial_changes() {
+        let mut st = 0x1234_5678_9abc_def1u64;
+        let mut cols: Vec<String> = (0..CSV_COLUMNS).map(|_| String::new()).collect();
+        let mut parser = BookParser::new();
+        let (mut a, mut b): (Book, Book) = ([f64::NAN; BOOK_FIELDS], [f64::NAN; BOOK_FIELDS]);
+        let widths = [
+            "",
+            "1",
+            "12",
+            "1234",
+            "99999",
+            "1.5",
+            "10.25",
+            "100000.125",
+            "7",
+        ];
+        for row in 0..30_000u32 {
+            let mode = rng(&mut st) % 10;
+            let count = match mode {
+                0 => 0,
+                1 => BOOK_FIELDS,
+                2 => 8,
+                _ => 1 + (rng(&mut st) % 3) as usize,
+            };
+            for c in 0..count {
+                let k = match mode {
+                    1 => c,
+                    3 => 0,
+                    4 => BOOK_FIELDS - 1,
+                    5 => BOOK_FIELDS - 1 - (rng(&mut st) % 3) as usize,
+                    _ => (rng(&mut st) % BOOK_FIELDS as u64) as usize,
+                };
+                let w = widths[(rng(&mut st) % widths.len() as u64) as usize];
+                cols[5 + k] = if w.is_empty() || k % 3 == 0 {
+                    w.to_string()
+                } else {
+                    w.replace('.', "")
+                };
+            }
+            cols[0] = if row % 5000 == 4999 {
+                "ESH7".into()
+            } else {
+                "ESZ6".into()
+            };
+            cols[2] = format!("2026-11-10T00:00:{:02}.{:09}Z", row % 60, row);
+            cols[CSV_COLUMNS - 1] = format!("00:00:00.{:09}", row % 7);
+            let line = cols.join(",");
+            parse_book(line.as_bytes(), &mut a).unwrap();
+            parser.parse(line.as_bytes(), &mut b).unwrap();
+            for k in 0..BOOK_FIELDS {
+                assert_eq!(
+                    a[k].to_bits(),
+                    b[k].to_bits(),
+                    "row {row} field {k} mode {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn book_parser_equals_parse_book_row_by_row() {
+        let mut st = 0x9e37_79b9_7f4a_7c15u64;
+        let mut cols: Vec<String> = (0..CSV_COLUMNS).map(|_| String::new()).collect();
+        let mut parser = BookParser::new();
+        let (mut a, mut b): (Book, Book) = ([f64::NAN; BOOK_FIELDS], [f64::NAN; BOOK_FIELDS]);
+        for row in 0..4000 {
+            // change 0..4 random book fields (or all of them now and then)
+            let changes = if row % 500 == 0 {
+                BOOK_FIELDS
+            } else {
+                (rng(&mut st) % 5) as usize
+            };
+            for c in 0..changes {
+                let k = if changes == BOOK_FIELDS {
+                    c
+                } else {
+                    (rng(&mut st) % BOOK_FIELDS as u64) as usize
+                };
+                cols[5 + k] = field(k, rng(&mut st));
+            }
+            cols[0] = "ESZ6".into();
+            cols[2] = format!("2026-11-10T00:00:{:02}.000000000Z", row % 60);
+            let line = cols.join(",");
+            parse_book(line.as_bytes(), &mut a).unwrap();
+            parser.parse(line.as_bytes(), &mut b).unwrap();
+            for k in 0..BOOK_FIELDS {
+                assert_eq!(a[k].to_bits(), b[k].to_bits(), "row {row} field {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn book_parser_errors_like_parse_book_and_recovers_with_a_full_parse() {
+        let good: Vec<String> = (0..CSV_COLUMNS)
+            .map(|i| {
+                if (5..65).contains(&i) {
+                    if (i - 5) % 3 == 0 {
+                        "1.5".into()
+                    } else {
+                        "7".into()
+                    }
+                } else {
+                    "x".into()
+                }
+            })
+            .collect();
+        let line = good.join(",");
+        let mut p = BookParser::new();
+        let mut book: Book = [f64::NAN; BOOK_FIELDS];
+        p.parse(line.as_bytes(), &mut book).unwrap();
+        let mut bad = good.clone();
+        bad[6] = "-3".into(); // a size that is not a non-negative integer
+        let bad_line = bad.join(",");
+        let e1 = parse_book(bad_line.as_bytes(), &mut book)
+            .unwrap_err()
+            .to_string();
+        let e2 = p
+            .parse(bad_line.as_bytes(), &mut book)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e1, e2);
+        // too few / too many columns, quotes
+        assert!(p.parse(b"a,b,c", &mut book).is_err());
+        assert!(p
+            .parse(format!("{line},extra").as_bytes(), &mut book)
+            .is_err());
+        assert!(p.parse(format!("\"{line}").as_bytes(), &mut book).is_err());
+        // after errors the next good row is parsed in full and is right
+        let mut expect: Book = [f64::NAN; BOOK_FIELDS];
+        parse_book(line.as_bytes(), &mut expect).unwrap();
+        p.parse(line.as_bytes(), &mut book).unwrap();
+        assert_eq!(expect.map(f64::to_bits), book.map(f64::to_bits));
+    }
     use std::io::Cursor;
 
     const F: i64 = 250_000_000;
