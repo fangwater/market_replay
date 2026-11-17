@@ -196,6 +196,7 @@
   - 总预算是 64 GiB 内存、32 个线程。每个工具都显式固定自己的线程池：
     - 聚合最多 2 个（`limits::AGGREGATION_WORKERS`）；
     - Parquet 发布 8 个（`limits::IO_THREADS`，实测 16 个不比 8 个快）；
+    - **例外（用户 2026-11-17 批准，仅限一次性回补）：** `lseg_l2_slice`（固定频率 L2 下采样，见 `docs/lseg/l2_slice.md`）的 `--workers` 可到 8（`limits::L2_SLICE_WORKERS`，默认仍是 2）。理由：每个 worker 内存只有约 70 MiB，纯 CPU 型，各源文件独立。每日任务和其他工具不得借用这个上限；
     - RocksDB 一律用 `tasdb::open_read_only` 打开：后台线程 1 个，打开文件线程 1 个，block cache 共享且有上限。
   - 不得按机器的 CPU 或内存自动扩张，也不得出现没有预算的多进程乘多线程。Python 里 DuckDB、Arrow、BLAS 的线程数显式设为 1。
   - 读取、解析、聚合、写入都必须流式、有界。不得把整段状态或控制消息先收集进 Vec、list 或 JSON 数组再处理。

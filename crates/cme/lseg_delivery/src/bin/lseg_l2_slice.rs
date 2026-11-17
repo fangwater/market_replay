@@ -50,7 +50,8 @@ enum Command {
         /// Silence (seconds) after which the next update is a session anchor.
         #[arg(long, default_value_t = 1800)]
         session_gap_s: u64,
-        /// Files processed at the same time (fixed pool, 1..=2).
+        /// Files processed at the same time (fixed pool, 1..=8; default 2). More than 2
+        /// is for one-off backfills only (limits::L2_SLICE_WORKERS, docs/lseg/l2_slice.md).
         #[arg(long, default_value_t = limits::AGGREGATION_WORKERS)]
         workers: usize,
         /// Replace existing output files (default: keep them).
@@ -157,9 +158,9 @@ fn main() -> Result<()> {
             force,
         } => {
             ensure!(
-                (1..=limits::AGGREGATION_WORKERS).contains(&workers),
+                (1..=limits::L2_SLICE_WORKERS).contains(&workers),
                 "--workers must be 1..={}",
-                limits::AGGREGATION_WORKERS
+                limits::L2_SLICE_WORKERS
             );
             let p = Params::new(freq_ms, session_gap_s)?;
             let map = match &exchange_map {

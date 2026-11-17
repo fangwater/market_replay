@@ -10,3 +10,12 @@ pub const AGGREGATION_WORKERS: usize = 2;
 /// Parquet publication threads (NFS publish is metadata-latency bound;
 /// 8 measured 2.7–3.0x faster than serial, 16 no better).
 pub const IO_THREADS: usize = 8;
+
+/// Workers of `lseg_l2_slice` (one file each) for ONE-OFF BACKFILLS only.
+///
+/// Exception to `AGGREGATION_WORKERS` approved by the user for that tool alone
+/// (2026-11-17): a worker needs about 70 MiB (one raw line plus a row-group
+/// buffer), the work is CPU-bound gzip + parsing and the source files are
+/// independent. The default stays `AGGREGATION_WORKERS`; the daily path must not
+/// use more. Never scale this with the machine.
+pub const L2_SLICE_WORKERS: usize = 8;
