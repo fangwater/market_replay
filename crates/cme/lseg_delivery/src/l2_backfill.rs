@@ -206,6 +206,9 @@ pub fn pause_reason(status: &Value, now: DateTime<Utc>) -> Option<String> {
     };
     for j in jobs {
         let name = j["name"].as_str().unwrap_or("?");
+        if j["enabled"].as_bool() == Some(false) {
+            continue;
+        }
         if j["running"].is_object()
             || j["running"].as_bool() == Some(true)
             || j["running"].is_string()

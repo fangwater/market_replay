@@ -2389,6 +2389,7 @@ dependencies = [
  "chrono",
  "clap",
  "cme_tas_replay",
+ "crc32fast",
  "crossbeam-channel",
  "csv",
  "csv-core",

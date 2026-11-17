@@ -118,6 +118,42 @@ pub struct WashedRic {
     pub value_bytes: u64,
     /// Size of the finished SST file (compressed); 0 before the SST stage.
     pub sst_bytes: u64,
+    /// Sum of the crc32 of every source row (order independent; with the count it
+    /// identifies the rows of a RIC-day when two sources are compared).
+    pub crc_sum: u64,
+}
+
+/// What one RIC contributed on one UTC day.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DayStat {
+    pub count: u64,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub crc_sum: u64,
+}
+
+impl DayStat {
+    pub fn add_row(&mut self, ts: i64, crc: u32) {
+        if self.count == 0 {
+            self.first_ts = ts;
+        }
+        self.count += 1;
+        self.last_ts = ts;
+        self.crc_sum = self.crc_sum.wrapping_add(crc as u64);
+    }
+    pub fn merge(&mut self, o: &DayStat) {
+        if o.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            *self = *o;
+            return;
+        }
+        self.first_ts = self.first_ts.min(o.first_ts);
+        self.last_ts = self.last_ts.max(o.last_ts);
+        self.count += o.count;
+        self.crc_sum = self.crc_sum.wrapping_add(o.crc_sum);
+    }
 }
 
 fn has_prefix(db: &DB, prefix: &[u8]) -> Result<bool> {
@@ -229,6 +265,8 @@ pub struct RicOutcome {
     pub washed: WashedRic,
     /// Update records by UTC month (`YYYYMM`).
     pub months: BTreeMap<u32, u64>,
+    /// Per UTC day (days since 1970-01-01).
+    pub days: BTreeMap<i64, DayStat>,
 }
 
 /// (year, month, day) of a day number (days since 1970-01-01), proleptic Gregorian.
@@ -389,7 +427,8 @@ pub fn wash_segment(t: &dyn WashTarget, ric: &str, seg: u32, data: &[u8]) -> Res
     let comp = tasdb::component(ric);
     let per_day = t.per_day();
     let mut line_no = 0u64;
-    let (mut month_day, mut month_cnt) = (i64::MIN, 0u64);
+    let mut day_stat = DayStat::default();
+    let mut stat_day = i64::MIN;
     for raw in data.split(|b| *b == b'\n') {
         let mut line = raw;
         while let Some(b'\r') = line.last() {
@@ -399,6 +438,7 @@ pub fn wash_segment(t: &dyn WashTarget, ric: &str, seg: u32, data: &[u8]) -> Res
             continue;
         }
         line_no += 1;
+        let crc = crc32fast::hash(line);
         ensure!(
             line.len() > ric.len() && line.starts_with(ric.as_bytes()) && line[ric.len()] == b',',
             "RIC {ric}: row {line_no} belongs to another RIC"
@@ -469,17 +509,21 @@ pub fn wash_segment(t: &dyn WashTarget, ric: &str, seg: u32, data: &[u8]) -> Res
         })?;
         out.washed.updates += 1;
         out.washed.last_ts = tn;
-        if day != month_day {
-            if month_cnt > 0 {
-                *out.months.entry(month_of_day(month_day)).or_default() += month_cnt;
+        if day != stat_day {
+            if day_stat.count > 0 {
+                out.days.entry(stat_day).or_default().merge(&day_stat);
             }
-            month_day = day;
-            month_cnt = 0;
+            stat_day = day;
+            day_stat = DayStat::default();
         }
-        month_cnt += 1;
+        day_stat.add_row(tn, crc);
     }
-    if month_cnt > 0 {
-        *out.months.entry(month_of_day(month_day)).or_default() += month_cnt;
+    if day_stat.count > 0 {
+        out.days.entry(stat_day).or_default().merge(&day_stat);
+    }
+    for (d, st) in &out.days {
+        *out.months.entry(month_of_day(*d)).or_default() += st.count;
+        out.washed.crc_sum = out.washed.crc_sum.wrapping_add(st.crc_sum);
     }
     if let Some(mut o) = cur.take() {
         o.packer
@@ -518,6 +562,10 @@ pub fn merge_segments(mut parts: Vec<(u32, RicOutcome)>) -> Result<RicOutcome> {
         for (m, n) in o.months {
             *acc.months.entry(m).or_default() += n;
         }
+        for (d, st) in o.days {
+            acc.days.entry(d).or_default().merge(&st);
+        }
+        acc.washed.crc_sum = acc.washed.crc_sum.wrapping_add(o.washed.crc_sum);
     }
     Ok(acc)
 }
@@ -527,7 +575,7 @@ pub fn write_marker(db: &DB, product: &str, day: &str, rics: &[WashedRic]) -> Re
     let v = json!({
         "format": FORMAT, "product": product, "day": day,
         "updates": rics.iter().map(|r| r.updates).sum::<u64>(),
-        "rics": rics.iter().map(|r| json!([r.ric, r.updates, r.first_ts, r.last_ts])).collect::<Vec<_>>(),
+        "rics": rics.iter().map(|r| json!([r.ric, r.updates, r.first_ts, r.last_ts, r.crc_sum])).collect::<Vec<_>>(),
     });
     db.flush()?;
     let mut wo = WriteOptions::default();

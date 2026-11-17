@@ -4,9 +4,11 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::{Parser, Subcommand};
 use flate2::{bufread::GzDecoder, read::MultiGzDecoder};
 use lseg_delivery::{
+    l2_backfill::{self, Gate},
     l2_batch::{run_batch, BatchConfig},
     l2_db,
     l2_extract::{run_extract, run_extract_rics, ExtractConfig},
+    l2_report::{run_report, ReportConfig},
     l2_slice::{day_number, slice_stream, Layout, NullSink, Params, ParquetSink, DAY_NS},
     l2_stream::{run_stream, Progress, StreamConfig, Unit, UnitKind},
     limits,
@@ -31,6 +33,91 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Verification and report of the backfill (counts from the markers vs a scan of
+    /// every update record, overlaps between inputs, sizes). Read-only.
+    Report {
+        #[arg(long, default_value = DEFAULT_DB_ROOT)]
+        db_root: PathBuf,
+        #[arg(
+            long,
+            default_value = "/mnt/hdd-raid5-72t/liang_torch/lseg_data/future_daily/normalisedLL2"
+        )]
+        raw_root: PathBuf,
+        #[arg(long, default_value = "2026-06-01")]
+        daily_start: String,
+        #[arg(long, default_value = "2026-11-12")]
+        daily_end: String,
+        #[arg(long)]
+        gaps: Option<PathBuf>,
+        #[arg(long)]
+        spot_checks: Option<PathBuf>,
+        #[arg(long)]
+        log: Option<PathBuf>,
+        #[arg(long)]
+        out_json: PathBuf,
+        #[arg(long)]
+        out_md: PathBuf,
+        #[arg(long, default_value_t = limits::L2_SLICE_WORKERS)]
+        workers: usize,
+        #[arg(long, default_value_t = 256)]
+        cache_mb: usize,
+    },
+    /// One-off backfill into RocksDB: the period packages (each one DB, parts read
+    /// back to back as one stream) and the daily files (one DB per UTC day), all
+    /// products, resumable (finished units are skipped), paused while the server's
+    /// jobs run. Run it from a copy of the binary with `nice -n 10`.
+    Backfill {
+        #[arg(
+            long,
+            default_value = "/mnt/hdd-raid5-72t/liang_torch/lseg_data/future_daily/normalisedLL2"
+        )]
+        raw_root: PathBuf,
+        #[arg(
+            long,
+            default_value = "/mnt/hdd-raid5-72t/liang_torch/lseg_data/future/normalisedLL2"
+        )]
+        package_root: PathBuf,
+        /// Which period packages: p2025, p2026h1, s2025 (the 2025 supplement).
+        #[arg(long, value_delimiter = ',', default_value = "p2026h1,p2025,s2025")]
+        packages: Vec<String>,
+        /// Explicit stream units `id=part1,part2,…` (replaces --packages; for dry runs).
+        #[arg(long)]
+        stream: Vec<String>,
+        #[arg(long, default_value = "2026-06-01")]
+        daily_start: String,
+        #[arg(long, default_value = "2026-11-12")]
+        daily_end: String,
+        /// Default: every product directory below --raw-root.
+        #[arg(long, value_delimiter = ',')]
+        daily_products: Vec<String>,
+        #[arg(long)]
+        no_daily: bool,
+        /// Day databases below this root; stream databases in `<db-root>/_stream/<id>`.
+        #[arg(long, default_value = DEFAULT_DB_ROOT)]
+        db_root: PathBuf,
+        #[arg(long, default_value_t = limits::L2_SLICE_WORKERS)]
+        workers: usize,
+        /// Files read at the same time.
+        #[arg(long, default_value_t = 4)]
+        producers: usize,
+        #[arg(long, default_value_t = 6)]
+        sst_zstd_level: i32,
+        /// Text bytes per washed segment (= per SST file); big on purpose: a package
+        /// of hundreds of GB would otherwise ingest millions of tiny SST files.
+        #[arg(long, default_value_t = 512)]
+        segment_mib: usize,
+        /// Progress JSON (rewritten every 10 s).
+        #[arg(long)]
+        progress: PathBuf,
+        /// Source gaps (missing / empty / still downloading files) are written here.
+        #[arg(long)]
+        gaps: PathBuf,
+        /// host:port of the server whose `/api/admin/status` gates the run.
+        #[arg(long, default_value = "127.0.0.1:18313")]
+        status_addr: String,
+        #[arg(long)]
+        no_gate: bool,
+    },
     /// Stages 1+2: decompress `<raw-root>/<PRODUCT>/<PRODUCT>_<day>_normll2.csv.gz`
     /// once into RIC-aligned zstd shards and wash them into the day RocksDB
     /// (every update, no frequency). Shards are deleted as soon as they are washed.
@@ -431,6 +518,151 @@ fn main() -> Result<()> {
                 &default_exchange,
                 p,
             )
+        }
+        Command::Report {
+            db_root,
+            raw_root,
+            daily_start,
+            daily_end,
+            gaps,
+            spot_checks,
+            log,
+            out_json,
+            out_md,
+            workers,
+            cache_mb,
+        } => {
+            ensure!(
+                (1..=limits::L2_SLICE_WORKERS).contains(&workers),
+                "--workers must be 1..={}",
+                limits::L2_SLICE_WORKERS
+            );
+            let rep = run_report(&ReportConfig {
+                db_root,
+                raw_root,
+                daily_start,
+                daily_end,
+                gaps,
+                spot_checks,
+                log,
+                out_json,
+                out_md,
+                workers,
+                cache_mb,
+            })?;
+            println!("{}", json!({"report": true, "ok": rep["ok"]}));
+            ensure!(rep["ok"] == true, "report found problems");
+            Ok(())
+        }
+        Command::Backfill {
+            raw_root,
+            package_root,
+            packages,
+            stream,
+            daily_start,
+            daily_end,
+            daily_products,
+            no_daily,
+            db_root,
+            workers,
+            producers,
+            sst_zstd_level,
+            segment_mib,
+            progress,
+            gaps,
+            status_addr,
+            no_gate,
+        } => {
+            ensure!(
+                (2..=limits::L2_SLICE_WORKERS).contains(&workers),
+                "--workers must be 2..={}",
+                limits::L2_SLICE_WORKERS
+            );
+            l2_db::set_sst_zstd_level(sst_zstd_level);
+            let mut units: Vec<Unit> = Vec::new();
+            if stream.is_empty() {
+                units.extend(l2_backfill::package_units(&package_root, &packages)?);
+            } else {
+                for spec in &stream {
+                    let (id, list) = spec.split_once('=').context("--stream id=part1,part2")?;
+                    let parts: Vec<PathBuf> = list.split(',').map(PathBuf::from).collect();
+                    let gz_bytes = parts
+                        .iter()
+                        .map(|p| std::fs::metadata(p).map_or(0, |m| m.len()))
+                        .sum();
+                    units.push(Unit {
+                        kind: UnitKind::Stream {
+                            id: id.to_string(),
+                            parts,
+                        },
+                        gz_bytes,
+                    });
+                }
+            }
+            let mut gaps_json = json!({});
+            if !no_daily {
+                let days = l2_backfill::days_between(&daily_start, &daily_end)?;
+                let prods = (!daily_products.is_empty()).then_some(daily_products.as_slice());
+                let scan = l2_backfill::daily_units(&raw_root, prods, &days)?;
+                gaps_json = json!({
+                    "days": [daily_start, daily_end],
+                    "missing_files": scan.missing.len(), "missing": scan.missing,
+                    "zero_byte_placeholders": scan.empty.len(), "zero_byte": scan.empty,
+                    "still_downloading": scan.too_new.len(), "downloading": scan.too_new,
+                    "products_without_directory": scan.no_dir,
+                });
+                units.extend(scan.units);
+            }
+            l2_backfill::write_json_atomic(&gaps, &gaps_json)?;
+            let total = units.len();
+            let gate = Gate::new();
+            let progress_state = Arc::new(Progress::default());
+            let gate_thread =
+                (!no_gate).then(|| l2_backfill::spawn_gate(Arc::clone(&gate), status_addr.clone()));
+            let monitor = l2_backfill::spawn_monitor(
+                Arc::clone(&progress_state),
+                Arc::clone(&gate),
+                progress,
+                json!({"units_requested": total, "workers": workers, "producers": producers,
+                       "sst_zstd_level": sst_zstd_level, "db_root": db_root,
+                       "started_utc": chrono::Utc::now().to_rfc3339()}),
+            );
+            let g2 = Arc::clone(&gate);
+            let cfg = StreamConfig {
+                raw_root,
+                stream_db_root: db_root.join("_stream"),
+                db_root,
+                workers,
+                producers,
+                force: false,
+                segment_bytes: segment_mib << 20,
+                block_bytes: lseg_delivery::l2_stream::BLOCK_BYTES,
+                gate: Arc::new(move || g2.wait()),
+                progress: Arc::clone(&progress_state),
+            };
+            let started = Instant::now();
+            let rep = run_stream(&cfg, units);
+            gate.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = monitor.join();
+            if let Some(t) = gate_thread {
+                let _ = t.join();
+            }
+            let rep = rep?;
+            let count = |st: &str| rep.results.iter().filter(|v| v["status"] == st).count();
+            println!(
+                "{}",
+                json!({"summary": true, "stage": "backfill", "units_requested": total,
+                       "washed": count("washed"), "kept_existing": count("kept_existing"),
+                       "failed_units": count("failed"), "missing_source": count("missing_source"),
+                       "failed": rep.failed.is_some(), "seconds": started.elapsed().as_secs(),
+                       "cpu_seconds": cpu_total(), "peak_rss_mib": peak_rss_mib()})
+            );
+            if let Some(e) = rep.failed {
+                eprintln!("FAILED: {e}");
+                bail!("backfill failed");
+            }
+            ensure!(count("failed") == 0, "{} units failed", count("failed"));
+            Ok(())
         }
         Command::Wash {
             raw_root,

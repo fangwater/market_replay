@@ -832,6 +832,8 @@ fn try_finish_ric(rt: &Rt, ui: usize, ric_idx: usize) -> Result<()> {
             let w = &outcome.washed;
             let v = json!({"updates": w.updates, "first_ts": w.first_ts, "last_ts": w.last_ts,
                            "months": outcome.months, "value_bytes": w.value_bytes,
+                           "crc_sum": w.crc_sum,
+                           "days": outcome.days.iter().map(|(d, x)| json!([d, x.count, x.first_ts, x.last_ts, x.crc_sum])).collect::<Vec<_>>(),
                            "key_bytes": w.key_bytes, "sst_bytes": w.sst_bytes});
             let mut key = b"R|".to_vec();
             key.extend_from_slice(ric.as_bytes());
@@ -877,7 +879,7 @@ fn consume(rt: &Rt, job: Job) -> Result<()> {
     data.clear();
     {
         let mut pool = rt.pool.lock().expect("pool lock");
-        if pool.len() < 2 * rt.cfg.workers {
+        if pool.len() < 4 {
             pool.push(data);
         }
     }
