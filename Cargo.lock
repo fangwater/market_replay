@@ -890,6 +890,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cn_reference"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "dingtalk",
+ "encoding_rs",
+ "percent-encoding",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2377,6 +2399,7 @@ dependencies = [
  "chrono-tz 0.10.4",
  "clap",
  "cn_kline_server",
+ "cn_reference",
  "data_dashboard",
  "libc",
  "serde",

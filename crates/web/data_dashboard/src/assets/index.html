@@ -367,7 +367,7 @@ function panelServices(rf, mc) {
   h += `<div class="row"><div><h3>参考数据每日同步（cn-futures-reference）${badge(r.status)} ${secHeader(rf)}</h3>` + kv([
     ["数据 as_of", esc(r.as_of || "–")], ["今天（北京）", esc(r.today_shanghai || "–")],
     ["最近更新", esc(r.latest_update_ts || "–")], ["合约 / 版本", `${fmtN(r.instrument_count)} / ${fmtN(r.version_count)}`],
-  ]) + `<div class="muted" style="font-size:12px">同步失败（代理不可用等）时 as_of 停在旧日期，详见“服务与任务”里 cn-reference-daily-sync 的日志。</div></div>`;
+  ]) + `<div class="muted" style="font-size:12px">同步失败（代理不可用等）时 as_of 停在旧日期，详见“服务与任务”里任务 cn-reference-daily 的日志。</div></div>`;
   const pct = m.limit_bytes ? Math.min(100, (m.total_bytes / m.limit_bytes) * 100) : 0;
   h += `<div><h3>mdl-replay 分片缓存 ${badge(m.status)} ${secHeader(mc)}</h3>` +
     `<div class="meter" title="${esc(fmtB(m.total_bytes))} / ${esc(fmtB(m.limit_bytes))}"><div style="width:${pct.toFixed(1)}%"></div></div>` +

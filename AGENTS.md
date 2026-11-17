@@ -66,10 +66,12 @@
 
 2026-11-14 从 `/home/fanghaizhou/cn_exchange_info_summary` 整体并入 `reference/`。2026-11-15 经用户确认，旧目录备份和原路径的软链接都已删除，引用旧路径的地方（快照 JSON 的 `raw_path`、cme_exchange_info_summary 的 README）都改成了新路径。
 
-- 这是一个 Python 项目，自带 `reference/AGENTS.md`，改这个目录时遵守其中的规则：只写 PostgreSQL 独立 schema `cn_futures_reference`，不碰 `public` 下的乘数表和交易时段表。
+- **分工（2026-11-17 起）：** 核心数据面已迁到 Rust（`crates/ref/cn_reference`，库挂在 `market-replay-server` 进程内，直接监听 :8765）：`/api/v1/{health,schema,data-state,trading-sessions,overview,exchanges,instruments,exports/*}` 的查询与导出、`POST /api/v1/sync`、`POST /api/v1/trading-sessions/sync`、OpenCTP 抓取与解析、增量版本存储。其余路径（网页 `/`、公告、报单费规则、费用估算、`/import`、`/overrides/import`）原样转发给仍是 Python 的服务 `cn-reference-ui`（`reference/`，只监听 127.0.0.1:8766）。这几块是下一步要迁的，迁完再删 Python。`reference/AGENTS.md` 的规则仍然有效：只写 PostgreSQL 独立 schema `cn_futures_reference`，不碰 `public` 下的乘数表和交易时段表。
 - 两个虚拟环境 `.venv` 和 `.venv-mcp` 按 `requirements.lock` / `requirements-mcp.lock` 重建（版本和搬迁前逐个一致）。它们不进版本控制。
-- 进程由 `market-replay-server` 托管（2026-11-16 起，不再单独注册 PM2）：服务 `cn-reference-api`（:8765）、`cn-reference-daily-sync`（上海时间 18:15）、`exchange-mcp`（0.0.0.0:8780，同机其他用户在用）。
-- 每日同步在 2026-10-12 到 2026-11-14 期间每天都失败，报错是 `Connection refused`（走的环境代理是 `127.0.0.1:10810`）。2026-11-14 手动同步成功，数据补到 2026-11-16。代理不可用时同步会失败，要看 `cn-futures-reference-daily-sync` 的错误日志。
+- 进程由 `market-replay-server` 托管（不再单独注册 PM2）：:8765 由服务器进程自己提供（`[reference]` 段）；服务 `cn-reference-ui`（:8766，Python）、`exchange-mcp`（0.0.0.0:8780，同机其他用户在用）；每日同步是任务 `cn-reference-daily`（上海 18:15，`cn-reference sync`，走任务队列，发钉钉），不再有 `cn-reference-daily-sync` 服务。手动同步用 `cn-reference sync`，Python 的同步脚本已删除。
+- 数据库连接串只读 `CN_FUTURES_REF_DATABASE_URL`（环境变量，或 `[reference].env_file` 指向的 `reference/.env`），不打印、不入库。
+- 迁移验证（2026-11-17）：解析器与 Python 在真实页面上逐条一致（874 条合约记录的全部列和 sha256 record_hash，327 条时段的 hash）；GET 接口 132 个请求（含错误分支）与 Python 逐字节一致。已知差异和细节见 `docs/market_replay_server.md`。
+- 每日同步在 2026-10-12 到 2026-11-14 期间每天都失败，报错是 `Connection refused`（走的环境代理是 `127.0.0.1:10810`）。2026-11-14 手动同步成功，数据补到 2026-11-16。代理不可用时同步会失败，要看任务 `cn-reference-daily` 的日志。
 - 按品种的连续交易时段在 `cn_futures_reference.continuous_session_versions`，kline 服务判断收盘边界要用它。
 
 ## kline 服务（进行中）

@@ -16,6 +16,10 @@ pub struct Config {
     pub http: Http,
     /// `cn-kline-server` config (gRPC `listen`, baseline root, roll dir).
     pub cn_market: CnMarket,
+    /// Reference data (OpenCTP fees, ticks, sessions) API, served in-process.
+    /// Omit to leave :8765 to the Python service.
+    #[serde(default)]
+    pub reference: Option<Reference>,
     /// Read-only dashboard 数据处理进度与品种查询 (`data_dashboard`): UI at
     /// `/`, JSON at `/api/dashboard/*`. Omit to serve without it.
     #[serde(default)]
@@ -36,6 +40,26 @@ pub struct Http {
 #[serde(deny_unknown_fields)]
 pub struct CnMarket {
     pub config: PathBuf,
+}
+
+/// `cn_reference` API: Rust owns the listen port; paths it does not handle
+/// (web UI, announcements, message fees, fee estimates, imports) are proxied
+/// to the Python process at `fallback`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    pub listen: String,
+    pub fallback: String,
+    /// KEY=VALUE file with CN_FUTURES_REF_DATABASE_URL (the Python `.env`),
+    /// used when the variable is not in the environment.
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
+    #[serde(default = "d_ref_schema")]
+    pub schema: String,
+}
+
+fn d_ref_schema() -> String {
+    "cn_futures_reference".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
