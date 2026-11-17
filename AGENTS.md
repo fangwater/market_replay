@@ -189,7 +189,7 @@
   - 运行状态、证据和报表放在 NVMe 的 `/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/{artifacts,reports}`，不进 git。
 - **历史记录：**
   - 原项目 AGENTS 全文（含逐日历史）归档在 `docs/lseg/agents_history.md`。下面没写到的口径细节以它为准，但其中关于 `ly_cme_run`、LD_PRELOAD 和"禁止服务/定时器"的规定已被本节取代。
-  - 2026-11-16 经用户同意，artifacts、reference_cme 和 preprocess 里的旧路径（`ly_cme_data`、`cme_exchange_info_summary`）都已批量改成新路径（588 个文件）。另有 8 个文件记录了这些文件的 sha256，已同步更新。改写前的完整备份在 `lseg_data/runtime/artifacts.before_path_rewrite_20261116` 和 `runtime/path_rewrite_backup_20261116_misc.tar.gz`。
+  - 2026-11-16 经用户同意，artifacts、reference_cme 和 preprocess 里的旧路径（`ly_cme_data`、`cme_exchange_info_summary`）都已批量改成新路径（588 个文件）。另有 8 个文件记录了这些文件的 sha256，已同步更新。改写前的完整备份（`artifacts.before_path_rewrite_20261116` 和 `path_rewrite_backup_20261116_misc.tar.gz`）经用户确认，已于 2026-11-17 删除，改写后 `lseg-daily` 已正常运行。
   - **例外：** `artifacts/lseg_full_rocksdb_20261112/plan.json` 保持原样，没有改写。`lseg_kline` 用这份计划里的作业 JSON 作为源身份，与提取缓存核对，改动路径会导致 143 个日包作业报 `source identity changed`。
 - **凭据：** IB MySQL 的 `IB_MYSQL_*` 放在 `~/.config/market_replay/ib_mysql.env`（权限 600），不进仓库，也不打印。
 - **资源（最高优先级）：**
