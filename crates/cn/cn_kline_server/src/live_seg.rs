@@ -121,6 +121,12 @@ pub struct Params {
     /// Wall-clock silence after which the last segment is cut with no later row
     /// (must exceed the break length plus the NFS delivery lag).
     pub tail_quiet_ns: i64,
+    /// Scheduled tail cut: wall-clock delay after the contract's last row (the
+    /// NFS copy must have been quiet and caught up for this long) ...
+    pub delay_ns: i64,
+    /// ... and the cut lies this far after the window end, so closing
+    /// snapshots written just after the end still belong to the segment.
+    pub tail_grace_ns: i64,
 }
 
 /// A finished segment: the minute rows of one continuous stretch.
@@ -193,17 +199,30 @@ impl ContractState {
     /// silence-based tail cut additionally needs `caught_up`: the files have
     /// been read to their current end, otherwise a contract's last row read so
     /// far only looks old.
+    ///
+    /// `break_end(ts_sec)` answers whether `ts_sec` is at the end of a
+    /// scheduled window followed by a break of at least `SESSION_BREAK_SEC`
+    /// and returns that end (epoch s). The last segment is then cut
+    /// `delay_ns` after the last row (and `tail_grace_ns` after the window end)
+    /// instead of waiting for the long silence rule, which stays as a fallback.
     pub fn plan_cuts(
         &mut self,
         through_ns: i64,
         now_ns: i64,
         caught_up: bool,
         p: Params,
+        break_end: &dyn Fn(i64) -> Option<i64>,
     ) -> Vec<(i64, i64)> {
         if self.rows.is_empty() {
             return Vec::new();
         }
-        let tail_due = caught_up && now_ns - self.max_ts_ns >= p.tail_quiet_ns;
+        let quiet = now_ns - self.max_ts_ns;
+        let scheduled = if caught_up && quiet >= p.delay_ns {
+            break_end(self.max_ts_ns.div_euclid(NS))
+        } else {
+            None
+        };
+        let tail_due = caught_up && (quiet >= p.tail_quiet_ns || scheduled.is_some());
         if !self.maybe_cut && !tail_due {
             return Vec::new();
         }
@@ -223,7 +242,11 @@ impl ContractState {
         self.maybe_cut = deferred;
         if tail_due {
             let last = self.rows.last().expect("non-empty").ts_ns;
-            cuts.push((minute_ceil(last), last));
+            let at = match scheduled {
+                Some(end) => minute_ceil(last).max(end * NS + p.tail_grace_ns),
+                None => minute_ceil(last),
+            };
+            cuts.push((at, last));
         }
         cuts
     }
@@ -489,6 +512,8 @@ mod tests {
         let p = Params {
             margin_ns: 0,
             tail_quiet_ns: i64::MAX,
+            delay_ns: i64::MAX,
+            tail_grace_ns: 0,
         };
         let through = all
             .last()
@@ -496,7 +521,7 @@ mod tests {
             .event_time
             .timestamp_nanos_opt()
             .unwrap();
-        let cuts = st.plan_cuts(through + 3600 * NS, 0, true, p);
+        let cuts = st.plan_cuts(through + 3600 * NS, 0, true, p, &|_| None);
         assert_eq!(cuts.len(), 1, "one 09:10 -> 13:30 break");
         let (segs, carry) = st.compute_segments(&cuts, &c).unwrap();
         assert_eq!(segs.len(), 1);
@@ -520,16 +545,21 @@ mod tests {
         let p = Params {
             margin_ns: 60 * NS,
             tail_quiet_ns: 7200 * NS,
+            delay_ns: 600 * NS,
+            tail_grace_ns: 300 * NS,
         };
+        let no_break = |_: i64| None;
         assert!(
-            st.plan_cuts(last, last + 3600 * NS, true, p).is_empty(),
+            st.plan_cuts(last, last + 3600 * NS, true, p, &no_break)
+                .is_empty(),
             "not quiet long enough"
         );
         assert!(
-            st.plan_cuts(last, last + 9000 * NS, false, p).is_empty(),
+            st.plan_cuts(last, last + 9000 * NS, false, p, &no_break)
+                .is_empty(),
             "files not caught up"
         );
-        let cuts = st.plan_cuts(last, last + 7200 * NS, true, p);
+        let cuts = st.plan_cuts(last, last + 7200 * NS, true, p, &no_break);
         assert_eq!(cuts, vec![(minute_ceil(last), last)]);
         let (segs, carry) = st.compute_segments(&cuts, &c).unwrap();
         assert!(!segs.is_empty());
@@ -540,6 +570,54 @@ mod tests {
         assert_eq!(st.push(late, true), Push::Dropped);
         let next = Row::of(&snap(13, 30, 0, 0, 1.0, 3380.0, 3379.0, 3382.0));
         assert_eq!(st.push(next, false), Push::Kept);
+    }
+
+    #[test]
+    fn scheduled_tail_cut_waits_for_delay_and_a_proven_break() {
+        let keep = |_: i64| true;
+        let c = ctx(&keep);
+        let first: Vec<Snapshot> = stream().into_iter().take(1200).collect();
+        let mut st = ContractState::default();
+        for r in rows(&first) {
+            st.push(r, false);
+        }
+        let last = st.max_ts_ns;
+        let end = last.div_euclid(NS) + 20; // pretend the window ends 20 s later
+        let at_end = move |_: i64| Some(end);
+        let not_end = |_: i64| None;
+        let p = Params {
+            margin_ns: 60 * NS,
+            tail_quiet_ns: 7200 * NS,
+            delay_ns: 600 * NS,
+            tail_grace_ns: 300 * NS,
+        };
+        // A tea-break-like last row (no proven break) is never cut early.
+        assert!(st
+            .plan_cuts(last, last + 900 * NS, true, p, &not_end)
+            .is_empty());
+        // Proven break, but the 10 minute delay has not elapsed.
+        assert!(st
+            .plan_cuts(last, last + 599 * NS, true, p, &at_end)
+            .is_empty());
+        // Proven break, delay elapsed, but the files are not caught up.
+        assert!(st
+            .plan_cuts(last, last + 900 * NS, false, p, &at_end)
+            .is_empty());
+        let cuts = st.plan_cuts(last, last + 600 * NS, true, p, &at_end);
+        assert_eq!(
+            cuts,
+            vec![(end * NS + 300 * NS, last)],
+            "cut after the window end + grace"
+        );
+        let (segs, carry) = st.compute_segments(&cuts, &c).unwrap();
+        assert!(!segs.is_empty());
+        st.commit(&cuts, carry);
+        // A closing snapshot written just after the window end is still late.
+        let closing = Row {
+            ts_ns: (end + 2) * NS,
+            ..Row::of(&snap(9, 5, 0, 0, 1.0, 3380.0, 3379.0, 3382.0))
+        };
+        assert_eq!(st.push(closing, false), Push::Late);
     }
 
     #[test]
@@ -559,8 +637,10 @@ mod tests {
         let p = Params {
             margin_ns: 0,
             tail_quiet_ns: i64::MAX,
+            delay_ns: i64::MAX,
+            tail_grace_ns: 0,
         };
-        let cuts = st.plan_cuts(i64::MAX / 4, 0, true, p);
+        let cuts = st.plan_cuts(i64::MAX / 4, 0, true, p, &|_| None);
         let (segs, carry) = st.compute_segments(&cuts, &c).unwrap();
         st.commit(&cuts, carry);
 

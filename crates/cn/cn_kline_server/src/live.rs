@@ -22,6 +22,7 @@ use crate::live_seg::{
 };
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
+use cn_futures_core::segments::SESSION_BREAK_SEC;
 use cn_futures_core::universe::product_id;
 use cn_futures_l2::baseline_1min::BaselineMinute;
 use cn_futures_l2::events::{process_instrument, Snapshot};
@@ -63,6 +64,15 @@ pub struct Config {
     /// silence. It must exceed the 30 min break plus the NFS delivery lag.
     #[serde(default = "d_tail")]
     pub tail_quiet_s: u64,
+    /// Scheduled tail cut: a contract whose last row sits at the end of a
+    /// scheduled window followed by a break of at least 30 minutes is finished
+    /// this many seconds (wall clock) after that row, once the files are
+    /// caught up, so the NFS writes of the close have completed.
+    #[serde(default = "d_delay")]
+    pub delay_s: u64,
+    /// The scheduled cut lies this many seconds after the window end.
+    #[serde(default = "d_grace")]
+    pub tail_grace_s: u64,
     /// At most this many bytes of one file are parsed per step (bounds the
     /// memory of the first load of a long day).
     #[serde(default = "d_step_mb")]
@@ -82,6 +92,12 @@ fn d_lookback() -> u64 {
 }
 fn d_margin() -> u64 {
     60
+}
+fn d_delay() -> u64 {
+    600
+}
+fn d_grace() -> u64 {
+    300
 }
 fn d_tail() -> u64 {
     7200
@@ -211,6 +227,8 @@ impl Live {
         Params {
             margin_ns: self.cfg.finalize_margin_s as i64 * NS,
             tail_quiet_ns: self.cfg.tail_quiet_s as i64 * NS,
+            delay_ns: self.cfg.delay_s as i64 * NS,
+            tail_grace_ns: self.cfg.tail_grace_s as i64 * NS,
         }
     }
 
@@ -480,15 +498,16 @@ impl Live {
                 continue;
             };
             let c = s.contracts.get_mut(&id).expect("listed");
-            let cuts = c.plan_cuts(through_ns, now, caught_up, self.params());
+            let Ok(matcher) = self.sessions.matcher(venue, &product) else {
+                first_error.get_or_insert(format!("no session snapshot for {venue}.{product}"));
+                continue;
+            };
+            let at_break = |ts: i64| matcher.break_end(ts, 180, SESSION_BREAK_SEC);
+            let cuts = c.plan_cuts(through_ns, now, caught_up, self.params(), &at_break);
             if cuts.is_empty() {
                 continue;
             }
             let Some(multiplier) = (fin.multiplier)(&product) else {
-                continue;
-            };
-            let Ok(matcher) = self.sessions.matcher(venue, &product) else {
-                first_error.get_or_insert(format!("no session snapshot for {venue}.{product}"));
                 continue;
             };
             let keep = |ts: i64| matcher.contains_ts(ts);

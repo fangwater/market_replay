@@ -26,3 +26,9 @@ products = ["*"]
 # dropped from memory; the manifest lets a restart resume. Partial files of days that
 # cn-daily has published are deleted automatically.
 segment_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/live_segments"
+# Scheduled tail cut: a contract whose last row is at the end of a window followed
+# by a break >= 30 min (lunch, close, night close; NOT the 15 min tea break) is
+# persisted delay_s after that row once the files are caught up, cut at window end
+# + tail_grace_s. tail_quiet_s (2 h) stays as the fallback.
+delay_s = 600
+tail_grace_s = 300

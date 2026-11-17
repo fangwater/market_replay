@@ -140,8 +140,10 @@ fn main() -> anyhow::Result<()> {
         let p = Params {
             margin_ns: 0,
             tail_quiet_ns: 0,
+            delay_ns: i64::MAX,
+            tail_grace_ns: 0,
         };
-        let cuts = st.plan_cuts(i64::MAX / 4, i64::MAX / 4, true, p);
+        let cuts = st.plan_cuts(i64::MAX / 4, i64::MAX / 4, true, p, &|_| None);
         let ctx = Ctx {
             instrument: &id,
             exchange: ex,

@@ -237,6 +237,33 @@ impl ContinuousSessions {
 }
 
 impl SessionMatcher<'_> {
+    /// If `ts_sec` lies within `slack_sec` of the end of a continuous window
+    /// whose following break is at least `min_break_sec` long, returns that
+    /// window end (epoch seconds). Used to prove that no more rows can belong
+    /// to the segment ending there; a tea break (shorter) never qualifies.
+    pub fn break_end(&self, ts_sec: i64, slack_sec: i64, min_break_sec: i64) -> Option<i64> {
+        let local = (ts_sec + SHANGHAI_UTC_OFFSET_SECONDS).rem_euclid(SECONDS_PER_DAY);
+        let day_start = ts_sec - local;
+        for window in self.windows {
+            let end = i64::from(window.end_sec);
+            let gap = self
+                .windows
+                .iter()
+                .map(|next| (i64::from(next.begin_sec) - end).rem_euclid(SECONDS_PER_DAY))
+                .min()?;
+            if gap < min_break_sec {
+                continue;
+            }
+            for shift in [-SECONDS_PER_DAY, 0, SECONDS_PER_DAY] {
+                let e = day_start + shift + end;
+                if (e - ts_sec).abs() <= slack_sec {
+                    return Some(e);
+                }
+            }
+        }
+        None
+    }
+
     #[inline]
     pub fn contains_ts(&self, ts_sec: i64) -> bool {
         // Asia/Shanghai is UTC+08:00 throughout this archive. This avoids a
@@ -325,5 +352,63 @@ mod tests {
             ContinuousSessions::from_response(response(rows.clone()), json!({"sessions": rows}))
                 .unwrap_err();
         assert!(error.to_string().contains("crosses_midnight"));
+    }
+}
+
+#[cfg(test)]
+mod break_end_tests {
+    use super::*;
+
+    fn w(begin: u32, end: u32, crosses: bool) -> SessionWindow {
+        SessionWindow {
+            begin_sec: begin,
+            end_sec: end,
+            crosses_midnight: crosses,
+        }
+    }
+
+    // Commodity-like day: night 21:00-01:00, 09:00-10:15, 10:30-11:30, 13:30-15:00.
+    fn windows() -> Vec<SessionWindow> {
+        vec![
+            w(21 * 3600, 3600, true),
+            w(9 * 3600, 10 * 3600 + 900, false),
+            w(10 * 3600 + 1800, 11 * 3600 + 1800, false),
+            w(13 * 3600 + 1800, 15 * 3600, false),
+        ]
+    }
+
+    fn at(h: i64, m: i64, s: i64) -> i64 {
+        // 2026-11-17 Shanghai wall clock as epoch seconds.
+        1_794_844_800 + h * 3600 + m * 60 + s
+    }
+
+    #[test]
+    fn only_breaks_of_at_least_30_minutes_qualify() {
+        let ws = windows();
+        let m = SessionMatcher { windows: &ws };
+        let slack = 180;
+        let min_break = 1800;
+        // Lunch (11:30 -> 13:30), afternoon close (15:00 -> 21:00), night close.
+        assert_eq!(
+            m.break_end(at(11, 29, 58), slack, min_break),
+            Some(at(11, 30, 0))
+        );
+        assert_eq!(
+            m.break_end(at(11, 30, 2), slack, min_break),
+            Some(at(11, 30, 0))
+        );
+        assert_eq!(
+            m.break_end(at(15, 0, 1), slack, min_break),
+            Some(at(15, 0, 0))
+        );
+        assert_eq!(
+            m.break_end(at(0, 59, 59), slack, min_break),
+            Some(at(1, 0, 0))
+        );
+        // Tea break 10:15 -> 10:30 is shorter than 30 minutes.
+        assert_eq!(m.break_end(at(10, 14, 59), slack, min_break), None);
+        // Mid-session or lagging last row is not at an end.
+        assert_eq!(m.break_end(at(11, 25, 0), slack, min_break), None);
+        assert_eq!(m.break_end(at(14, 0, 0), slack, min_break), None);
     }
 }
