@@ -653,7 +653,40 @@ pub struct Components {
     pub refresh: tokio::task::JoinHandle<()>,
 }
 
+/// Waits (quietly, 0.5 s polls) until the reference service answers its health
+/// endpoint. Under `market-replay-server` that service is a sibling child that
+/// starts a few seconds after this process, so the first metadata load would
+/// otherwise fail with `Connection refused` and cost a 5 s retry. Returns
+/// whether it became ready; callers continue either way and let the metadata
+/// load report the real error.
+pub async fn wait_reference_api(base: &str, max_wait: std::time::Duration) -> bool {
+    let url = format!("{}/api/v1/health", base.trim_end_matches('/'));
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return false;
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            return true;
+        }
+        if start.elapsed() >= max_wait {
+            eprintln!("cn-market: reference API {url} not ready after {max_wait:?}");
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 pub async fn components(cfg: Config) -> Result<Components> {
+    wait_reference_api(&cfg.reference_api, std::time::Duration::from_secs(120)).await;
     let meta = Arc::new(RwLock::new(load_metadata(&cfg).await?));
     {
         let m = meta.read().unwrap();

@@ -13,8 +13,9 @@
 //! catches up) and carries no `size_buckets` (monthly thresholds are unknown
 //! until month end).
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone};
 use cn_futures_core::segments::{book_valid, trad_day_from_ts};
+use cn_futures_core::universe::product_id;
 use cn_futures_l2::baseline_1min::{
     fill_session_minutes_with_twap, minute_segments_from_seconds, synthesize_minutes,
     BaselineMinute, PrintTrade,
@@ -54,10 +55,75 @@ fn d_lookback() -> u64 {
     16
 }
 
+/// One snapshot, stored compactly (216 bytes vs ~540 for `Snapshot` with two
+/// heap strings and 24 `Option<f64>`); missing numbers are NaN (the parser
+/// only ever yields finite values). The instrument is the map key and the
+/// trading day is `DayState::day`.
+#[derive(Clone)]
+struct Row {
+    ts_ns: i64,
+    seq: i64,
+    source_row: u32,
+    file_order: u32,
+    /// volume, turnover, last, open interest, bid px x5, bid size x5, ask px x5, ask size x5.
+    v: [f64; 24],
+}
+
+fn nan(x: Option<f64>) -> f64 {
+    x.unwrap_or(f64::NAN)
+}
+fn opt(x: f64) -> Option<f64> {
+    (!x.is_nan()).then_some(x)
+}
+
+impl Row {
+    fn of(s: &Snapshot) -> Self {
+        let mut v = [f64::NAN; 24];
+        v[0] = nan(s.volume);
+        v[1] = nan(s.turnover);
+        v[2] = nan(s.last_price);
+        v[3] = nan(s.open_int);
+        for i in 0..5 {
+            v[4 + i] = nan(s.bid_prices[i]);
+            v[9 + i] = nan(s.bid_sizes[i]);
+            v[14 + i] = nan(s.ask_prices[i]);
+            v[19 + i] = nan(s.ask_sizes[i]);
+        }
+        Self {
+            ts_ns: s.event_time.timestamp_nanos_opt().expect("ns range"),
+            seq: s.seq,
+            source_row: s.source_row,
+            file_order: s.file_order,
+            v,
+        }
+    }
+
+    fn snapshot(&self, instrument: &str, day: NaiveDate) -> Snapshot {
+        let lv = |o: usize| -> [Option<f64>; 5] { std::array::from_fn(|i| opt(self.v[o + i])) };
+        Snapshot {
+            trad_day: day,
+            instrument_id: instrument.to_string(),
+            product_id: product_id(instrument).unwrap_or_default(),
+            event_time: chrono_tz::Asia::Shanghai.timestamp_nanos(self.ts_ns),
+            seq: self.seq,
+            source_row: self.source_row,
+            file_order: self.file_order,
+            volume: opt(self.v[0]),
+            turnover: opt(self.v[1]),
+            last_price: opt(self.v[2]),
+            open_int: opt(self.v[3]),
+            bid_prices: lv(4),
+            bid_sizes: lv(9),
+            ask_prices: lv(14),
+            ask_sizes: lv(19),
+        }
+    }
+}
+
 struct DayState {
     day: NaiveDate,
     files: HashMap<PathBuf, TailState>,
-    snaps: HashMap<String, Vec<Snapshot>>,
+    snaps: HashMap<String, Vec<Row>>,
     through_ms: i64,
     checked: Instant,
 }
@@ -186,10 +252,13 @@ impl Live {
                 }
                 for snap in new {
                     s.through_ms = s.through_ms.max(snap.event_time.timestamp_millis());
-                    s.snaps
-                        .entry(snap.instrument_id.clone())
-                        .or_default()
-                        .push(snap);
+                    let row = Row::of(&snap);
+                    match s.snaps.get_mut(&snap.instrument_id) {
+                        Some(rows) => rows.push(row),
+                        None => {
+                            s.snaps.insert(snap.instrument_id, vec![row]);
+                        }
+                    }
                 }
             }
             if !shrank || attempt == 1 {
@@ -242,7 +311,7 @@ impl Live {
             }
             let s = st.as_ref().expect("refreshed");
             let td = yyyymmdd(s.day);
-            let picked: Vec<(String, Vec<Snapshot>)> = s
+            let picked: Vec<(String, Vec<Row>)> = s
                 .snaps
                 .iter()
                 .filter(|(id, _)| matches(id, td))
@@ -251,7 +320,9 @@ impl Live {
             (s.day, s.through_ms, picked)
         };
         let mut out = Vec::new();
-        for (id, mut snaps) in picked {
+        for (id, rows) in picked {
+            let mut snaps: Vec<Snapshot> = rows.iter().map(|r| r.snapshot(&id, day)).collect();
+            drop(rows);
             let minutes = compute(&id, &mut snaps, exchange, multiplier, day, &self.sessions)?;
             out.push(LiveBars {
                 day,
@@ -314,4 +385,36 @@ pub fn compute(
         .into_iter()
         .filter(|r| trad_day_from_ts(r.ts) == day && matcher.contains_ts(r.ts))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_row_round_trips_a_snapshot_exactly() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+        let snap = Snapshot {
+            trad_day: day,
+            instrument_id: "sn2701".into(),
+            product_id: "SN".into(),
+            event_time: chrono_tz::Asia::Shanghai
+                .with_ymd_and_hms(2026, 11, 16, 21, 0, 0)
+                .unwrap()
+                + chrono::Duration::milliseconds(500),
+            seq: 12,
+            source_row: 34,
+            file_order: 2,
+            volume: Some(7.0),
+            turnover: None,
+            last_price: Some(271_230.0),
+            open_int: Some(1.5),
+            bid_prices: [Some(1.0), Some(2.0), None, None, None],
+            bid_sizes: [Some(3.0), None, None, None, Some(9.0)],
+            ask_prices: [Some(4.5), None, Some(6.0), None, None],
+            ask_sizes: [None, None, None, None, None],
+        };
+        let back = Row::of(&snap).snapshot("sn2701", day);
+        assert_eq!(format!("{snap:?}"), format!("{back:?}"));
+    }
 }

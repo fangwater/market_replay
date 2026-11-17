@@ -33,6 +33,18 @@ async fn main() -> anyhow::Result<()> {
             l.size_buckets.is_some()
         );
     }
+    // Digest of the bars opened before `cutoff_ms` (arg 5), to compare servers.
+    if let Some(cut) = a.get(5).and_then(|c| c.parse::<i64>().ok()) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let n = r
+            .bars
+            .iter()
+            .filter(|b| b.open_time_ms < cut)
+            .inspect(|b| format!("{b:?}").hash(&mut h))
+            .count();
+        println!("digest bars<cutoff: n={n} hash={:016x}", h.finish());
+    }
     let d = r.data_state.unwrap();
     println!(
         "latest_trading_day={} live_trading_day={} live_through={:?}",
