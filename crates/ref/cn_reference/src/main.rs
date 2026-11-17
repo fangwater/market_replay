@@ -35,7 +35,7 @@ enum Cmd {
     Serve {
         #[arg(long, default_value = "0.0.0.0:8765")]
         listen: String,
-        #[arg(long, default_value = "http://127.0.0.1:8766")]
+        #[arg(long, default_value = "http://127.0.0.1:18766")]
         fallback: String,
     },
     /// Parse a saved fee page and print the records as JSON (no database).

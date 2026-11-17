@@ -19,7 +19,7 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct AppState {
     pub db: Db,
-    /// Base URL of the Python fallback, e.g. `http://127.0.0.1:8766`.
+    /// Base URL of the Python fallback, e.g. `http://127.0.0.1:18766`.
     pub fallback: String,
     http: reqwest::Client,
 }

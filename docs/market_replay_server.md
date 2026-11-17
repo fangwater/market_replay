@@ -27,7 +27,7 @@ scripts/market_replay_server.sh restart --execute   # 有任务在跑时会拒�
 | --- | --- |
 | gRPC `cn_market.v1` | `0.0.0.0:18312`，配置取自 `config/cn_kline_server.toml`。逻辑在 `cn_kline_server` 库里，独立二进制 `cn-kline-server` 仍可单独运行 |
 | HTTP | `0.0.0.0:18313`：主力合约 `/api/v1/dominant`、管理 API `/api/admin/*`、数据看板（页面 `/`，接口 `/api/dashboard/*`，`[dashboard]` 段指向 `config/data_dashboard.toml`；`/admin` 跳到看板的“服务与任务”页，没配看板时仍是内置的简易页） |
-| 常驻服务 `[[service]]` | 子进程，退出后按 2 秒起、最长 60 秒的退避自动重启：`cn-reference-ui`（Python，仅 127.0.0.1:8766，:8765 转发给它）、`cme-reference`（:8770）、`exchange-mcp`（:8780），以及 `mdl-replay`（默认关闭，按需在配置里启用） |
+| 常驻服务 `[[service]]` | 子进程，退出后按 2 秒起、最长 60 秒的退避自动重启：`cn-reference-ui`（Python，仅 127.0.0.1:18766，:8765 转发给它）、`cme-reference`（:8770）、`exchange-mcp`（:8780），以及 `mdl-replay`（默认关闭，按需在配置里启用） |
 | 定时任务 `[[job]]` | 按时区和时刻排程，所有任务走同一个队列依次执行：`cn-daily`（上海 16:30）、`ib-kline-daily`（上海 09:30）、`cn-reference-daily`（上海 18:15）。每个任务各自发钉钉 |
 
 ## 参考数据 API（`[reference]` 段，2026-11-17 起 Rust）
@@ -38,7 +38,7 @@ scripts/market_replay_server.sh restart --execute   # 有任务在跑时会拒�
 | --- | --- |
 | `GET /api/v1/{health,schema,data-state,trading-sessions,overview,exchanges/*,instruments/*/*,exports/exchange-info,exports/records.csv}` | Rust；响应与 Python 逐字节一致（键序、转义、`Cache-Control: no-store`、错误体 `{"error":{"status","message"}}`，数据错误 400、其他 500、未知 404） |
 | `POST /api/v1/sync`、`POST /api/v1/trading-sessions/sync` | Rust；OpenCTP 抓取、解析、增量版本合并，返回 201（有新版本）或 200 |
-| 其余所有方法与路径（网页 `/`、公告、报单费规则、`/api/v1/fees/*`、`/import`、`/overrides/import` 等） | 原样转发给 `[reference].fallback`（`cn-reference-ui`，Python，127.0.0.1:8766）：方法、查询串、请求体、状态码、`Content-Type`、`Content-Disposition` 等头都保持；不可达时返回 502 |
+| 其余所有方法与路径（网页 `/`、公告、报单费规则、`/api/v1/fees/*`、`/import`、`/overrides/import` 等） | 原样转发给 `[reference].fallback`（`cn-reference-ui`，Python，127.0.0.1:18766）：方法、查询串、请求体、状态码、`Content-Type`、`Content-Disposition` 等头都保持；不可达时返回 502 |
 
 有意的差异：抓取失败的错误信息文字不同（Rust 用 reqwest，Python 用 urllib，其余字段相同，状态码都是 400）；连续时段在源里消失时，Rust 会写入 `is_active=false` 的墓碑版本（Python 的这条路径要把 dict 写进 JSONB 列，实际会报错，生产里还从没触发过：没有停用的时段）；`Decimal` 运算超过 28 位有效数字时 Python 会舍入，Rust 精确计算（OpenCTP 数据到不了这个长度）。
 

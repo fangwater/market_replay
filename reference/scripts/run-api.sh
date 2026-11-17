@@ -5,7 +5,7 @@ PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$PROJECT_ROOT"
 
 # A host/port set by the supervisor (market-replay-server runs this as the
-# 127.0.0.1:8766 fallback behind the Rust API) wins over the .env values.
+# 127.0.0.1:18766 fallback behind the Rust API) wins over the .env values.
 preset_host="${CN_FUTURES_REF_HOST-}"
 preset_port="${CN_FUTURES_REF_PORT-}"
 if [ -f .env ]; then

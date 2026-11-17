@@ -21,20 +21,20 @@ config = "/home/fanghaizhou/market_replay/config/cn_kline_server.toml"
 [reference]
 # 国内期货参考数据 /api/v1 由本进程（Rust，cn_reference 库）直接服务：查询、
 # 导出、两个同步接口。没有迁移的路径（网页 /、公告、报单费、费用估算、导入）
-# 原样转发给下面的 Python 服务 cn-reference-ui（127.0.0.1:8766）。
+# 原样转发给下面的 Python 服务 cn-reference-ui（127.0.0.1:18766）。
 listen = "0.0.0.0:8765"
-fallback = "http://127.0.0.1:8766"
+fallback = "http://127.0.0.1:18766"
 # Only CN_FUTURES_REF_DATABASE_URL is read from it; it is never logged.
 env_file = "/home/fanghaizhou/market_replay/reference/.env"
 
 # ---- supervised services ----
 [[service]]
 name = "cn-reference-ui"
-description = "国内期货参考数据：网页、公告、报单费、费用估算（Python，仅本机 :8766，由 :8765 转发）"
+description = "国内期货参考数据：网页、公告、报单费、费用估算（Python，仅本机 :18766，由 :8765 转发）"
 cwd = "/home/fanghaizhou/market_replay/reference"
 command = "/home/fanghaizhou/market_replay/reference/scripts/run-api.sh"
 stop_timeout_s = 10
-env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai", CN_FUTURES_REF_HOST = "127.0.0.1", CN_FUTURES_REF_PORT = "8766" }
+env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai", CN_FUTURES_REF_HOST = "127.0.0.1", CN_FUTURES_REF_PORT = "18766" }
 
 [[service]]
 name = "cme-reference"
