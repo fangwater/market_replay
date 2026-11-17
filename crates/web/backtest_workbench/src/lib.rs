@@ -132,7 +132,7 @@ fn read_table(path: &std::path::Path, p: Page) -> anyhow::Result<Value> {
         for i in 0..batch.num_rows() {
             let index = at;
             at += 1;
-            if index < p.offset || (index - p.offset) % stride != 0 {
+            if index < p.offset || !(index - p.offset).is_multiple_of(stride) {
                 continue;
             }
             let mut row = serde_json::Map::new();

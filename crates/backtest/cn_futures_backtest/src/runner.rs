@@ -100,7 +100,7 @@ pub fn run(cfg: &Config, dir: &Path, cancel: impl Fn() -> bool) -> Result<Summar
                 engine.input(r)?;
                 next_input = input.as_mut().unwrap().read()?;
             }
-            if seen % 4096 == 0 {
+            if seen.is_multiple_of(4096) {
                 ensure!(!cancel(), "cancelled");
             }
             engine.quote(q)?;
