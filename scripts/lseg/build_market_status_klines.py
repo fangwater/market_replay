@@ -34,7 +34,7 @@ from parquet_delivery_checks import check_footer
 from kline_lifetimes import prepare_lifetimes,window as lifetime_window
 
 from lseg_paths import DATA as ROOT, SCRIPTS, CONFIG, IB_ENV, REPO
-REF = Path('/home/fanghaizhou/cn_futures_db/reference_cme')
+REF = Path('/home/fanghaizhou/market_replay/reference_cme')
 DATA = Path('/mnt/hdd-raid5-72t/liang_torch/lseg_data')
 DEST = Path('/mnt/nfs/30.100_cta_data/lseg')
 RUN = ROOT/'artifacts/market_status_kline_20261110'

@@ -11,7 +11,7 @@
 同机默认工作目录：
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db/reference_cme
+cd /home/fanghaizhou/market_replay/reference_cme
 ```
 
 其他机器可创建任意工作目录。以下命令只在尚未配置 Python 环境时执行；要求 Python 3.11 或更新版本：

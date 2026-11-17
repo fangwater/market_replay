@@ -59,9 +59,9 @@ OHLC为可空Float64，价量及时间单位不变；schema版本5，`kline_stat
 目标仅记录实际问题于 `meta/problems/lseg_only_klines/`，不创建成功audit或完成回执。
 
 ```bash
-/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python \
+/home/fanghaizhou/market_replay/reference_cme/.venv/bin/python \
   scripts/lseg/rebuild_lseg_only_klines.py --workers 4
-/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python \
+/home/fanghaizhou/market_replay/reference_cme/.venv/bin/python \
   scripts/lseg/finalize_lseg_only_klines.py
 ```
 

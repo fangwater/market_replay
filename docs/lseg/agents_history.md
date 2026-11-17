@@ -2,7 +2,7 @@
 
 ## 代码目录与参考项目
 
-- 本项目代码目录：`/home/fanghaizhou/cn_futures_db/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg`。
+- 本项目代码目录：`/home/fanghaizhou/market_replay/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg`。
 - 实现参考 `/home/fanghaizhou/mkt_signal` 的 Rust/Cargo 项目组织方式和相关代码。
 - 本项目的代码在当前目录编写和维护；参考项目用于查阅和复用设计。
 
@@ -71,7 +71,7 @@
 - 2026-11-09 用户要求先查 preprocess 对应远端并补处理 TAS。已检查当前 LSEG HTTP 源，发现此前未纳入的 `future_daily/normalised`：120个品种、18,987个正式日包名、约822.3GB，2026-06-01起至各品种11-01/05/06/07，接续既有1–5月；104个.part排除，NQ 11-04缺包，CIPM等零字节占位列源缺口。当前下载与处理进行中，不能据原年度done水位或下载文件存在宣称增量完成。新日包293列且每包独立表头，使用本项目专用字段规则及`tas_daily_stage`适配后复用原replay，按品种写独立NVMe库、全量审计及Parquet读回后按交易所发布CTA_Data；旧生产库和旧Parquet不改写。进度、已通过的60万行单文件样本及20万行多文件适配验证、路径和复现入口见 [TAS日包增量](docs/tas_daily_increment_20261109.md)，整批完成必须有项目及目标盘的`tas_daily_20261109/completion.json`回执。早期下载曾继承HTTP代理；本轮已改盘点和下载器全部请求为`ProxyHandler({})`，强制直连`10.61.20.12`，不依赖代理环境变量。
 - 2026-11-09 已将1–5月补充库中新增13个列族单独导出并按交易所交付CTA_Data，排除5个重复列族；128个RIC、232个文件、2,733,379,422字节，Trade 30,061,381行／103 RIC、Quote 127,098,723行／120 RIC。全值哈希、footer及目标文件SHA256核对通过。窗口为`[2026-01-01,2026-05-30)`，不覆盖5月30–31日；旧Parquet快照不改写。项目回执为`artifacts/tas_supplement_parquet_20261109/completion.json`，最终盘回执为`LSEG/_audit/tas_supplement_2026_parquet_20261109/completion.json`。
 - 开发前先参看 `/home/fanghaizhou/preprocess` 的海外期货口径、验证记录，以及 `mkt_signal/crates/cme_tas_replay` 的实际实现。
-- CME参考信息还须查 `/home/fanghaizhou/cn_futures_db/reference_cme` 的实际下载批次。Databento `GLBX.MDP3/status` 仅下载10个品种根：ES/NQ/RTY/YM为2024年初至2026-09-03，GC/CL/SR3/KRW/6E/SR1为2020年初至2026-09-03；不能说已覆盖全部CME Group或全部LSEG已购品种。已解析的 `parsed/core_six_status_2020_present/status_outrights.parquet` 仅ES/NQ/RTY/YM/GC/CL六根。官方计划日历、Databento交易所状态流、LSEG TAS市场状态和baseline的145条核定事件是不同输入；官方计划日历按CME资料整理，Databento曾用于修正部分收盘边界，TAS／公告处理已核定盘中事件，不相互冒充完整覆盖。
+- CME参考信息还须查 `/home/fanghaizhou/market_replay/reference_cme` 的实际下载批次。Databento `GLBX.MDP3/status` 仅下载10个品种根：ES/NQ/RTY/YM为2024年初至2026-09-03，GC/CL/SR3/KRW/6E/SR1为2020年初至2026-09-03；不能说已覆盖全部CME Group或全部LSEG已购品种。已解析的 `parsed/core_six_status_2020_present/status_outrights.parquet` 仅ES/NQ/RTY/YM/GC/CL六根。官方计划日历、Databento交易所状态流、LSEG TAS市场状态和baseline的145条核定事件是不同输入；官方计划日历按CME资料整理，Databento曾用于修正部分收盘边界，TAS／公告处理已核定盘中事件，不相互冒充完整覆盖。
 - 本次梳理见 [海外期货清洗与 RocksDB](docs/overseas_futures_pipeline.md)，包含源数据、清洗规则、库路径、列族和二进制结构。
 - 区分 TAS（`normalised`）、Normalized LL2（`normalisedLL2`）、Raw LL2（`rawLL2`）；采购目录中的 `raw` 是另一种全字段消息源，不能混称。
 - Raw LL2 必须完整重放字段补丁，再提取稀疏 15s 状态；未知字段、显式空值和真实零值不能混淆。
@@ -106,7 +106,7 @@
 - 可通过 `CARGO_TARGET_DIR` 指定目录：
 
   ```bash
-  cd /home/fanghaizhou/cn_futures_db/scripts/lseg
+  cd /home/fanghaizhou/market_replay/scripts/lseg
   export CARGO_TARGET_DIR=/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay
   ```
 

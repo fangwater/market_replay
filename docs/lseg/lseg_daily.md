@@ -43,7 +43,7 @@
 ## 命令
 
 ```bash
-R=/home/fanghaizhou/cn_futures_db/target/release
+R=/home/fanghaizhou/market_replay/target/release
 $R/lseg-daily run --config config/lseg_daily.toml --dry-run   # 只盘点和列计划
 $R/lseg-daily run --config config/lseg_daily.toml
 $R/lseg-daily status --config config/lseg_daily.toml

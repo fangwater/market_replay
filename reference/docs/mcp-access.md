@@ -153,10 +153,10 @@ CN 交易所代码：`CFFEX / SHFE / INE / DCE / CZCE / GFEX`。CME 定义、状
 
 ## 维护者运行说明
 
-代码位于 `/home/fanghaizhou/cn_futures_db/reference/exchange_mcp/`，CME 上游为 `/home/fanghaizhou/cn_futures_db/reference_cme` 的现有 Web 服务。
+代码位于 `/home/fanghaizhou/market_replay/reference/exchange_mcp/`，CME 上游为 `/home/fanghaizhou/market_replay/reference_cme` 的现有 Web 服务。
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db/reference
+cd /home/fanghaizhou/market_replay/reference
 python3 -m venv .venv-mcp  # Python >= 3.10
 .venv-mcp/bin/python -m pip install -r requirements-mcp.txt
 sh scripts/run-mcp.sh

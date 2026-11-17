@@ -10,7 +10,7 @@ delivery_root = "/mnt/nfs/30.100_cta_data/lseg"
 production = true
 state_file = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/lseg_daily/state.json"
 project = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data"
-column_rules = "/home/fanghaizhou/cn_futures_db/config/lseg/tas_daily_column_rules.json"
+column_rules = "/home/fanghaizhou/market_replay/config/lseg/tas_daily_column_rules.json"
 # First run only: dates and RIC owners already delivered by the Python batch.
 bootstrap_runs = ["/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_daily_ingest_20261109"]
 approved_exchanges = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_status_20261109/plan.json"

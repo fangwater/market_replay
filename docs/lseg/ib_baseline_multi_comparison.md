@@ -51,7 +51,7 @@ NQ 的最大量差不符合上述迟报情形，需另查 IB 分钟采集或更�
 - [五品种入口](../scripts/compare_ib_baseline_products.py) 复用 [单 RIC 入口](../scripts/compare_ib_baseline_one.py)；单 RIC 新增 `--skip-source-check`，使发布时间底表不误用 ES 交易所时间源抽查逻辑。既有 ES 事项和数据保持原样。
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db/scripts/lseg
+cd /home/fanghaizhou/market_replay/scripts/lseg
 python scripts/lseg/compare_ib_baseline_products.py --refresh
 ```
 

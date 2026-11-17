@@ -4,7 +4,7 @@
 
 已增加供同机其他用户使用的只读共享入口：中文查询页 `http://127.0.0.1:8780/`，
 Streamable HTTP MCP `http://127.0.0.1:8780/mcp`，普通查询接口 `GET /api/{工具名}`。
-同时覆盖本项目与 `/home/fanghaizhou/cn_futures_db/reference_cme` 的数据，
+同时覆盖本项目与 `/home/fanghaizhou/market_replay/reference_cme` 的数据，
 包含 CME 官方历史交易时段和海外佣金参考。使用者无需访问项目目录或数据库。
 给其他用户或 AI 的独立文件是 [同机数据使用说明](docs/cn-cme-data-guide.md)，包含全部接口、参数、返回字段及示例。
 使用者在自己的目录执行下列命令即可下载，不必配置 MCP：
@@ -86,7 +86,7 @@ cp .env.example .env
 `.env.example` 已配置 `u171` 的 Unix socket DSN。将 `PYTHON_BIN` 改为本项目虚拟环境路径：
 
 ```bash
-PYTHON_BIN=/home/fanghaizhou/cn_futures_db/reference/.venv/bin/python
+PYTHON_BIN=/home/fanghaizhou/market_replay/reference/.venv/bin/python
 ```
 
 迁移旧 SQLite 数据（只执行一次；目标 schema 已有数据时会停止）：

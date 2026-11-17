@@ -5,10 +5,10 @@
 module.exports = {
   apps: [{
     name: "market-replay-server",
-    namespace: "cn_futures_db",
-    cwd: "/home/fanghaizhou/cn_futures_db",
+    namespace: "market_replay",
+    cwd: "/home/fanghaizhou/market_replay",
     script: "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/market-replay-server",
-    args: "--config /home/fanghaizhou/cn_futures_db/config/market_replay_server.toml",
+    args: "--config /home/fanghaizhou/market_replay/config/market_replay_server.toml",
     interpreter: "none",
     autorestart: true,
     restart_delay: 5000,

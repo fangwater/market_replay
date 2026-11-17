@@ -9,7 +9,7 @@
     "source_type": "OPENCTP_BROKER_REFERENCE",
     "source_updated_at": null,
     "content_sha256": "7c5d6b93f68889ae194812b2701d04541594ba0d23140f5e6b86944a644844f6",
-    "raw_path": "/home/fanghaizhou/cn_futures_db/reference/raw_snapshots/openctp_fees_20260902_7c5d6b93f688.html",
+    "raw_path": "/home/fanghaizhou/market_replay/reference/raw_snapshots/openctp_fees_20260902_7c5d6b93f688.html",
     "row_count": 866
   },
   "feeScope": "BROKER_REFERENCE",

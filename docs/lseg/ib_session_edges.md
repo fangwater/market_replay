@@ -61,7 +61,7 @@ INSTRUMENT_EXPIRATION是合约到期，不等于暂时停牌。
 `kline_ib.parquet`、`kline.parquet`、`intervals.parquet`，以及同工作根目录的 `status.parquet`。
 
 ```bash
-/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python scripts/lseg/inspect_ib_session_edges.py
+/home/fanghaizhou/market_replay/reference_cme/.venv/bin/python scripts/lseg/inspect_ib_session_edges.py
 ```
 
 本地逐边界结果：`artifacts/ib_session_edges_20261110/reopen_boundaries.csv`；

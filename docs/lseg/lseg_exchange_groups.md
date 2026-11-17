@@ -99,7 +99,7 @@ exchanges/
 ## 复现和验证
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db/scripts/lseg
+cd /home/fanghaizhou/market_replay/scripts/lseg
 python scripts/lseg/group_lseg_by_exchange.py
 ```
 

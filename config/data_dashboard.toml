@@ -12,7 +12,7 @@ workers = 2
 io_permits = 4
 
 [cn]
-cn_daily_config = "/home/fanghaizhou/cn_futures_db/config/cn_daily.toml"
+cn_daily_config = "/home/fanghaizhou/market_replay/config/cn_daily.toml"
 dominant_api = "http://127.0.0.1:18313"
 psql = "/mnt/nvme-raid0-28t/apps/pgsql16/bin/psql"
 pg_host = "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run"
@@ -33,7 +33,7 @@ log_dir = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/logs/ib_kline_daily"
 problems_csv = "/mnt/nfs/30.100_cta_data/lseg/meta/problems/ib_kline/problems.csv"
 
 [services]
-mdl_replay_config = "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"
+mdl_replay_config = "/home/fanghaizhou/market_replay/config/mdl_replay.toml"
 reference_api = "http://127.0.0.1:8765"
 
 # Name sources. Chinese names: config/product_names.toml (maintained table,
@@ -41,7 +41,7 @@ reference_api = "http://127.0.0.1:8765"
 # scripts/lseg/make_futures_checklist_excel.py compiled into the binary
 # (overseas, via IB symbol). Read once at startup.
 [names]
-product_names_toml = "/home/fanghaizhou/cn_futures_db/config/product_names.toml"
+product_names_toml = "/home/fanghaizhou/market_replay/config/product_names.toml"
 exchange_summary_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/exchange_summary.csv"
 ric_catalog_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/ric_catalog.csv"
 ib_matches_csv = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/ib_tas_all_futures_20261103/all_ib_futures_tas_matches.csv"

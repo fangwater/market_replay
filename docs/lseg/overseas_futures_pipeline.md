@@ -6,7 +6,7 @@
 
 - 数据口径、验证与交付记录：`/home/fanghaizhou/preprocess`。
 - 既有 Rust 生产实现：`/home/fanghaizhou/mkt_signal/crates/cme_tas_replay`。
-- 本项目新增代码：`/home/fanghaizhou/cn_futures_db/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg`，包含验证任务和每日任务。
+- 本项目新增代码：`/home/fanghaizhou/market_replay/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg`，包含验证任务和每日任务。
 - Python 用作正确性基线，Rust 优化须对齐字段语义、时间、缺失值、排序和精度。
 
 ## 数据源与三条入库链路

@@ -4,7 +4,7 @@ CN / CME 已提供统一只读 HTTP MCP 与中文查询页，包含本项目的�
 官方历史交易时段和海外佣金参考。同机其他用户可直接访问：
 网页 `http://127.0.0.1:8780/`，MCP `http://127.0.0.1:8780/mcp`，
 完整说明 `http://127.0.0.1:8780/usage.md`。服务代码及运维配置位于
-`/home/fanghaizhou/cn_futures_db/reference/exchange_mcp/` 和 `ecosystem.mcp.config.cjs`。
+`/home/fanghaizhou/market_replay/reference/exchange_mcp/` 和 `ecosystem.mcp.config.cjs`。
 
 给同机其他用户或 AI 使用时，在对方自己的工作目录下载独立 Markdown 说明即可：
 
@@ -128,7 +128,7 @@ CC=/usr/bin/gcc CXX=/usr/bin/g++ \
   BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/gcc/x86_64-linux-gnu/13/include \
   cargo build --release -p cme_tas_replay --bin cme_tas_export_status
 
-cd /home/fanghaizhou/cn_futures_db/reference_cme
+cd /home/fanghaizhou/market_replay/reference_cme
 .venv/bin/python compare_tas_status.py
 ```
 

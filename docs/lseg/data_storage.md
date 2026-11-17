@@ -16,7 +16,7 @@
 | LSEG统一说明 | `/mnt/nfs/30.100_cta_data/lseg/README.md` |
 | LSEG排错补充说明 | `/mnt/nfs/30.100_cta_data/lseg/meta/supply.md` |
 | LSEG配套清单 | `/mnt/nfs/30.100_cta_data/lseg/meta/catalog/` |
-| 项目代码目录 | `/home/fanghaizhou/cn_futures_db/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg` |
+| 项目代码目录 | `/home/fanghaizhou/market_replay/crates/cme/lseg_delivery`（代码），`scripts/lseg`、`config/lseg`、`docs/lseg` |
 | Cargo 构建产物 | `/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/market_replay` |
 
 后续正式数据交付以该远端目录为最终落盘目标。既有 TAS、IB Parquet 和 RocksDB 文档中的本机路径继续记录当前数据或历史输出的位置；迁移完成情况以实际交付回执为准。

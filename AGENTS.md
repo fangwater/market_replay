@@ -1,4 +1,6 @@
-# cn_futures_db
+# market_replay（原目录名 cn_futures_db）
+
+2026-11-17 起本地目录从 `/home/fanghaizhou/cn_futures_db` 改名为 `/home/fanghaizhou/market_replay`，和 GitHub 仓库 `fangwater/market_replay` 同名。本仓库、mkt_signal、preprocess、cta-cn_futures-01 里对旧路径的引用都已改成新路径，PM2 命名空间也从 `cn_futures_db` 改成了 `market_replay`。旧路径暂时保留为指向新目录的软链接，作为过渡；确认没有任何东西再用旧路径后删除。
 
 ## 国内期货本地 NFS 源数据
 

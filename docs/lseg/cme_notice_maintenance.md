@@ -13,7 +13,7 @@
 维护入口：
 
 ```bash
-/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python scripts/lseg/maintain_cme_notices.py
+/home/fanghaizhou/market_replay/reference_cme/.venv/bin/python scripts/lseg/maintain_cme_notices.py
 ```
 
 配置为 `config/lseg/cme_notices.json`。本轮官网发现入口停用，不反复请求被封页面；

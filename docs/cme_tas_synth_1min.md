@@ -34,7 +34,7 @@ Replay 仍只写 RocksDB。本工具用 secondary 打开，不抢写锁。
 默认窗口是 `ADF26` 五个芝加哥 17:00 交易日：`20260102`–`20260108`。
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db  # market_replay (migrated from mkt_signal 2026-11-15)
+cd /home/fanghaizhou/market_replay  # market_replay (migrated from mkt_signal 2026-11-15)
 cargo run --release -p cme_tas_replay --bin cme_tas_synth_1min -- \
   --config config/cme_tas_synth_1min.toml
 ```

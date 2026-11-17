@@ -20,7 +20,7 @@ RocksDB 用 secondary 打开，不抢 replay 的锁。
 等 replay 日志里 `written_trades` 开始涨、目标 RIC 已经出现后再跑：
 
 ```bash
-cd /home/fanghaizhou/cn_futures_db  # market_replay (migrated from mkt_signal 2026-11-15)
+cd /home/fanghaizhou/market_replay  # market_replay (migrated from mkt_signal 2026-11-15)
 cargo run --release -p cme_tas_replay --bin cme_tas_vs_summary -- \
   --config config/cme_tas_vs_summary.toml
 ```

@@ -102,4 +102,4 @@ CTA_Data/
 - [2026 TAS 逐文件落盘计划](_catalog/lseg_exchange_groups_20261109/tas_2026_file_plan.csv)：包含原机器源路径与本盘目标路径；源路径属于原机器，不表示本服务器已经存在。
 - [源清单生成回执](_catalog/lseg_exchange_groups_20261109/source_catalog_completion.json)及[分组验证回执](_catalog/lseg_exchange_groups_20261109/source_catalog_verification.json)。两者记录分组阶段的验证，非行情迁移完成回执。
 
-分组实现维护于 `/home/fanghaizhou/cn_futures_db/scripts/lseg/group_lseg_by_exchange.py`，项目详细口径见该项目 `docs/lseg_exchange_groups.md`。后续增量数据沿用交易所分组并更新源日期、分组依据和验收记录。
+分组实现维护于 `/home/fanghaizhou/market_replay/scripts/lseg/group_lseg_by_exchange.py`，项目详细口径见该项目 `docs/lseg_exchange_groups.md`。后续增量数据沿用交易所分组并更新源日期、分组依据和验收记录。

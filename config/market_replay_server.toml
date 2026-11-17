@@ -12,34 +12,34 @@ listen = "0.0.0.0:18313"
 [dashboard]
 # 数据处理进度与品种查询 (read-only): UI at /, JSON at /api/dashboard/*;
 # /admin redirects to its 服务与任务 tab.
-config = "/home/fanghaizhou/cn_futures_db/config/data_dashboard.toml"
+config = "/home/fanghaizhou/market_replay/config/data_dashboard.toml"
 
 [cn_market]
 # gRPC cn_market.v1 listens on this config's `listen` (0.0.0.0:18312).
-config = "/home/fanghaizhou/cn_futures_db/config/cn_kline_server.toml"
+config = "/home/fanghaizhou/market_replay/config/cn_kline_server.toml"
 
 # ---- supervised services ----
 [[service]]
 name = "cn-reference-api"
 description = "国内期货参考数据 HTTP（:8765，Python）"
-cwd = "/home/fanghaizhou/cn_futures_db/reference"
-command = "/home/fanghaizhou/cn_futures_db/reference/scripts/run-api.sh"
+cwd = "/home/fanghaizhou/market_replay/reference"
+command = "/home/fanghaizhou/market_replay/reference/scripts/run-api.sh"
 stop_timeout_s = 10
 env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
 
 [[service]]
 name = "cn-reference-daily-sync"
 description = "国内期货参考数据每日同步（自带调度，上海 18:15）"
-cwd = "/home/fanghaizhou/cn_futures_db/reference"
-command = "/home/fanghaizhou/cn_futures_db/reference/scripts/run-daily-sync.sh"
+cwd = "/home/fanghaizhou/market_replay/reference"
+command = "/home/fanghaizhou/market_replay/reference/scripts/run-daily-sync.sh"
 stop_timeout_s = 30
 env = { NODE_ENV = "production", PYTHONUNBUFFERED = "1", TZ = "Asia/Shanghai" }
 
 [[service]]
 name = "cme-reference"
 description = "CME 参考数据服务（:8770，Python）"
-cwd = "/home/fanghaizhou/cn_futures_db/reference_cme"
-command = "/home/fanghaizhou/cn_futures_db/reference_cme/.venv/bin/python"
+cwd = "/home/fanghaizhou/market_replay/reference_cme"
+command = "/home/fanghaizhou/market_replay/reference_cme/.venv/bin/python"
 args = ["-m", "cme_reference.server"]
 stop_timeout_s = 10
 env = { CME_REFERENCE_HOST = "0.0.0.0", CME_REFERENCE_PORT = "8770", PYTHONUNBUFFERED = "1", TZ = "UTC" }
@@ -47,7 +47,7 @@ env = { CME_REFERENCE_HOST = "0.0.0.0", CME_REFERENCE_PORT = "8770", PYTHONUNBUF
 [[service]]
 name = "exchange-mcp"
 description = "交易所 MCP（:8780，同机其他用户在用）"
-cwd = "/home/fanghaizhou/cn_futures_db/reference"
+cwd = "/home/fanghaizhou/market_replay/reference"
 command = "/bin/sh"
 args = ["scripts/run-mcp.sh"]
 stop_timeout_s = 10
@@ -57,44 +57,44 @@ env = { EXCHANGE_MCP_HOST = "0.0.0.0", EXCHANGE_MCP_PORT = "8780", EXCHANGE_MCP_
 name = "mdl-replay"
 description = "MDL 单日回放（ZMQ :13100，按需启用）"
 enabled = false
-cwd = "/home/fanghaizhou/cn_futures_db"
+cwd = "/home/fanghaizhou/market_replay"
 # Pinned to cores 0-31 as before (taskset); enable here and restart the server.
 command = "/usr/bin/taskset"
-args = ["-c", "0-31", "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/mdl-replay", "serve", "--config", "/home/fanghaizhou/cn_futures_db/config/mdl_replay.toml"]
+args = ["-c", "0-31", "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/mdl-replay", "serve", "--config", "/home/fanghaizhou/market_replay/config/mdl_replay.toml"]
 stop_timeout_s = 10
 
 # ---- scheduled jobs (serial) ----
 [[job]]
 name = "cn-daily"
 description = "国内期货：RocksDB 回放、1 分钟导出、裁剪、分桶、主力（钉钉）"
-cwd = "/home/fanghaizhou/cn_futures_db"
+cwd = "/home/fanghaizhou/market_replay"
 command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-daily"
-args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/cn_daily.toml"]
+args = ["run", "--config", "/home/fanghaizhou/market_replay/config/cn_daily.toml"]
 schedule = { tz = "Asia/Shanghai", at = ["16:30"] }
 timeout_minutes = 600
 
 [[job]]
 name = "ib-kline-daily"
 description = "IB 分钟线：MySQL 增量 -> kline_ib.parquet + catalog（钉钉）"
-cwd = "/home/fanghaizhou/cn_futures_db"
-command = "/home/fanghaizhou/cn_futures_db/scripts/run_ib_kline_daily.sh"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/home/fanghaizhou/market_replay/scripts/run_ib_kline_daily.sh"
 schedule = { tz = "Asia/Shanghai", at = ["09:30"] }
 timeout_minutes = 120
 
 [[job]]
 name = "lseg-daily"
 description = "LSEG TAS 日包：下载 -> 回放/审计 -> trade/quote/status -> K线（晚到可补正替换）-> catalog（钉钉）"
-cwd = "/home/fanghaizhou/cn_futures_db"
+cwd = "/home/fanghaizhou/market_replay"
 command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg-daily"
-args = ["run", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml"]
+args = ["run", "--config", "/home/fanghaizhou/market_replay/config/lseg_daily.toml"]
 schedule = { tz = "Asia/Shanghai", at = ["11:00"] }
 timeout_minutes = 480
 
 [[job]]
 name = "lseg-monthly-merge"
 description = "LSEG 日包库月度合并（上月）：合并 -> 记录数/K线校验 -> 切换计划 -> 删除旧小库（钉钉）"
-cwd = "/home/fanghaizhou/cn_futures_db"
+cwd = "/home/fanghaizhou/market_replay"
 command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/lseg-daily"
-args = ["merge", "--config", "/home/fanghaizhou/cn_futures_db/config/lseg_daily.toml", "--month", "previous", "--delete-sources"]
+args = ["merge", "--config", "/home/fanghaizhou/market_replay/config/lseg_daily.toml", "--month", "previous", "--delete-sources"]
 schedule = { tz = "Asia/Shanghai", at = ["14:00"], month_days = [2] }
 timeout_minutes = 600
