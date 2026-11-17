@@ -8,3 +8,6 @@ reference_cme/.venv/
 reference_cme/.env
 target.old_home/
 target
+
+# Runtime log archives written by scripts/market_replay_server.sh (not source)
+data/service_stops/
