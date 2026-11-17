@@ -35,6 +35,10 @@ pub struct CnConfig {
     pub pg_port: u16,
     pub pg_db: String,
     pub pg_user: String,
+    /// `size_thresholds/dominant_by_day` (one `<YYYYMM>/` directory per month);
+    /// only its directory listing is read, for the 任务进度 table.
+    #[serde(default)]
+    pub size_thresholds_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

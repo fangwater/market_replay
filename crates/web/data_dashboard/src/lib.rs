@@ -19,6 +19,7 @@ pub mod config;
 mod drill;
 pub mod names;
 pub mod progress;
+pub mod rolls;
 pub mod search;
 mod sources;
 pub mod util;
@@ -141,7 +142,7 @@ impl AppState {
 }
 
 /// Background refresh schedule (seconds).
-const SCHEDULE: [(&str, u64); 8] = [
+const SCHEDULE: [(&str, u64); 10] = [
     ("dominant", 60),
     ("baseline", 600),
     ("catalog", 60),
@@ -150,6 +151,8 @@ const SCHEDULE: [(&str, u64); 8] = [
     ("ib", 120),
     ("mdl_cache", 300),
     ("reference", 300),
+    ("rolls", 60),
+    ("size_thresholds", 600),
 ];
 
 /// Starts the single refresher task. Must be called inside a tokio runtime.

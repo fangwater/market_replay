@@ -206,6 +206,21 @@ pub async fn refresh(st: &Arc<AppState>, name: &'static str) -> bool {
             st.set(name, t, r).await;
             false
         }
+        "rolls" => {
+            crate::rolls::refresh(st).await;
+            false
+        }
+        "size_thresholds" => {
+            let r = match st.cfg.cn.size_thresholds_dir.clone() {
+                Some(dir) => {
+                    st.blocking(move || progress::size_threshold_months(&dir))
+                        .await
+                }
+                None => Err("未配置 size_thresholds_dir".to_string()),
+            };
+            st.set(name, t, r).await;
+            false
+        }
         _ => false,
     }
 }
