@@ -24,6 +24,10 @@ RDB="${ROCKSDB_DIR:-/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_l2_rocksd
 DOM="${DOMINANT_DIR:-/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/result}"
 JOBS="${JOBS:-4}"
 (( JOBS >= 1 && JOBS <= 4 )) || JOBS=4
+# Push only problems (a normal month is silent): any script error, or products
+# that end up without thresholds.
+notify() { printf '%s\n' "$1" | "$DEPLOY/dingtalk-send" >/dev/null 2>&1 || true; }
+trap 'notify "【大小单阈值】${ym:-?} 生成失败（脚本异常退出）"' ERR
 
 ym="${1:-$(date -d "$(date +%Y-%m-01) -1 day" +%Y%m)}"
 [[ "$ym" =~ ^20[0-9]{2}(0[1-9]|1[0-2])$ ]] || { echo "bad month: $ym" >&2; exit 2; }
@@ -61,5 +65,9 @@ grep '^FAIL' "$log" | sed 's/^FAIL //' | sort > "$dir/_failed.txt" || true
 good=$(( total - failed ))
 rm -f "$log"
 echo "size thresholds $ym: $good/$total products ok, $failed without thresholds (see $dir/_failed.txt)"
+if (( failed > 0 )); then
+  list=$(cut -d: -f1 "$dir/_failed.txt" | awk '{print $1}' | head -8 | paste -sd' ')
+  notify "【大小单阈值】$ym 有 $failed 个品种没有阈值（当月分桶不设）：$list"
+fi
 # Some products legitimately have no trades in a month; only a total failure is an error.
 (( good > 0 ))

@@ -584,8 +584,44 @@ fn remove_staging_day(root: &Path, day: NaiveDate) -> Result<usize> {
     Ok(files.len())
 }
 
+/// What the push is for: a problem of the day's data, not statistics. Missing
+/// products, products without a verified multiplier and newly listed products
+/// (which need setup) are problems; VWAP shares, row counts and timings stay in
+/// the log and the state file.
+fn problems_of(a: &DayAudit) -> Option<String> {
+    let mut parts = Vec::new();
+    if !a.missing_vs_prev.is_empty() {
+        parts.push(format!("缺少品种 {}", a.missing_vs_prev.join(" ")));
+    }
+    if !a.no_multiplier.is_empty() {
+        parts.push(format!(
+            "无已验证乘数 {}",
+            a.no_multiplier
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    if !a.new_vs_prev.is_empty() {
+        parts.push(format!("新增品种（需配置）{}", a.new_vs_prev.join(" ")));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{}：{}", a.day, parts.join("；")))
+    }
+}
+
+/// One short line for a failed step: first line of the error plus the log path.
+fn failure_text(day: NaiveDate, step: &str, err: &anyhow::Error, log: &Path) -> String {
+    let first = format!("{err:#}");
+    let first = first.lines().next().unwrap_or("").to_string();
+    format!("{day} {step} 失败：{first}\n日志 {}", log.display())
+}
+
 fn notify(cfg: &Config, enabled: bool, title: &str, body: &str) {
-    let text = format!("[{}] 国内期货 1min 日处理 {title}\n{body}", cfg.host_tag);
+    let text = format!("[{}] 国内期货日处理 {title}\n{body}", cfg.host_tag);
     eprintln!("{text}");
     if !enabled {
         return;
@@ -658,8 +694,7 @@ fn run(
                 day: NaiveDate,
                 step: &Step,
                 err: anyhow::Error,
-                log: &Path,
-                done: &[Done]|
+                log: &Path|
      -> Result<()> {
         let detail = format!(
             "{day} {} 失败：{err:#}\n日志 {}\n{}",
@@ -674,11 +709,7 @@ fn run(
             detail: detail.clone(),
         });
         save_state(&cfg.state_file, state)?;
-        let mut body = summary_of(done);
-        if !body.is_empty() {
-            body = format!("已完成但未标记（分桶前中断，重跑会自动跳过已完成部分）：\n{body}\n\n");
-        }
-        body.push_str(&detail);
+        let mut body = failure_text(day, step.name, &err, log);
         if step.bin == "cn_futures_l2" && detail.contains("marked writing") {
             body.push_str(
                 "\n需要人工处理：上次回放中断，按 cn_futures_l2 文档 reset 该交易日后重跑。",
@@ -699,7 +730,7 @@ fn run(
         for step in steps(cfg, day, overwrite) {
             match run_step(&bins, &step, &log) {
                 Ok(secs) => timings.push((step.name, secs)),
-                Err(e) => return fail(&mut state, day, &step, e, &log, &done),
+                Err(e) => return fail(&mut state, day, &step, e, &log),
             }
         }
         let prev = all_days.iter().rev().copied().find(|d| *d < day);
@@ -725,7 +756,7 @@ fn run(
                     t.push((step.name, secs));
                 }
             }
-            Err(e) => return fail(&mut state, end, &step, e, &log, &done),
+            Err(e) => return fail(&mut state, end, &step, e, &log),
         }
     }
     let mut roll_text = String::new();
@@ -744,7 +775,7 @@ fn run(
         }
         for step in roll_replay_steps(cfg, root, last) {
             if let Err(e) = run_step(&bins, &step, &log) {
-                return fail(&mut state, last, &step, e, &log, &done);
+                return fail(&mut state, last, &step, e, &log);
             }
         }
         let check = roll::check_history(&root.join("result"), &new_dir)
@@ -752,22 +783,25 @@ fn run(
             .and_then(|r| roll::publish(root, &new_dir).map(|()| r));
         match check {
             Ok(r) => {
-                roll_text = format!(
-                    "\n\n主力（{}，{} 个品种，{:.0}s）：今日换月 {}；明日换月 {}",
+                eprintln!(
+                    "cn-daily: roll through {} products {} ({:.0}s)",
                     r.through,
                     r.products,
-                    t.elapsed().as_secs_f64(),
-                    if r.rolled_today.is_empty() {
-                        "无".to_string()
-                    } else {
-                        r.rolled_today.join("，")
-                    },
-                    if r.rolling_next.is_empty() {
-                        "无".to_string()
-                    } else {
-                        r.rolling_next.join("，")
-                    },
+                    t.elapsed().as_secs_f64()
                 );
+                if !r.rolled_today.is_empty() || !r.rolling_next.is_empty() {
+                    let part = |label: &str, v: &[String]| {
+                        (!v.is_empty()).then(|| format!("{label} {}", v.join("，")))
+                    };
+                    roll_text = [
+                        part("今日换月", &r.rolled_today),
+                        part("明日换月", &r.rolling_next),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("；");
+                }
                 fs::write(
                     cfg.log_dir
                         .join(format!("cn_daily_roll_{}.json", last.format("%Y%m%d"))),
@@ -780,7 +814,7 @@ fn run(
                     bin: "cn_roll_replay",
                     args: Vec::new(),
                 };
-                return fail(&mut state, last, &step, e, &log, &done);
+                return fail(&mut state, last, &step, e, &log);
             }
         }
     }
@@ -798,18 +832,16 @@ fn run(
     let keep = state.history.len().saturating_sub(200);
     state.history.drain(..keep);
     save_state(&cfg.state_file, &state)?;
-    // Keep DingTalk messages short: one message per run, newest days last.
-    let n = done.len();
-    let body = if n > 6 {
-        format!(
-            "共处理 {n} 个交易日，最近 3 天：\n\n{}",
-            summary_of(&done[n - 3..])
-        )
-    } else {
-        summary_of(&done)
-    };
-    let body = body + &roll_text;
-    notify(cfg, notify_on, "成功", &body);
+    // Push only what needs attention: problems with the data. A normal run is
+    // logged (full summary) but not pushed; roll changes are one short separate line.
+    eprintln!("{}", summary_of(&done));
+    let problems: Vec<String> = done.iter().filter_map(|(_, a, _)| problems_of(a)).collect();
+    if !problems.is_empty() {
+        notify(cfg, notify_on, "有问题", &problems.join("\n"));
+    }
+    if !roll_text.is_empty() {
+        notify(cfg, notify_on, "换月", &roll_text);
+    }
     Ok(())
 }
 
@@ -881,6 +913,37 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_text_is_only_about_problems() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+        let mut a = DayAudit {
+            day,
+            files: 80,
+            rows: 270_000,
+            vwap_checked: 100,
+            vwap_outside: 7, // statistics never make a push
+            ..Default::default()
+        };
+        assert_eq!(problems_of(&a), None);
+        a.missing_vs_prev = vec!["SN".into()];
+        a.no_multiplier.insert("XX".into());
+        a.new_vs_prev = vec!["SO".into()];
+        let text = problems_of(&a).unwrap();
+        assert!(text.contains("缺少品种 SN") && text.contains("无已验证乘数 XX"));
+        assert!(text.contains("新增品种（需配置）SO") && !text.contains("VWAP"));
+    }
+
+    #[test]
+    fn failure_push_is_one_line_plus_the_log_path() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+        let err = anyhow::anyhow!("exit status 1\nlong\nstderr tail");
+        let text = failure_text(day, "回放", &err, Path::new("/x/cn_daily.log"));
+        assert_eq!(
+            text,
+            "2026-11-17 回放 失败：exit status 1\n日志 /x/cn_daily.log"
+        );
+    }
 
     #[test]
     fn trading_days_require_cffex_marker() {

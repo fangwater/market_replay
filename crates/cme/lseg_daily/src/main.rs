@@ -1634,32 +1634,24 @@ fn run(cfg: &Config, opts: &Opts, notify_on: bool) -> Result<()> {
     let keep = st.history.len().saturating_sub(200);
     st.history.drain(..keep);
     st.save(&cfg.state_file)?;
-    let nothing = sum.new_files == 0
-        && sum.products_done.is_empty()
-        && sum.products_failed.is_empty()
-        && sum.kline.groups_ok.is_empty()
-        && sum.kline.groups_failed.is_empty()
-        && sum.catalog.is_none();
-    let title = if ok {
-        if nothing {
-            "无新数据"
-        } else {
-            "成功"
-        }
-    } else if result.is_ok() {
-        "部分失败"
-    } else {
-        "失败"
-    };
     eprintln!("{body}");
-    let text = brief(
+    // Push only problems; a normal run (also "no new data") stays in the log.
+    let text = problems_brief(
         &sum,
         &st,
-        started.elapsed().as_secs_f64(),
         result.as_ref().err(),
         cfg.dashboard_url.as_deref(),
     );
-    notify(cfg, notify_on, title, &text);
+    if !text.is_empty() {
+        let title = if result.is_err() {
+            "失败"
+        } else if ok {
+            "有问题"
+        } else {
+            "部分失败"
+        };
+        notify(cfg, notify_on, title, &text);
+    }
     result?;
     ensure!(
         ok,
@@ -1873,10 +1865,11 @@ fn summarize(
 
 /// Short DingTalk text: what arrived, what is done, what needs attention.
 /// Paths, counters and full errors stay in the run history / log / dashboard.
-fn brief(
+/// The push text: only what went wrong (nothing for a normal run, whose full
+/// summary stays in the log and the state file).
+fn problems_brief(
     sum: &Summary,
     st: &State,
-    secs: f64,
     err: Option<&anyhow::Error>,
     url: Option<&str>,
 ) -> String {
@@ -1884,71 +1877,32 @@ fn brief(
     if let Some(e) = err {
         s.push(format!("运行中断：{}", short(&format!("{e:#}"))));
     }
-    if sum.new_files == 0 && sum.products_done.is_empty() {
-        s.push("没有新的日包".to_string());
-    } else {
-        let span = match (sum.dates.first(), sum.dates.last()) {
-            (Some(a), Some(b)) if a == b => a.clone(),
-            (Some(a), Some(b)) => format!("{a} ~ {b}"),
-            _ => "-".into(),
-        };
-        s.push(format!(
-            "新数据 {span}：{} 个品种、{} 个日包；成交 {}行，盘口 {}行",
-            sum.products_done.len(),
-            sum.new_files,
-            wan(sum.trade_rows),
-            wan(sum.quote_rows)
-        ));
-    }
     if !sum.products_failed.is_empty() {
         s.push(format!(
-            "⚠ {} 个品种处理失败：{}",
+            "{} 个品种处理失败：{}",
             sum.products_failed.len(),
             names(sum.products_failed.iter().map(|(p, _)| p.as_str()))
         ));
     }
-    let (ok, bad) = (sum.kline.groups_ok.len(), sum.kline.groups_failed.len());
-    if ok + bad > 0 {
-        if bad == 0 {
-            s.push(format!("K 线：{ok} 个品种全部完成"));
-        } else {
-            s.push(format!(
-                "⚠ K 线：{ok}/{} 个品种完成，失败 {}（{}）",
-                ok + bad,
-                names(sum.kline.groups_failed.iter().map(|(g, _)| g.as_str())),
-                short(&sum.kline.groups_failed[0].1)
-            ));
-        }
-    }
-    let replaced: usize = sum.kline.replaced.values().sum();
-    if replaced > 0 {
+    if !sum.kline.groups_failed.is_empty() {
         s.push(format!(
-            "补正已发布的 K 线/状态文件 {replaced} 个（旧文件已备份）"
+            "K 线失败 {} 个：{}（{}）",
+            sum.kline.groups_failed.len(),
+            names(sum.kline.groups_failed.iter().map(|(g, _)| g.as_str())),
+            short(&sum.kline.groups_failed[0].1)
         ));
     }
     match &sum.catalog {
-        Some(Err(e)) => s.push(format!("⚠ 目录重建失败：{}", short(e))),
+        Some(Err(e)) => s.push(format!("目录重建失败：{}", short(e))),
         None if st.catalog_dirty => s.push("目录待下次成功运行时重建".into()),
         _ => {}
     }
-    let mins = (secs / 60.0).round() as u64;
-    s.push(if mins >= 60 {
-        format!("耗时 {} 小时 {} 分", mins / 60, mins % 60)
-    } else {
-        format!("耗时 {mins} 分钟")
-    });
-    if let Some(u) = url {
-        s.push(format!("详情：{u}"));
+    if !s.is_empty() {
+        if let Some(u) = url {
+            s.push(format!("详情：{u}"));
+        }
     }
     s.join("\n")
-}
-
-fn wan(n: u64) -> String {
-    if n >= 10_000 {
-        format!("{:.0} 万", n as f64 / 10_000.0)
-    } else {
-        format!("{n} ")
-    }
 }
 
 fn names<'a>(it: impl Iterator<Item = &'a str>) -> String {
@@ -2088,17 +2042,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brief_message_is_short_and_readable() {
+    fn push_text_is_only_problems() {
         let mut sum = Summary {
             new_files: 524,
             products_done: (0..117).map(|i| format!("P{i}")).collect(),
             trade_rows: 18_694_686,
-            quote_rows: 95_420_833,
             ..Summary::default()
         };
-        sum.dates.insert("2026-11-02".into());
-        sum.dates.insert("2026-11-10".into());
+        let st = State::default();
+        // A normal run (stats, replaced files, long run) has nothing to push.
         sum.kline.groups_ok = (0..115).map(|i| format!("2026/G{i}")).collect();
+        sum.kline.replaced.insert("correction".into(), 1);
+        assert_eq!(problems_brief(&sum, &st, None, Some("http://h:18313/")), "");
         sum.kline.groups_failed = (0..9)
             .map(|i| {
                 (
@@ -2107,19 +2062,11 @@ mod tests {
                 )
             })
             .collect();
-        sum.kline.replaced.insert("tail_completion".into(), 121);
-        sum.kline.replaced.insert("correction".into(), 1);
-        let st = State::default();
-        let text = brief(&sum, &st, 6942.0, None, Some("http://h:18313/"));
-        assert!(text.contains("2026-11-02 ~ 2026-11-10"));
-        assert!(text.contains("117 个品种、524 个日包"));
-        assert!(text.contains("成交 1869 万行"));
-        assert!(text.contains("115/124"));
-        assert!(text.contains("等 9 个"));
-        assert!(text.contains("补正已发布的 K 线/状态文件 122 个"));
-        assert!(text.contains("耗时 1 小时 56 分"));
-        assert!(!text.contains("/mnt/"));
-        assert!(text.lines().count() <= 7, "{text}");
+        let text = problems_brief(&sum, &st, None, Some("http://h:18313/"));
+        assert!(text.contains("K 线失败 9 个") && text.contains("等 9 个"));
+        assert!(text.contains("详情：http://h:18313/"));
+        assert!(!text.contains("万行") && !text.contains("耗时") && !text.contains("/mnt/"));
+        assert!(text.lines().count() <= 3, "{text}");
     }
 
     pub(crate) fn cfg(root: &Path) -> Config {

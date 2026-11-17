@@ -13,24 +13,24 @@ notify() { printf '%s\n' "$1" | "$BIN/dingtalk-send" || true; }
 
 if ! nice -n 10 "$BIN/ib_kline_export" mysql --delivery-root "$ROOT" >"$RUN" 2>&1; then
   notify "【IB 分钟导出】失败
-$(tail -c 1500 "$RUN")
+$(tail -n 3 "$RUN" | cut -c1-200)
 日志：$RUN"
   exit 1
 fi
-SUMMARY=$(python3 - "$RUN" <<'PY'
+# A normal run is silent; only failures are pushed (the log keeps the details).
+FAILED=$(python3 - "$RUN" <<'PY'
 import json, sys
 t = open(sys.argv[1]).read()
 d = json.loads(t[t.index('\n{') + 1:t.rindex('}') + 1])
-tl = d.get('tally', {})
-print(f"新 cutoff {d.get('new_cutoff_id')}；合约 {d.get('mapped_rics')}；日文件 新建 {tl.get('created',0)} / 替换 {tl.get('replaced',0)} / 相同 {tl.get('identical',0)}；"
-      f"行 {tl.get('rows',0)}；未映射合约 {d.get('unmapped_contracts')}；失败 {len(d.get('failures', []))}")
+print(len(d.get('failures', [])))
 PY
 )
+if [ "${FAILED:-0}" != "0" ]; then
+  notify "【IB 分钟导出】有 $FAILED 个失败
+日志：$RUN"
+fi
 if ! "$BIN/lseg_catalog" ib-sync >>"$RUN" 2>&1; then
   notify "【IB 分钟导出】数据已导出，但 catalog 同步失败
-$SUMMARY
 日志：$RUN"
   exit 1
 fi
-notify "【IB 分钟导出】完成
-$SUMMARY"

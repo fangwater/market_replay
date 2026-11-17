@@ -145,31 +145,31 @@ async fn run_sync(cli: &Cli, webhook_env: &str, secret_env: &str) -> Result<()> 
                 _ => 0,
             };
             let sess = body.get("tradingSessions").cloned().unwrap_or(J::Null);
-            notify(
-                webhook_env,
-                secret_env,
-                &truncate(
-                    &format!(
-                        "国内期货参考数据同步完成\n手续费与保证金：新增 {} 确认 {} 共 {}，来源日期 {}\n连续交易时段：新增 {} 确认 {} 停用 {} 共 {}",
-                        n(&body, "inserted"),
-                        n(&body, "confirmed"),
-                        n(&body, "total"),
-                        body.str_of("sourceDate").unwrap_or("?"),
-                        n(&sess, "inserted"),
-                        n(&sess, "confirmed"),
-                        n(&sess, "deactivated"),
-                        n(&sess, "total"),
-                    ),
-                    3000,
-                ),
-            );
+            // A normal sync is silent. Only a change of the continuous-session
+            // snapshot matters: the baseline trim must be re-checked before the
+            // snapshot is upgraded (a changed session of an existing product
+            // must not be adopted blindly).
+            let (new_rows, off) = (n(&sess, "inserted"), n(&sess, "deactivated"));
+            if new_rows > 0 || off > 0 {
+                notify(
+                    webhook_env,
+                    secret_env,
+                    &format!("国内期货连续交易时段有变化：新增 {new_rows} 停用 {off}，升级时段快照前先核对"),
+                );
+            }
             Ok(())
         }
         Err(e) => {
             notify(
                 webhook_env,
                 secret_env,
-                &truncate(&format!("国内期货参考数据同步失败\n{e:#}"), 3000),
+                &truncate(
+                    &format!(
+                        "国内期货参考数据同步失败：{}",
+                        format!("{e:#}").lines().next().unwrap_or("")
+                    ),
+                    300,
+                ),
             );
             Err(e)
         }
