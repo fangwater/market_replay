@@ -70,3 +70,14 @@ field semantics, and output paths. Code changes must preserve those contracts.
 - 单日导出由约 18 分钟降到约 20 秒。
 
 `export_backtest_1s`（`scan_kind`）仍是全量扫描，每日任务不用它。
+
+## 改核心后的 RocksDB 逐条比对（2026-11-17）
+
+改动 `cn_futures_core` 的事件状态机后，除了比对 parquet，还要直接比对 RocksDB 里的成交、盘口、持仓记录：把新二进制的重放写到临时库，再用 `examples/compare_l2_db` 与生产库（只读）逐条比较。临时库只放要验证的那一天；生产库是参照物，不得写入。
+
+```bash
+cn_futures_l2 --msg-root /mnt/nfs/30.3_tonglian_msg --exchange xsge --start D --end D --rocksdb-dir <临时目录>/db --workers 8
+cargo run --release -p cn_futures_l2 --example compare_l2_db -- <临时目录>/db /mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_l2_rocksdb
+```
+
+2026-11-17 对 20261116 的上期所、郑商所、大商所、中金所重放（可续算状态机上线后），共 15,042,235 条记录与生产库逐字节相同，缺失和多余都是 0。因为大小单分桶的输入就是这些成交记录，分桶结果也不会变。
