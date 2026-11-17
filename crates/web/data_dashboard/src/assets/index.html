@@ -52,6 +52,10 @@ main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
 .b-lag { color: var(--warn-ink); --dot: var(--warning); }
 .b-fail { color: var(--crit-ink); --dot: var(--critical); }
 .b-unknown, .b-absent { color: var(--text-muted); --dot: var(--neutral); }
+tr.bad td { background: rgba(208, 59, 59, .08); }
+tr.bad td.nm { color: var(--crit-ink); font-weight: 600; }
+tr.r-today td { background: var(--series-1-soft); }
+tr.r-next td { background: rgba(250, 178, 25, .14); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 th { color: var(--text-muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
@@ -104,11 +108,12 @@ a:hover, .link:hover { text-decoration: underline; }
 <body>
 <header>
   <h1>数据处理进度与品种查询</h1>
-  <nav><button id="tab-progress" class="on">处理进度</button> <button id="tab-search">品种查询</button> <button id="tab-admin">服务与任务</button></nav>
+  <nav><button id="tab-progress" class="on">处理进度</button> <button id="tab-search">品种查询</button> <button id="tab-rolls">换月</button> <button id="tab-admin">服务与任务</button></nav>
   <span class="meta" id="meta">载入中…</span>
 </header>
 <main>
   <section id="view-progress">
+    <div id="tasks"></div>
     <div class="tiles" id="tiles"></div>
     <div id="panels"></div>
   </section>
@@ -119,6 +124,9 @@ a:hover, .link:hover { text-decoration: underline; }
     <div id="results"></div>
     <div id="detail"></div>
     <div id="contract"></div>
+  </section>
+  <section id="view-rolls" class="hidden">
+    <div class="panel" id="rolls-main"></div>
   </section>
   <section id="view-admin" class="hidden">
     <div id="admin"></div>
@@ -247,7 +255,72 @@ function renderProgress() {
   $("tiles").innerHTML = tiles.map(([id, t, s, v, sub]) =>
     `<div class="tile" data-go="${id}"><div class="t">${esc(t)} ${badge(s)}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
   document.querySelectorAll(".tile").forEach((el) => el.onclick = () => el.dataset.go === "admin" ? show("admin") : $(el.dataset.go)?.scrollIntoView({ behavior: "smooth" }));
+  $("tasks").innerHTML = panelTasks();
+  if (currentTab === "rolls") renderRolls();
   $("panels").innerHTML = panelCn(cn) + panelLseg(ls) + panelIb(ib) + panelServices(rf, mc) + panelNames(sec("names"));
+}
+
+// ---------------------------------------------------------------- 任务进度
+// Only "has it finished": one row per scheduled job. State, last finish and
+// next run come from /api/admin/status (same data as the 服务与任务 tab);
+// "数据到" is one value per data job from sections this page already loads.
+function jobDataUpTo(name) {
+  const d = (s) => (s && s.data) || {};
+  switch (name) {
+    case "cn-daily": return esc(d(sec("cn")).last_done || "–");
+    case "lseg-daily": return esc((d(sec("lseg")).lseg_daily || {}).latest_day || "–");
+    case "ib-kline-daily": { const i = d(sec("ib")).state; return i && i.updated_at_utc ? localTime(i.updated_at_utc) : "–"; }
+    case "cn-reference-daily": return esc(d(sec("reference")).as_of || "–");
+    case "size-thresholds-monthly": return esc(d(sec("size_thresholds")).latest_month || "–");
+    default: return "–";
+  }
+}
+function panelTasks() {
+  let h = `<div class="panel" id="p-tasks"><h2>任务进度</h2>`;
+  if (!adminStatus) return h + `<div class="muted">${esc(adminError || "载入中…")}</div></div>`;
+  h += `<table><tr><th>任务</th><th>状态</th><th>数据到</th><th>最近一次结束</th><th>下次运行</th></tr>`;
+  for (const j of adminStatus.jobs) {
+    const l = j.last;
+    // A finished job is plain text; only failed (red) and not-finished (amber) states are marked.
+    const st = !j.enabled ? `<span class="muted">已停用</span>` : j.running ? badge("lag", "运行中") : j.queued ? badge("lag", "排队") :
+      !l ? badge("lag", "未跑") : l.ok ? "已跑完" : badge("fail", "失败");
+    const bad = j.enabled && !j.running && l && l.ok === false;
+    h += `<tr class="${bad ? "bad" : ""}"><td class="nm" title="${esc(j.description)}">${esc(j.name)}</td><td>${st}</td><td>${jobDataUpTo(j.name)}</td>` +
+      `<td>${l ? localTime(l.finished_at) : "–"}</td><td>${j.enabled ? localTime(j.next_run) : "–"}</td></tr>`;
+  }
+  h += `</table>`;
+  const badSvc = adminStatus.services.filter((v) => v.enabled && v.status !== "running").map((v) => v.name);
+  if (badSvc.length) h += `<div style="margin-top:6px;color:var(--crit-ink)">服务异常：${esc(badSvc.join("、"))}（见“服务与任务”）</div>`;
+  return h + `</div>`;
+}
+
+// ---------------------------------------------------------------- 换月
+let rollFilter = { ex: "", q: "" };
+function renderRolls() {
+  const s = sec("rolls"), d = (s && s.data) || {};
+  const rows = d.rows || [];
+  let h = `<h2>国内商品主力合约换月</h2>`;
+  if (!rows.length) { $("rolls-main").innerHTML = h + `<div class="muted">${s ? esc(s.error || "暂无数据") : "尚未载入"}</div>`; return; }
+  const exs = [...new Map(rows.map((r) => [r.exchange, r.exchange_cn])).entries()].sort();
+  const q = rollFilter.q.trim().toLowerCase();
+  const hit = (r) => (!rollFilter.ex || r.exchange === rollFilter.ex) && (!q ||
+    [r.product, r.name_cn, r.dominant, r.rolled_today && r.rolled_today.from, r.rolled_today && r.rolled_today.to,
+      r.rolling_next && r.rolling_next.to].some((x) => x && String(x).toLowerCase().includes(q)));
+  const pair = (x) => x ? `<span class="chip">${esc(x.from || "？")} → ${esc(x.to || "？")}</span>` : `<span class="muted">否</span>`;
+  h += `<div class="muted" style="font-size:12px;margin-bottom:6px">截至交易日 ${esc(d.trading_day)}：今日换月＝该日生效；明日预排＝该日收盘排定、下一交易日生效。</div>`;
+  h += `<div class="toolbar"><select id="roll-ex"><option value="">全部交易所</option>${exs.map(([k, v]) => `<option value="${esc(k)}" ${rollFilter.ex === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>` +
+    `<input id="roll-q" class="token" style="width:260px" placeholder="品种、中文名或合约，如 PG、螺纹、au2612" value="${esc(rollFilter.q)}"></div>`;
+  h += `<div class="scroll" style="max-height:680px"><table><tr><th>品种</th><th>当前主力</th><th>今日是否换月（旧→新）</th><th>明日预排换月（旧→新）</th><th>上次换月日</th><th class="n">距今天数</th></tr>`;
+  for (const r of rows.filter(hit)) {
+    h += `<tr class="${r.rolled_today ? "r-today" : r.rolling_next ? "r-next" : ""}"><td><b>${esc(r.product)}</b> ${esc(r.name_cn || "")} <span class="muted">${esc(r.exchange_cn)}</span></td><td>${esc(r.dominant)}</td>` +
+      `<td>${pair(r.rolled_today)}</td><td>${pair(r.rolling_next)}</td><td>${esc(r.last_roll_day || "–")}</td><td class="n">${r.days_since == null ? "–" : r.days_since}</td></tr>`;
+  }
+  $("rolls-main").innerHTML = h + `</table></div>`;
+  $("roll-ex").onchange = (e) => { rollFilter.ex = e.target.value; renderRolls(); };
+  $("roll-q").oninput = (e) => {
+    rollFilter.q = e.target.value; const pos = e.target.selectionStart;
+    renderRolls(); const n = $("roll-q"); n.focus(); n.setSelectionRange(pos, pos);
+  };
 }
 
 function panelCn(s) {
@@ -671,21 +744,24 @@ function setHash(h) { history.replaceState(null, "", h ? "#" + h : location.path
 let currentTab = "progress";
 function show(tab) {
   currentTab = tab;
-  for (const t of ["progress", "search", "admin"]) {
+  for (const t of ["progress", "search", "rolls", "admin"]) {
     $("tab-" + t).classList.toggle("on", tab === t);
     $("view-" + t).classList.toggle("hidden", tab !== t);
   }
   if (tab === "search") { $("q").focus(); if (!$("q").value) setHash("search"); }
+  else if (tab === "rolls") { setHash("rolls"); renderRolls(); }
   else if (tab === "admin") { setHash("admin"); loadAdmin(true).then(renderAdmin); }
   else setHash("");
 }
 $("tab-progress").onclick = () => show("progress");
 $("tab-search").onclick = () => show("search");
+$("tab-rolls").onclick = () => show("rolls");
 $("tab-admin").onclick = () => show("admin");
 (function init() {
   const h = decodeURIComponent(location.hash.slice(1));
   if (h.startsWith("q=")) { show("search"); $("q").value = h.slice(2); doSearch(h.slice(2)); }
   else if (h === "search") show("search");
+  else if (h === "rolls") show("rolls");
   else if (h === "admin") show("admin");
   loadAdmin(false).then(loadProgress);
   setInterval(() => { if (!document.hidden) loadAdmin(false).then(loadProgress); }, 30000);

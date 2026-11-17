@@ -694,6 +694,19 @@ pub fn lseg_catalog_summary(c: &crate::catalog::Catalog) -> Value {
     })
 }
 
+/// Newest month directory (`YYYYMM`) of the size-threshold store (listing only).
+pub fn size_threshold_months(dir: &Path) -> Value {
+    let latest = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.len() == 6 && n.bytes().all(|b| b.is_ascii_digit()))
+        .max();
+    json!({"latest_month": latest})
+}
+
 // ---------------------------------------------------------------- services
 
 pub fn mdl_cache(cfg: &MdlReplay) -> Value {
@@ -875,5 +888,18 @@ mod tests {
         // empty / default state is tolerated
         let v = summarize_lseg_daily(&json!({}));
         assert_eq!(v["products"], 0);
+    }
+    #[test]
+    fn size_threshold_months_picks_the_newest_month_dir() {
+        let t = tempfile::tempdir().unwrap();
+        for m in ["202609", "202610", "notes"] {
+            std::fs::create_dir_all(t.path().join(m)).unwrap();
+        }
+        std::fs::write(t.path().join("202611"), "a file, not a month dir").unwrap();
+        assert_eq!(size_threshold_months(t.path())["latest_month"], "202610");
+        assert_eq!(
+            size_threshold_months(&t.path().join("nope"))["latest_month"],
+            Value::Null
+        );
     }
 }

@@ -19,6 +19,8 @@ pg_host = "/mnt/nvme-raid0-28t/fanghaizhou/postgresql/domestic_futures/16/run"
 pg_port = 5433
 pg_db = "market_metadata"
 pg_user = "u171"
+# Month directories written by the size-thresholds-monthly job (listing only).
+size_thresholds_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/size_thresholds/dominant_by_day"
 
 [lseg]
 catalog = "/mnt/nfs/30.100_cta_data/lseg/meta/catalog.sqlite"
