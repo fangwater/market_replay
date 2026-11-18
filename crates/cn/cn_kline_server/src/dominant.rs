@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+/// Largest look-ahead (calendar days) accepted by `for_trading_day`: long holidays.
+const MAX_AHEAD_DAYS: i64 = 14;
+
 pub const EXCHANGES: [&str; 6] = ["ccfx", "xdce", "xgfe", "xsge", "xsie", "xzce"];
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -165,6 +168,67 @@ impl DominantStore {
             .collect()
     }
 
+    /// The list that is in effect on `day` (YYYY-MM-DD), e.g. the CTP trading
+    /// day. `day == latest_trading_day` -> the `dominant` contracts;
+    /// earlier -> that day's history row; later -> `scheduled_next` of the
+    /// latest row, valid for the FIRST trading day after the latest one. There
+    /// is no exchange calendar here (no holidays), so the look-ahead is only
+    /// bounded by `MAX_AHEAD_DAYS`; the caller's trading day is authoritative.
+    pub fn for_trading_day(&self, day: &str) -> Result<serde_json::Value, String> {
+        let inner = self.inner.read().unwrap();
+        let latest = inner
+            .by_product
+            .values()
+            .filter_map(|r| r.last())
+            .map(|r| r.trad_day.as_str())
+            .max()
+            .ok_or("no dominant data loaded")?
+            .to_string();
+        let parse = |s: &str| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| format!("{s}: {e}"))
+        };
+        let ahead = (parse(day)? - parse(&latest)?).num_days();
+        if ahead > MAX_AHEAD_DAYS {
+            return Err(format!(
+                "trading_day {day} is {ahead} days after latest_trading_day {latest}; only the next trading day is scheduled"
+            ));
+        }
+        let (source, verified) = match ahead {
+            1.. => ("scheduled_next", false),
+            0 => ("dominant", true),
+            _ => ("history", true),
+        };
+        let mut products = Vec::new();
+        for rows in inner.by_product.values() {
+            let Some(last) = rows.last() else { continue };
+            if ahead > 0 {
+                products.push(json!({
+                    "exchange": last.exchange,
+                    "product": last.product,
+                    "dominant": last.scheduled_next,
+                    "previous": last.instrument_id,
+                    "rolls": !last.scheduled_next.is_empty() && last.scheduled_next != last.instrument_id,
+                }));
+            } else if let Some(r) = rows.iter().find(|r| r.trad_day == day) {
+                products.push(json!({
+                    "exchange": r.exchange,
+                    "product": r.product,
+                    "dominant": r.instrument_id,
+                    "rolls": r.roll_flag,
+                }));
+            }
+        }
+        Ok(json!({
+            "trading_day": day,
+            "latest_trading_day": latest,
+            "source": source,
+            "calendar_verified": verified,
+            "count": products.len(),
+            "note": "list in effect on trading_day; for a day after latest_trading_day it is scheduled_next, valid only if that day is the first trading day after latest_trading_day (no exchange calendar here: take trading_day from the exchange, e.g. the CTP login)",
+            "products": products,
+        }))
+    }
+
     pub fn history(
         &self,
         product: &str,
@@ -201,9 +265,26 @@ fn error(code: StatusCode, message: String) -> Response {
     (code, Json(json!({"error": message}))).into_response()
 }
 
-async fn latest(State(store): State<Arc<DominantStore>>) -> Response {
+#[derive(Deserialize)]
+struct DayQuery {
+    trading_day: Option<String>,
+}
+
+async fn latest(State(store): State<Arc<DominantStore>>, Query(q): Query<DayQuery>) -> Response {
     if let Err(e) = store.refresh() {
         return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+    }
+    if let Some(day) = q.trading_day {
+        let Some(day) = normalize_day(&day) else {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "trading_day must be YYYYMMDD or YYYY-MM-DD".into(),
+            );
+        };
+        return match store.for_trading_day(&day) {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => error(StatusCode::BAD_REQUEST, e),
+        };
     }
     let products = store.latest();
     let latest_day = products
@@ -213,9 +294,10 @@ async fn latest(State(store): State<Arc<DominantStore>>) -> Response {
         .map(str::to_string);
     Json(json!({
         "latest_trading_day": latest_day,
+        "dominant_trading_day": latest_day,
         "count": products.len(),
         "products": products,
-        "note": "dominant = contract in effect on trading_day; scheduled_next = contract for the next trading day (decided at trading_day close)",
+        "note": "dominant = contract in effect on trading_day (= dominant_trading_day); scheduled_next = contract for the FIRST trading day after it, decided at its close (its date is not stated here: ask GET /api/v1/dominant?trading_day=YYYYMMDD with the exchange's trading day, e.g. the CTP login, to get a list tagged with its effective day)",
     }))
     .into_response()
 }
@@ -292,5 +374,55 @@ mod tests {
         let h = store.history("rb", Some("2026-08-25"), None).unwrap();
         assert_eq!(h.len(), 2);
         assert_eq!(normalize_day("20260825").as_deref(), Some("2026-08-25"));
+    }
+    #[test]
+    fn list_for_a_trading_day_picks_dominant_history_or_scheduled_next() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(
+            t.path().join("xsge_dominant.csv"),
+            "trad_day,product_id,instrument_id,roll_flag,decision_open_int,scheduled_next,rule\n\
+             2026-11-16,AU,au2612,0,100.0,au2612,local_rqdata_rule0\n\
+             2026-11-17,AU,au2612,0,90.0,au2702,local_rqdata_rule0\n\
+             2026-11-17,RB,rb2701,0,90.0,rb2701,local_rqdata_rule0\n",
+        )
+        .unwrap();
+        let store = DominantStore::new(t.path().to_path_buf());
+        store.refresh().unwrap();
+        let find = |v: &serde_json::Value, p: &str| {
+            v["products"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["product"] == p)
+                .cloned()
+        };
+        // The night session of 2026-11-18: scheduled_next of the latest row.
+        let next = store.for_trading_day("2026-11-18").unwrap();
+        assert_eq!(next["source"], "scheduled_next");
+        assert_eq!(next["calendar_verified"], false);
+        let au = find(&next, "AU").unwrap();
+        assert_eq!(
+            (
+                au["dominant"].as_str(),
+                au["previous"].as_str(),
+                au["rolls"].as_bool()
+            ),
+            (Some("au2702"), Some("au2612"), Some(true))
+        );
+        assert_eq!(find(&next, "RB").unwrap()["rolls"], false);
+        // The latest day itself and an earlier one.
+        let today = store.for_trading_day("2026-11-17").unwrap();
+        assert_eq!(today["source"], "dominant");
+        assert_eq!(find(&today, "AU").unwrap()["dominant"], "au2612");
+        let past = store.for_trading_day("2026-11-16").unwrap();
+        assert_eq!(past["source"], "history");
+        assert_eq!(past["count"], 1, "RB has no row on 2026-11-16");
+        // Over a long holiday still allowed, but not weeks ahead.
+        assert!(store.for_trading_day("2026-11-30").is_ok());
+        assert!(store
+            .for_trading_day("2026-12-25")
+            .unwrap_err()
+            .contains("only the next trading day"));
+        assert!(store.for_trading_day("garbage").is_err());
     }
 }

@@ -123,6 +123,12 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 - **查询（HTTP JSON，不用 gRPC，内网可访问）：** 由 `cn-kline-server` 提供，监听 `0.0.0.0:18313`。
   - `GET http://172.16.30.38:18313/api/v1/dominant`：每个品种在最新交易日的 `dominant`（当天生效）、`scheduled_next`（收盘后排给下一交易日）、`rolls_next_day`、`last_roll_day`。
   - `GET http://172.16.30.38:18313/api/v1/dominant/{品种}?start=YYYY-MM-DD&end=YYYY-MM-DD`：逐日历史。
+  - **按交易日取名单（2026-11-18）：** `GET /api/v1/dominant?trading_day=YYYYMMDD`，把柜台返回的交易日（比如 CTP 登录返回的 `20261118`）传进来，返回的名单带明确的生效日：
+    - 等于 `latest_trading_day`：`source=dominant`，该日生效的主力；
+    - 早于它：`source=history`，那天的历史行；
+    - 晚于它（夜盘属于下一个交易日）：`source=scheduled_next`，即最近一个交易日收盘后排给下一交易日的名单，每个品种带 `previous` 和 `rolls`，并且 `calendar_verified=false`。**这里没有交易所日历（节假日），所以只检查 `trading_day` 不超过最新交易日之后 14 个自然日；它是不是“下一个交易日”以柜台为准。**超过 14 天返回 400。
+    - 不带参数时，返回里新增 `dominant_trading_day`（= `latest_trading_day`），并在 `note` 里说明 `scheduled_next` 是“之后第一个交易日”的名单。已有字段不变。
+    - 名单更新时间：`cn-daily` 每个交易日收盘后（上海 16:30 起，约 16:33 发布），所以下午盘后就已经有了排给下一交易日的名单。
   - MCP（8780）工具 `cn_dominant_contracts`，HTTP 调用形式是 `/api/cn_dominant_contracts?product=RB`。
 - **初始化（2026-11-16）：** 以 `cn_roll_replay/2019_20260826` 的原始截面加上 08-27 到 11-13 的缺口截面为输入，重算到 2026-11-13，08-26 及以前已发布的主力行逐行未变。
 
