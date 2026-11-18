@@ -9,6 +9,8 @@ fee_policy = "reference_snapshot"
 max_child_lots = 1
 
 [roll]
+algorithm = "maker_taker"
+maker_leg = "old"
 # Example contracts/window; this is an experiment, not a historical roll claim.
 old_contract = "rb2701"
 new_contract = "rb2705"

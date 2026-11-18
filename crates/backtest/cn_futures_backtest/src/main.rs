@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "cn-backtest",
-    about = "CN futures target-lot conversion, execution and maker-maker roll research"
+    about = "CN futures target-lot conversion, execution and calendar spread roll research"
 )]
 struct Cli {
     #[command(subcommand)]

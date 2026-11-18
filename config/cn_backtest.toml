@@ -22,6 +22,8 @@ fee_policy = "reference_snapshot"
 output_root = "/mnt/nvme-raid0-28t/fanghaizhou/backtest"
 
 [roll]
+algorithm = "maker_taker"
+maker_leg = "old"
 batch_lots = 1
 spread_improvement_ticks = 0.0
 max_exposure_deviation_cny = 100000.0

@@ -17,6 +17,7 @@ pub const TABLES: &[&str] = &[
     "roll_events",
     "roll_exposure",
     "roll_batches",
+    "roll_spread",
 ];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub struct Row {
     pub product: String,
     pub contract: String,
     pub order_id: Option<u64>,
+    pub maker_order_id: Option<u64>,
     pub side: Option<i64>,
     pub lots: Option<i64>,
     pub target_lots: Option<i64>,
@@ -54,6 +56,7 @@ fn schema() -> Arc<Schema> {
         fields.push(Field::new(n, DataType::Utf8, false));
     }
     fields.push(Field::new("order_id", DataType::UInt64, true));
+    fields.push(Field::new("maker_order_id", DataType::UInt64, true));
     for n in ["side", "lots", "target_lots", "actual_lots"] {
         fields.push(Field::new(n, DataType::Int64, true));
     }
@@ -144,6 +147,9 @@ impl Outputs {
             string!(contract),
             Arc::new(UInt64Array::from(
                 r.iter().map(|x| x.order_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                r.iter().map(|x| x.maker_order_id).collect::<Vec<_>>(),
             )),
             int!(side),
             int!(lots),

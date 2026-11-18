@@ -1,6 +1,8 @@
 //! Virtual-time matching, delayed private reports, and bounded calendar-roll execution.
+mod maker_taker;
+
 use crate::{
-    config::{Config, Execution, Task},
+    config::{Config, Execution, RollAlgorithm, Task},
     input::InputRow,
     metadata::{cny, money, Metadata, Spec},
     output::{Row, Sink},
@@ -28,6 +30,16 @@ pub struct Quote {
     pub end: Option<i64>,
 }
 impl Quote {
+    fn limit(&self, side: i64, mode: Execution, cfg: &Config) -> Option<i64> {
+        let (base, offset) = match (mode, side > 0) {
+            (Execution::Maker, true) => (self.bid[0]?, -cfg.maker_offset_ticks),
+            (Execution::Maker, false) => (self.ask[0]?, cfg.maker_offset_ticks),
+            (Execution::Taker, true) => (self.ask[0]?, cfg.protection_ticks),
+            (Execution::Taker, false) => (self.bid[0]?, -cfg.protection_ticks),
+        };
+        base.checked_add(offset)
+    }
+
     pub fn mid(&self, s: &Spec) -> Option<f64> {
         let (b, a) = (self.bid[0]?, self.ask[0]?);
         (b <= a).then(|| s.price(b + a) / 2.0)
@@ -110,6 +122,7 @@ struct Order {
     cancel_sent: bool,
     reference: f64,
     reason: String,
+    hedge_basis: Option<maker_taker::HedgeBasis>,
 }
 #[derive(Clone, Debug)]
 enum Report {
@@ -117,6 +130,7 @@ enum Report {
         id: u64,
         contract: String,
         delta: i64,
+        price: f64,
     },
     Done {
         id: u64,
@@ -170,7 +184,8 @@ struct RollState {
     initial_new: i64,
     goal: i64,
     amount: f64,
-    reference: Option<f64>,
+    arrival: Option<(f64, f64)>,
+    maker_taker: maker_taker::State,
     batch: Option<Batch>,
     seeded: bool,
     standalone: bool,
@@ -201,6 +216,12 @@ pub struct Summary {
     pub exposure_deviation_cny_seconds: f64,
     pub exposure_limit_breach_seconds: f64,
     pub roll_complete: bool,
+    #[serde(default)]
+    pub roll_paired_lots: u64,
+    #[serde(default)]
+    pub roll_lead_taker_lots: u64,
+    #[serde(default)]
+    pub roll_spread_cost_cny: Option<f64>,
     pub source_complete: bool,
     pub pending_events_peak: usize,
     pub gross_pnl_cny: f64,
@@ -242,6 +263,10 @@ pub struct Engine<S: Sink> {
 impl<S: Sink> Engine<S> {
     pub fn new(cfg: Config, metadata: Metadata, sink: S) -> Result<Self> {
         cfg.validate()?;
+        let model = format!(
+            "cn_limit_depth_then_trade_through/v2;{}",
+            cfg.roll_algorithm().model()
+        );
         let mut e = Self {
             peak_equity: cfg.capital_cny,
             cfg,
@@ -249,7 +274,7 @@ impl<S: Sink> Engine<S> {
             sink,
             now: 0,
             summary: Summary {
-                model: "strict_trade_through_full_fill/v1;maker_maker_roll_v1".into(),
+                model,
                 source_complete: true,
                 ..Default::default()
             },
@@ -325,7 +350,8 @@ impl<S: Sink> Engine<S> {
                     initial_new: 0,
                     goal: r.target_lots.unwrap_or(0),
                     amount: r.target_cny.unwrap_or(0.0),
-                    reference: None,
+                    arrival: None,
+                    maker_taker: Default::default(),
                     batch: None,
                     seeded: false,
                     standalone: true,
@@ -414,7 +440,8 @@ impl<S: Sink> Engine<S> {
                             initial_new: *self.known.get(new).unwrap_or(&0),
                             goal: 0,
                             amount: self.amounts.get(p).map_or(0.0, |x| x.0),
-                            reference: None,
+                            arrival: None,
+                            maker_taker: Default::default(),
                             batch: None,
                             seeded: true,
                             standalone: false,
@@ -474,7 +501,7 @@ impl<S: Sink> Engine<S> {
                 self.push(end, 0, Event::EndSession(q.contract.clone(), end))?;
             }
         }
-        if q.ts <= self.cutoff
+        if q.ts < self.cutoff
             && q.end.is_some_and(|end| q.ts < end)
             && s.segment_end(q.exchange_ts).is_some()
             && delta > 0
@@ -537,7 +564,9 @@ impl<S: Sink> Engine<S> {
                             id,
                             contract,
                             delta,
+                            price,
                         } => {
+                            self.confirm_roll_fill(id, &contract, delta, price);
                             *self.known.entry(contract).or_default() += delta;
                             if let Some(o) = self.orders.get_mut(&id) {
                                 o.local_remaining -= delta.abs();
@@ -700,25 +729,9 @@ impl<S: Sink> Engine<S> {
         };
         let s = self.metadata.spec(c)?;
         let (side, n) = (delta.signum(), delta.abs().min(self.cfg.max_child_lots));
-        let Some(base) = (if mode == Execution::Maker {
-            if side > 0 {
-                q.bid[0]
-            } else {
-                q.ask[0]
-            }
-        } else if side > 0 {
-            q.ask[0]
-        } else {
-            q.bid[0]
-        }) else {
+        let Some(limit) = q.limit(side, mode, &self.cfg) else {
             return Ok(None);
         };
-        let offset = if mode == Execution::Maker {
-            -self.cfg.maker_offset_ticks
-        } else {
-            self.cfg.protection_ticks
-        };
-        let limit = base + side * offset;
         ensure!(limit > 0, "non-positive limit");
         self.next_id += 1;
         let id = self.next_id;
@@ -738,6 +751,7 @@ impl<S: Sink> Engine<S> {
                 cancel_sent: false,
                 reference,
                 reason: reason.into(),
+                hedge_basis: None,
             },
         );
         self.emit(
@@ -834,59 +848,64 @@ impl<S: Sink> Engine<S> {
         let Some(q) = self.fresh(&o.contract, &self.markets).cloned() else {
             return self.done(id, "reject_stale_book");
         };
-        let Some(opposite) = (if o.side > 0 { q.ask[0] } else { q.bid[0] }) else {
-            return self.done(id, "reject_missing_book");
-        };
-        if o.execution == Execution::Maker {
-            if o.side * (o.limit - opposite) >= 0 {
-                return self.done(id, "reject_post_only");
+        // Both order intents are ordinary limit orders on arrival. The IOC
+        // cancels its remainder; a resting limit keeps it at the original price.
+        for level in 0..5 {
+            let n = self.orders[&id].remaining;
+            if n == 0 {
+                return Ok(());
             }
-            let x = self.orders.get_mut(&id).unwrap();
-            x.live = true;
-            x.cursor = x.cursor.max(q.cursor);
-            self.emit(
-                "orders",
-                Row {
-                    kind: "live".into(),
-                    contract: o.contract,
-                    order_id: Some(id),
-                    source_cursor: Some(q.cursor),
-                    ..Default::default()
-                },
-            )?;
-        } else {
-            for level in 0..5 {
-                let n = self.orders[&id].remaining;
-                if n == 0 {
-                    break;
-                }
-                let book = self.markets.get_mut(&o.contract).unwrap();
-                let (p, qty) = if o.side > 0 {
-                    (book.ask[level], &mut book.ask_qty[level])
-                } else {
-                    (book.bid[level], &mut book.bid_qty[level])
-                };
-                let Some(p) = p else {
-                    continue;
-                };
-                if o.side * (p - o.limit) > 0 {
-                    break;
-                }
-                let take = n.min(*qty);
-                *qty -= take;
-                if take > 0 {
-                    self.fill_at(id, take, p, q.cursor)?;
-                }
+            let book = self.markets.get_mut(&o.contract).unwrap();
+            let (p, qty) = if o.side > 0 {
+                (book.ask[level], &mut book.ask_qty[level])
+            } else {
+                (book.bid[level], &mut book.bid_qty[level])
+            };
+            let Some(p) = p else { continue };
+            if o.side * (p - o.limit) > 0 {
+                break;
             }
-            self.done(id, "ioc_cancelled")?;
+            let take = n.min(*qty);
+            *qty -= take;
+            if take > 0 {
+                self.fill_at(id, take, p, q.cursor, Execution::Taker)?;
+            }
         }
+        if self.orders[&id].remaining == 0 {
+            return Ok(());
+        }
+        if o.execution == Execution::Taker {
+            return self.done(id, "ioc_cancelled");
+        }
+        let x = self.orders.get_mut(&id).unwrap();
+        x.live = true;
+        x.cursor = x.cursor.max(q.cursor);
+        let remaining = x.remaining;
+        self.emit(
+            "orders",
+            Row {
+                kind: "live".into(),
+                contract: o.contract,
+                lots: Some(remaining),
+                order_id: Some(id),
+                source_cursor: Some(q.cursor),
+                ..Default::default()
+            },
+        )?;
         Ok(())
     }
     fn fill(&mut self, id: u64, n: i64, cursor: u64) -> Result<()> {
         let p = self.orders[&id].limit;
-        self.fill_at(id, n, p, cursor)
+        self.fill_at(id, n, p, cursor, Execution::Maker)
     }
-    fn fill_at(&mut self, id: u64, n: i64, price_ticks: i64, cursor: u64) -> Result<()> {
+    fn fill_at(
+        &mut self,
+        id: u64,
+        n: i64,
+        price_ticks: i64,
+        cursor: u64,
+        liquidity: Execution,
+    ) -> Result<()> {
         let o = self.orders[&id].clone();
         ensure!(n > 0 && n <= o.remaining, "invalid fill size");
         let s = self.metadata.spec(&o.contract)?;
@@ -897,6 +916,7 @@ impl<S: Sink> Engine<S> {
                 .entry(o.contract.clone())
                 .or_default()
                 .apply(o.side * n, price, day, &s);
+        self.record_roll_fill(&o, price, n, liquidity, &s)?;
         self.pnl += pnl;
         if let Some(f) = fee {
             self.fees += f;
@@ -917,7 +937,7 @@ impl<S: Sink> Engine<S> {
         self.emit(
             "fills",
             Row {
-                kind: format!("{:?}", o.execution).to_ascii_lowercase(),
+                kind: format!("{liquidity:?}").to_ascii_lowercase(),
                 product: s.product.clone(),
                 contract: o.contract.clone(),
                 order_id: Some(id),
@@ -941,6 +961,7 @@ impl<S: Sink> Engine<S> {
                 id,
                 contract: o.contract.clone(),
                 delta: o.side * n,
+                price,
             }),
         )?;
         if terminal {
@@ -1021,20 +1042,25 @@ impl<S: Sink> Engine<S> {
         Ok(())
     }
     fn risk_interval(&self, r: &RollState) -> Option<(f64, f64)> {
+        let notional = |c: &str| {
+            let s = self.metadata.spec(c).ok()?;
+            Some(self.fresh(c, &self.visible)?.mid(&s)? * s.multiplier)
+        };
+        Some(self.marked_risk_interval(r, notional(&r.old)?, notional(&r.new)?))
+    }
+    fn marked_risk_interval(&self, r: &RollState, old_unit: f64, new_unit: f64) -> (f64, f64) {
         let mut e = 0.0;
         let mut lo = 0.0;
         let mut hi = 0.0;
-        for c in [&r.old, &r.new] {
-            let s = self.metadata.spec(c).ok()?;
-            let p = self.fresh(c, &self.visible)?.mid(&s)?;
-            e += *self.known.get(c).unwrap_or(&0) as f64 * p * s.multiplier;
+        for (c, unit) in [(&r.old, old_unit), (&r.new, new_unit)] {
+            e += *self.known.get(c).unwrap_or(&0) as f64 * unit;
             for o in self.orders.values().filter(|o| &o.contract == c) {
-                let d = o.side as f64 * o.local_remaining as f64 * p * s.multiplier;
+                let d = o.side as f64 * o.local_remaining as f64 * unit;
                 lo += d.min(0.0);
                 hi += d.max(0.0);
             }
         }
-        Some((e + lo, e + hi))
+        (e + lo, e + hi)
     }
     fn risk_allows(&self, r: &RollState, c: &str, delta: i64) -> bool {
         let Some((lo, hi)) = self.risk_interval(r) else {
@@ -1053,31 +1079,31 @@ impl<S: Sink> Engine<S> {
             .max((hi + d.max(0.0) - r.amount).abs());
         after <= self.cfg.roll.max_exposure_deviation_cny + 1e-6 || after < before - 1e-6
     }
+    fn roll_books(&self, r: &RollState) -> Option<(&Quote, &Quote)> {
+        let old = self.fresh(&r.old, &self.visible)?;
+        let new = self.fresh(&r.new, &self.visible)?;
+        (old.day == new.day
+            && old.ts.abs_diff(new.ts) <= self.cfg.roll.max_quote_skew_ms.saturating_mul(1000))
+        .then_some((old, new))
+    }
     fn roll_control(&mut self, p: &str, r: &mut RollState) -> Result<()> {
         if !r.seeded || self.now < r.begin || self.now >= r.deadline || r.completed {
             return Ok(());
         }
-        let (Some(a), Some(b)) = (
-            self.fresh(&r.old, &self.visible).cloned(),
-            self.fresh(&r.new, &self.visible).cloned(),
-        ) else {
-            return Ok(());
-        };
-        if (a.ts - b.ts).abs() > self.cfg.roll.max_quote_skew_ms as i64 * 1000 {
-            return Ok(());
-        }
+        let books = self.roll_books(r).map(|(a, b)| (a.clone(), b.clone()));
         let (sa, sb) = (self.metadata.spec(&r.old)?, self.metadata.spec(&r.new)?);
-        let (Some(pa), Some(pb)) = (a.mid(&sa), b.mid(&sb)) else {
-            return Ok(());
-        };
-        if r.reference.is_none() {
+        let mids = books
+            .as_ref()
+            .and_then(|(a, b)| Some((a.mid(&sa)?, b.mid(&sb)?)));
+        if r.arrival.is_none() {
+            let Some((pa, pb)) = mids else { return Ok(()) };
             ensure!(
                 (sa.multiplier - sb.multiplier).abs() < 1e-8,
                 "roll multiplier mismatch"
             );
-            r.reference = Some(pb - pa);
+            r.arrival = Some((pa, pb));
             if r.standalone {
-                if r.amount == 0.0 {
+                if self.cfg.roll.target_cny.is_none() {
                     r.amount = r.initial as f64 * pa * sa.multiplier;
                 }
                 if self.cfg.roll.target_lots.is_none() {
@@ -1111,7 +1137,7 @@ impl<S: Sink> Engine<S> {
                     actual_lots: Some(r.initial),
                     target_lots: Some(r.goal),
                     target_cny: Some(r.amount),
-                    value: r.reference,
+                    value: Some(pb - pa),
                     reason: r.new.clone(),
                     ..Default::default()
                 },
@@ -1134,6 +1160,16 @@ impl<S: Sink> Engine<S> {
             )?;
             return Ok(());
         }
+        let mode = match self.cfg.roll_algorithm() {
+            RollAlgorithm::MakerTaker => return self.maker_taker_control(r, books.as_ref()),
+            RollAlgorithm::MakerMaker => Execution::Maker,
+            RollAlgorithm::TakerTaker => Execution::Taker,
+        };
+        let (Some((a, b)), Some((pa, pb))) = (books, mids) else {
+            return Ok(());
+        };
+        let (arrival_old, arrival_new) = r.arrival.unwrap();
+        let reference_spread = arrival_new - arrival_old;
         if r.goal != 0 && r.goal.signum() != r.initial.signum() {
             self.cancel_contract(&r.old)?;
             self.cancel_contract(&r.new)?;
@@ -1169,9 +1205,9 @@ impl<S: Sink> Engine<S> {
                 sb.price(b.ask[0].unwrap()) - sa.price(a.bid[0].unwrap())
             };
             let improvement = self.cfg.roll.spread_improvement_ticks * sa.tick;
-            if self.cfg.execution == Execution::Maker
+            if mode == Execution::Maker
                 && self.cfg.roll.use_spread_gate
-                && (quote_spread - r.reference.unwrap()) * sign as f64 > -improvement + 1e-9
+                && (quote_spread - reference_spread) * sign as f64 > -improvement + 1e-9
             {
                 return Ok(());
             }
@@ -1202,7 +1238,7 @@ impl<S: Sink> Engine<S> {
                     actual_lots: Some(next_a),
                     target_lots: Some(next_b),
                     value: Some(quote_spread),
-                    reference_price: r.reference,
+                    reference_price: Some(reference_spread),
                     ..Default::default()
                 },
             )?;
@@ -1234,7 +1270,7 @@ impl<S: Sink> Engine<S> {
                     .min(self.cfg.max_child_lots)
                     .min(self.cfg.roll.batch_lots);
             if d != 0 && self.risk_allows(r, &c, d) {
-                self.submit(&c, d, self.cfg.execution, reference, "calendar_roll")?;
+                self.submit(&c, d, mode, reference, "calendar_roll")?;
             }
         }
         Ok(())
@@ -1284,7 +1320,7 @@ impl<S: Sink> Engine<S> {
             .map(|(p, r)| (p.clone(), r.clone()))
             .collect();
         for (p, r) in rolls {
-            if r.reference.is_none() || r.completed {
+            if r.arrival.is_none() || r.completed {
                 continue;
             }
             let mut exposure = 0.0;
@@ -1345,6 +1381,7 @@ impl<S: Sink> Engine<S> {
                         id,
                         contract,
                         delta,
+                        ..
                     } => {
                         *self.known.entry(contract).or_default() += delta;
                         if let Some(o) = self.orders.get_mut(&id) {
@@ -1389,7 +1426,7 @@ impl<S: Sink> Engine<S> {
         self.summary.roll_complete = self.rolls.values().all(|r| {
             self.positions.get(&r.old).map_or(0, Position::lots) == 0
                 && self.positions.get(&r.new).map_or(0, Position::lots) == r.goal
-                && r.reference.is_some()
+                && r.arrival.is_some()
         });
         self.summary.known_fees_cny = cny(self.fees);
         self.summary.fee_unknown_fills = self.unknown_fees;
@@ -1644,17 +1681,36 @@ mod tests {
         assert_eq!(run(100).filled_lots, 0);
     }
     #[test]
-    fn post_only_rejects_order_crossed_during_transit() {
+    fn marketable_limit_takes_depth_then_rests_at_its_original_limit() {
         let mut e = engine(Config {
             order_delay_ms: 200,
             ..config()
         });
-        input(&mut e, 0, 1000.0);
+        input(&mut e, 0, 4000.0);
         feed(&mut e, 0, 1, 100, 100);
-        e.quote(quote(100, 2, "rb2701", 96, 98, 97, 101)).unwrap();
-        let s = e.finish(start() + 210000).unwrap();
-        assert_eq!(s.fills, 0);
-        assert!(s.rejected_orders > 0);
+        let mut q = quote(100, 2, "rb2701", 96, 98, 97, 101);
+        q.ask = [Some(98), Some(99), Some(100), None, None];
+        q.ask_qty = [1, 1, 100, 0, 0];
+        e.quote(q).unwrap();
+        e.advance(start() + 200_000, true).unwrap();
+        let o = e.orders.values().next().unwrap();
+        assert!(o.live);
+        assert_eq!((o.limit, o.remaining), (99, 2));
+        feed(&mut e, 250, 3, 99, 102);
+        feed(&mut e, 300, 4, 98, 103);
+        let s = e.finish(start() + 400_000).unwrap();
+        assert_eq!((s.filled_lots, s.rejected_orders), (4, 0));
+        let fills: Vec<_> = e
+            .sink
+            .0
+            .iter()
+            .filter(|(t, _)| t == "fills")
+            .map(|(_, r)| (r.kind.as_str(), r.price.unwrap(), r.lots.unwrap()))
+            .collect();
+        assert_eq!(
+            fills,
+            [("taker", 98.0, 1), ("taker", 99.0, 1), ("maker", 99.0, 2)]
+        );
     }
     #[test]
     fn cancel_in_transit_can_still_fill() {
@@ -1825,5 +1881,239 @@ mod tests {
         roll_start(&mut e);
         assert!(e.orders.is_empty());
         assert!(!e.finish(start() + 100000).unwrap().roll_complete);
+    }
+
+    fn spread_engine(
+        short: bool,
+        leg: crate::config::MakerLeg,
+        lots: i64,
+        delay: u64,
+        report: u64,
+    ) -> Engine<MemorySink> {
+        let mut cfg = roll_engine(short, 20_000.0, report).cfg;
+        cfg.roll.algorithm = Some(RollAlgorithm::MakerTaker);
+        cfg.roll.maker_leg = leg;
+        cfg.roll.initial_lots = if short { -lots } else { lots };
+        cfg.roll.target_lots = Some(cfg.roll.initial_lots);
+        cfg.roll.batch_lots = lots;
+        cfg.max_child_lots = lots;
+        cfg.order_delay_ms = delay;
+        engine(cfg)
+    }
+    #[test]
+    fn spread_roll_hedges_only_reported_fills_for_both_directions_and_lead_legs() {
+        use crate::config::MakerLeg::*;
+        for (short, leg, maker, hedge, side, bid, ask) in [
+            (false, Old, "rb2701", "rb2705", -1, 99, 101),
+            (true, Old, "rb2701", "rb2705", 1, 99, 101),
+            (false, New, "rb2705", "rb2701", 1, 101, 103),
+            (true, New, "rb2705", "rb2701", -1, 101, 103),
+        ] {
+            let mut e = spread_engine(short, leg, 1, 0, 50);
+            roll_start(&mut e);
+            assert_eq!(e.orders.len(), 1);
+            let o = e.orders.values().next().unwrap();
+            assert_eq!(
+                (o.contract.as_str(), o.side, o.execution),
+                (maker, side, Execution::Maker)
+            );
+            e.quote(quote(
+                100,
+                3,
+                maker,
+                bid,
+                ask,
+                if side > 0 { bid - 1 } else { ask + 1 },
+                101,
+            ))
+            .unwrap();
+            e.advance(start() + 149_999, true).unwrap();
+            assert!(!e.working(hedge));
+            let summary = e.finish(start() + 210_000).unwrap();
+            assert!(summary.roll_complete);
+            assert_eq!(summary.roll_paired_lots, 1);
+            assert_eq!(summary.roll_spread_cost_cny, Some(0.0));
+            let fills: Vec<_> = e
+                .sink
+                .0
+                .iter()
+                .filter(|(t, _)| t == "fills")
+                .map(|(_, r)| (r.contract.as_str(), r.kind.as_str(), r.timestamp_us))
+                .collect();
+            assert_eq!(
+                fills,
+                [
+                    (maker, "maker", start() + 100_000),
+                    (hedge, "taker", start() + 150_000)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn spread_gate_observes_direction_and_withdraws_an_unfavorable_resting_price() {
+        for (short, better) in [(false, -1), (true, 1)] {
+            let mut e = spread_engine(short, crate::config::MakerLeg::Old, 1, 0, 0);
+            e.cfg.roll.spread_improvement_ticks = 1.0;
+            roll_start(&mut e);
+            assert!(e.orders.is_empty());
+            e.quote(quote(
+                100,
+                3,
+                "rb2705",
+                101 + better,
+                103 + better,
+                102 + better,
+                100,
+            ))
+            .unwrap();
+            e.advance(start() + 100_000, true).unwrap();
+            assert!(e.working("rb2701"));
+            e.quote(quote(200, 4, "rb2705", 101, 103, 102, 100))
+                .unwrap();
+            e.advance(start() + 200_000, true).unwrap();
+            assert!(e.orders.is_empty());
+            let observed: Vec<_> = e
+                .sink
+                .0
+                .iter()
+                .filter(|(t, _)| t == "roll_spread")
+                .map(|(_, r)| r.kind.as_str())
+                .collect();
+            assert_eq!(observed, ["waiting", "eligible", "waiting"]);
+        }
+    }
+    #[test]
+    fn adverse_spread_and_partial_ioc_retry_only_the_unhedged_lots() {
+        let mut e = spread_engine(false, crate::config::MakerLeg::Old, 2, 0, 50);
+        roll_start(&mut e);
+        feed(&mut e, 100, 3, 102, 101);
+        let mut h = quote(120, 4, "rb2705", 104, 106, 105, 101);
+        h.ask_qty[0] = 1;
+        e.quote(h).unwrap();
+        e.advance(start() + 240_000, true).unwrap();
+        assert_eq!(e.known["rb2705"], 1);
+        let sent = e
+            .sink
+            .0
+            .iter()
+            .filter(|(t, r)| t == "orders" && r.reason == "roll_ioc_hedge")
+            .count();
+        assert_eq!(sent, 1);
+        e.quote(quote(250, 5, "rb2705", 103, 105, 104, 102))
+            .unwrap();
+        let s = e.finish(start() + 310_000).unwrap();
+        assert_eq!(
+            (s.roll_paired_lots, s.roll_spread_cost_cny),
+            (2, Some(50.0))
+        );
+        assert!(s.roll_complete);
+    }
+    #[test]
+    fn crossing_lead_prices_are_paired_fifo_and_remainder_can_fill_passively() {
+        let mut e = spread_engine(false, crate::config::MakerLeg::Old, 3, 20, 5);
+        roll_start(&mut e);
+        let mut m = quote(10, 3, "rb2701", 103, 105, 104, 101);
+        m.bid = [Some(103), Some(102), Some(100), None, None];
+        m.bid_qty = [1, 1, 10, 0, 0];
+        e.quote(m).unwrap();
+        e.advance(start() + 99_000, true).unwrap();
+        assert_eq!(e.known["rb2705"], 2);
+        feed(&mut e, 100, 4, 102, 102);
+        let s = e.finish(start() + 200_000).unwrap();
+        assert!(s.roll_complete);
+        assert_eq!(s.roll_spread_cost_cny, Some(-30.0));
+        assert_eq!(s.roll_lead_taker_lots, 2);
+        assert_eq!(s.execution_shortfall_cny, -30.0);
+        let lead: Vec<_> = e
+            .sink
+            .0
+            .iter()
+            .filter(|(t, r)| t == "fills" && r.reason == "roll_spread_maker")
+            .map(|(_, r)| (r.kind.as_str(), r.price.unwrap()))
+            .collect();
+        assert_eq!(lead, [("taker", 103.0), ("taker", 102.0), ("maker", 101.0)]);
+        let pairs: Vec<_> = e
+            .sink
+            .0
+            .iter()
+            .filter(|(t, r)| t == "roll_batches" && r.kind == "paired_fill")
+            .map(|(_, r)| (r.value.unwrap(), r.maker_order_id.unwrap()))
+            .collect();
+        assert_eq!(pairs, [(0.0, 1), (1.0, 1), (2.0, 1)]);
+    }
+    #[test]
+    fn spread_budget_stale_books_and_deadline_limit_execution() {
+        let mut e = spread_engine(false, crate::config::MakerLeg::Old, 3, 0, 50);
+        e.cfg.roll.max_exposure_deviation_cny = 1100.0;
+        e.cfg.quote_age_ms = 200;
+        roll_start(&mut e);
+        assert_eq!(e.orders.values().next().unwrap().remaining, 1);
+        e.advance(start() + 300_000, true).unwrap();
+        assert!(e.orders.is_empty());
+        e.quote(quote(400, 3, "rb2701", 99, 101, 102, 101)).unwrap();
+        e.advance(start() + 400_000, true).unwrap();
+        assert!(e.orders.is_empty());
+        e.quote(quote(420, 4, "rb2705", 101, 103, 102, 101))
+            .unwrap();
+        feed(&mut e, 430, 5, 102, 102);
+        let s = e.finish(start() + 450_000).unwrap();
+        assert_eq!(
+            (s.roll_paired_lots, s.filled_lots, s.roll_complete),
+            (0, 1, false)
+        );
+        assert_eq!(s.unfilled_lots, 5);
+    }
+    #[test]
+    fn changing_selected_contract_uses_configured_spread_algorithm() {
+        let mut cfg = Config {
+            execution: Execution::Taker,
+            ..config()
+        };
+        cfg.roll.algorithm = Some(RollAlgorithm::MakerTaker);
+        let mut e = engine(cfg);
+        input(&mut e, 0, 1100.0);
+        feed(&mut e, 0, 1, 100, 100);
+        assert_eq!(e.known["rb2701"], 1);
+        let monday = crate::timestamp("2026-11-16 09:00:00").unwrap();
+        e.advance(monday, false).unwrap();
+        e.begin_day(20261116, BTreeMap::from([("RB".into(), "rb2705".into())]))
+            .unwrap();
+        let next = |ms, seq, contract, bid, ask, last, volume| {
+            let mut q = quote(ms, seq, contract, bid, ask, last, volume);
+            q.day = 20261116;
+            q.ts += monday - start();
+            q.exchange_ts = q.ts;
+            q.end = Some(monday + 60_000_000);
+            q
+        };
+        e.quote(next(0, 1, "rb2701", 99, 101, 100, 1)).unwrap();
+        e.quote(next(0, 2, "rb2705", 101, 103, 102, 1)).unwrap();
+        e.advance(monday, true).unwrap();
+        assert!(e.working("rb2701") && !e.working("rb2705"));
+        e.quote(next(100, 3, "rb2701", 99, 101, 102, 2)).unwrap();
+        let s = e.finish(monday + 200_000).unwrap();
+        assert_eq!(
+            (s.roll_paired_lots, s.unfilled_lots, s.roll_complete),
+            (1, 0, true)
+        );
+    }
+    #[test]
+    fn spread_cancel_in_transit_still_generates_a_hedge_and_rechecks_exposure() {
+        let mut e = spread_engine(false, crate::config::MakerLeg::Old, 2, 0, 5);
+        e.cfg.roll.max_exposure_deviation_cny = 1020.0;
+        e.cfg.cancel_delay_ms = 100;
+        roll_start(&mut e);
+        e.quote(quote(40, 3, "rb2701", 96, 98, 97, 100)).unwrap();
+        e.advance(start() + 40_000, true).unwrap();
+        assert!(e.orders.values().next().unwrap().cancel_sent);
+        e.quote(quote(50, 4, "rb2705", 104, 106, 105, 101)).unwrap();
+        feed(&mut e, 80, 5, 102, 101);
+        let s = e.finish(start() + 150_000).unwrap();
+        assert_eq!(
+            (s.roll_paired_lots, s.roll_spread_cost_cny),
+            (1, Some(30.0))
+        );
+        assert_eq!(s.positions["rb2705"], 1);
     }
 }

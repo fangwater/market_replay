@@ -19,6 +19,31 @@ pub enum Execution {
     Taker,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RollAlgorithm {
+    MakerMaker,
+    TakerTaker,
+    MakerTaker,
+}
+impl RollAlgorithm {
+    pub fn model(self) -> &'static str {
+        match self {
+            Self::MakerMaker => "maker_maker_roll_v1",
+            Self::TakerTaker => "taker_taker_roll_v1",
+            Self::MakerTaker => "maker_taker_roll_v1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MakerLeg {
+    #[default]
+    Old,
+    New,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractSelection {
@@ -131,6 +156,8 @@ pub struct InitialPosition {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Roll {
+    pub algorithm: Option<RollAlgorithm>,
+    pub maker_leg: MakerLeg,
     pub old_contract: String,
     pub new_contract: String,
     pub initial_lots: i64,
@@ -148,6 +175,8 @@ pub struct Roll {
 impl Default for Roll {
     fn default() -> Self {
         Self {
+            algorithm: None,
+            maker_leg: MakerLeg::Old,
             old_contract: String::new(),
             new_contract: String::new(),
             initial_lots: 1,
@@ -165,6 +194,12 @@ impl Default for Roll {
     }
 }
 impl Config {
+    pub fn roll_algorithm(&self) -> RollAlgorithm {
+        self.roll.algorithm.unwrap_or(match self.execution {
+            Execution::Maker => RollAlgorithm::MakerMaker,
+            Execution::Taker => RollAlgorithm::TakerTaker,
+        })
+    }
     pub fn load(path: &Path) -> Result<Self> {
         let cfg: Self =
             toml::from_str(&std::fs::read_to_string(path)?).context("backtest config")?;
@@ -254,7 +289,10 @@ impl Config {
             ensure!(
                 !self.roll.old_contract.is_empty()
                     && !self.roll.new_contract.is_empty()
-                    && self.roll.old_contract != self.roll.new_contract,
+                    && !self
+                        .roll
+                        .old_contract
+                        .eq_ignore_ascii_case(&self.roll.new_contract),
                 "old/new roll contracts required"
             );
             ensure!(
