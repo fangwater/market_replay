@@ -194,6 +194,8 @@ def reason_for(ric, y, tfirst, tlast):
     names = pkgs_for(y)
     found = [(n, reports[n][ric]) for n in names if ric in reports[n]]
     ev = "checked %d packages for %d; " % (len(names), y)
+    if y == 2026 and tfirst >= "2026-06-01":
+        ev += "TAS only after 2026-06-01, the daily L2 files of that period have no Report; "
     if (ric, y) in problems:
         return problems[(ric, y)][0], ev + problems[(ric, y)][1]
     if not found:
@@ -258,7 +260,7 @@ for r in rows:
                r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now))
 inv = json.load(open(a.packages_json)) if a.packages_json else {}
 allp = json.load(open(a.inventory_json)) if a.inventory_json else {}
-meta = {p["job"]: p for y in allp.values() for p in y["packages"]}
+meta = {p["job"].strip("/"): p for y in allp.values() for p in y["packages"]}
 for n in checked:
     rr = reports[n]
     rics = [k for k, v in rr.items() if v[0] > 0]
@@ -306,7 +308,9 @@ for y in sorted(int(k) for k in allp):
                 tp[pr_].add(ric)
         dl = {prod_ex.get(r, ("?",))[0] for (r, yy) in l2 if yy == y}
         twl = sum(1 for pr_ in tp if pr_ not in dl)
-        note = "delivered L2 products %d; inventory (no package at all, before washing the supplements): %d" % (len(dl), x["tas_products_without_l2"])
+        note = ("products with a TAS RIC directory in this UTC year and no delivered L2 RIC (delivered L2 products: %d). The inventory's %d counted per "
+                "TAS source year and 'no package lists the product with data', so the two numbers differ (e.g. products whose package RICs have Count 0)"
+                % (len(dl), x["tas_products_without_l2"]))
     if x["tas_products"] == 0:
         note = "TAS has no data in the catalog for this year (tas_products=0): nothing to compare against"
     elif y < min(years):
