@@ -231,11 +231,34 @@ fn publish_sqlite(local: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Exclusive, non-blocking advisory lock per catalog file: `build`, `ib-sync` and `l2-sync` all
+/// copy the file, modify the copy and replace the original, so two of them must never overlap.
+/// Held until the returned file is dropped. (The lock does not stop a binary without it.)
+fn lock_catalog(work: &Path, output: &Path) -> Result<File> {
+    fs::create_dir_all(work)?;
+    let name: String = output
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = work.join(format!("catalog_writer{name}.lock"));
+    let file = File::create(&path)?;
+    if let Err(e) = file.try_lock() {
+        anyhow::bail!(
+            "another catalog writer holds {} ({e}); not touching {}",
+            path.display(),
+            output.display()
+        );
+    }
+    Ok(file)
+}
+
 pub async fn ib_sync(a: IbSync) -> Result<()> {
     let output = a
         .database
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    let _lock = lock_catalog(&a.work, &output)?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_ib_sync.sqlite.partial");
     fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
@@ -566,6 +589,50 @@ fn prune(days: &[PathBuf], ric: &str, expired: u64) -> Result<u64> {
     Ok(removed)
 }
 
+/// Copies `l2_directories` and the `l2_*` convention rows of the catalog that this build replaces
+/// (written by `l2-sync`; the build itself never walks the share). Nothing happens if there is no
+/// such file or it has no such table. Returns the number of carried rows.
+async fn carry_l2(conn: &mut SqliteConnection, old: &Path) -> Result<i64> {
+    if !old.try_exists()? {
+        return Ok(0);
+    }
+    sqlx::query("ATTACH DATABASE ? AS old")
+        .bind(old.to_string_lossy().as_ref())
+        .execute(&mut *conn)
+        .await?;
+    let has: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM old.sqlite_master WHERE type='table' AND name='l2_directories'",
+    )
+    .persistent(false)
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut n = 0;
+    if has > 0 {
+        sqlx::query("BEGIN").execute(&mut *conn).await?;
+        let schema = L2_SCHEMA.split("INSERT OR REPLACE").next().unwrap_or("");
+        sqlx::raw_sql(schema).execute(&mut *conn).await?;
+        sqlx::query("DELETE FROM main.l2_directories")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("INSERT INTO main.l2_directories SELECT * FROM old.l2_directories")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO main.conventions SELECT key,value FROM old.conventions WHERE key LIKE 'l2\\_%' ESCAPE '\\'",
+        )
+        .execute(&mut *conn)
+        .await?;
+        n = sqlx::query_scalar("SELECT COUNT(*) FROM main.l2_directories")
+            .fetch_one(&mut *conn)
+            .await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+    }
+    sqlx::query("DETACH DATABASE old")
+        .execute(&mut *conn)
+        .await?;
+    Ok(n)
+}
+
 pub async fn build(a: Build) -> Result<()> {
     let output = a
         .output
@@ -575,6 +642,7 @@ pub async fn build(a: Build) -> Result<()> {
         !(a.year.is_some() || a.product.is_some()) || a.output.is_some(),
         "filtered builds require a separate --output"
     );
+    let _lock = lock_catalog(&a.work, &output)?;
     let cfg = Config {
         project: a.project.clone(),
         plan: a.plan.clone(),
@@ -801,6 +869,10 @@ pub async fn build(a: Build) -> Result<()> {
         let (n, ib_only) = load_ib(&mut conn, &a.root, &a.ib_manifest).await?;
         eprintln!("imported {n} IB contracts ({ib_only} IB-only)");
     }
+    let l2 = carry_l2(&mut conn, &output).await?;
+    if l2 > 0 {
+        eprintln!("carried {l2} l2_directories rows from the replaced catalog");
+    }
     conn.close().await?;
     publish_sqlite(&local, &output)?;
     println!("{}: {count} source-year/RIC entries; {active} active at product snapshot dates; {cleaned} redundant status-only dates removed",output.display());
@@ -852,6 +924,141 @@ pub async fn list(a: Query) -> Result<()> {
     Ok(())
 }
 
+/// Refresh only the L2 table of an existing catalog: which (RIC, UTC year) directories hold
+/// `l2_<freq>ms.parquet` and for which days. Stat-only walk of the share, one thread.
+#[derive(Args)]
+pub struct L2Sync {
+    #[arg(long, default_value = ROOT)]
+    pub root: PathBuf,
+    /// Defaults to <root>/meta/catalog.sqlite.
+    #[arg(long)]
+    pub database: Option<PathBuf>,
+    #[arg(long, default_value = "l2_250ms.parquet")]
+    pub file_name: String,
+    #[arg(long, default_value = WORK)]
+    pub work: PathBuf,
+}
+
+const L2_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS l2_directories (
+ ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL,
+ first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL, PRIMARY KEY(ric,utc_year)
+);
+INSERT OR REPLACE INTO conventions VALUES
+ ('l2_scope','l2_directories: Normalized LL2 (10 levels) sampled on a 250 ms grid, l2_250ms.parquet; only rows where the book changed plus anchor rows; includes RICs without TAS (e.g. cfe weeklies)'),
+ ('l2_directory_usage','SELECT directory FROM l2_directories WHERE ric=?; read <directory>/<UTC YYYYMMDD>/l2_250ms.parquet (days between first_day and last_day may have gaps)');
+"#;
+
+struct L2Dir {
+    ric: String,
+    year: i32,
+    dir: PathBuf,
+    first: String,
+    last: String,
+    days: i64,
+}
+
+fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
+    let names = |p: &Path| -> Result<Vec<String>> {
+        let mut v = Vec::new();
+        for e in fs::read_dir(p)? {
+            v.push(e?.file_name().to_string_lossy().into_owned());
+        }
+        v.sort();
+        Ok(v)
+    };
+    let mut out = Vec::new();
+    for ex in names(root)? {
+        if ex == "meta" || ex.starts_with('.') {
+            continue;
+        }
+        let ex_dir = root.join(&ex);
+        if !ex_dir.is_dir() {
+            continue;
+        }
+        for year in names(&ex_dir)? {
+            let Ok(y) = year.parse::<i32>() else { continue };
+            let year_dir = ex_dir.join(&year);
+            for ric_dir in names(&year_dir)? {
+                let dir = year_dir.join(&ric_dir);
+                let mut first = String::new();
+                let mut last = String::new();
+                let mut days = 0i64;
+                for day in names(&dir)? {
+                    if day.len() == 8 && dir.join(&day).join(file_name).is_file() {
+                        if first.is_empty() {
+                            first = day.clone();
+                        }
+                        last = day;
+                        days += 1;
+                    }
+                }
+                if days > 0 {
+                    out.push(L2Dir {
+                        ric: tasdb::unescape_component(&ric_dir),
+                        year: y,
+                        dir,
+                        first,
+                        last,
+                        days,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn l2_sync(a: L2Sync) -> Result<()> {
+    let output = a
+        .database
+        .clone()
+        .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    let _lock = lock_catalog(&a.work, &output)?;
+    let found = l2_walk(&a.root, &a.file_name)?;
+    fs::create_dir_all(&a.work)?;
+    let local = a.work.join("catalog_l2_sync.sqlite.partial");
+    fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
+    let mut conn = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&local)
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full),
+    )
+    .await?;
+    sqlx::raw_sql(L2_SCHEMA).execute(&mut conn).await?;
+    sqlx::query("BEGIN").execute(&mut conn).await?;
+    sqlx::query("DELETE FROM l2_directories")
+        .execute(&mut conn)
+        .await?;
+    for d in &found {
+        sqlx::query("INSERT INTO l2_directories VALUES (?,?,?,?,?,?)")
+            .bind(&d.ric)
+            .bind(d.year)
+            .bind(d.dir.to_string_lossy().as_ref())
+            .bind(&d.first)
+            .bind(&d.last)
+            .bind(d.days)
+            .execute(&mut conn)
+            .await?;
+    }
+    sqlx::query("COMMIT").execute(&mut conn).await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut conn)
+        .await?;
+    ensure!(integrity == "ok", "SQLite integrity failure: {integrity}");
+    conn.close().await?;
+    publish_sqlite(&local, &output)?;
+    fs::remove_file(&local)?;
+    println!(
+        "{}: {} L2 directories, {} files",
+        output.display(),
+        found.len(),
+        found.iter().map(|d| d.days).sum::<i64>()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +1067,88 @@ mod tests {
         session::{Decoder, State},
     };
     use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn catalog_writers_exclude_each_other_per_file() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a.sqlite"), t.path().join("b.sqlite"));
+        let first = lock_catalog(t.path(), &a).unwrap();
+        assert!(lock_catalog(t.path(), &a).is_err());
+        let _other = lock_catalog(t.path(), &b).unwrap();
+        drop(first);
+        assert!(lock_catalog(t.path(), &a).is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_carries_over_l2_rows_only_when_present() {
+        let t = tempfile::tempdir().unwrap();
+        let old = t.path().join("old.sqlite");
+        // No old file: nothing happens.
+        // A file database like the build's (an in-memory one is shared-cache and keeps the
+        // attached file's schema).
+        let mut c = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(t.path().join("new.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 0);
+        // Old catalog without the table: nothing happens.
+        let mut o = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&old)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut o).await.unwrap();
+        o.close().await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 0);
+        let none: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='l2_directories'")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(none, 0);
+        // Old catalog with L2 rows and conventions: carried exactly.
+        let mut o = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&old)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(L2_SCHEMA).execute(&mut o).await.unwrap();
+        sqlx::query("INSERT INTO l2_directories VALUES ('VXZ26',2026,'/r/cfe/2026/VXZ26','20260105','20261110',7)")
+            .execute(&mut o)
+            .await
+            .unwrap();
+        o.close().await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 1);
+        let row: (String, i64, String) =
+            sqlx::query_as("SELECT ric,days,last_day FROM l2_directories")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(row, ("VXZ26".to_string(), 7, "20261110".to_string()));
+        let conv: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM conventions WHERE key LIKE 'l2%' ORDER BY key")
+                .fetch_all(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(conv, vec!["l2_directory_usage", "l2_scope"]);
+        // The regular conventions are untouched.
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conventions WHERE key NOT LIKE 'l2%'")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert!(n >= 8);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn ib_manifest_import_marks_ib_only_and_directories() {

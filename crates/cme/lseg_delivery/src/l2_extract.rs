@@ -178,6 +178,12 @@ pub fn run_extract_rics(
 ) -> Result<ExtractReport> {
     ensure!(cfg.workers >= 1, "workers must be >= 1");
     let cache = SharedCache::new(Tuning::new(cfg.cache_mb, 64));
+    let dbs = open_dbs(db_dirs, &cache)?;
+    Ok(extract_rics_with(&dbs, cfg, &jobs))
+}
+
+/// Opens the databases read-only, in the given (chronological) order.
+pub fn open_dbs(db_dirs: &[PathBuf], cache: &SharedCache) -> Result<Vec<Arc<DB>>> {
     let mut dbs: Vec<Arc<DB>> = Vec::new();
     for d in db_dirs {
         ensure!(
@@ -185,8 +191,18 @@ pub fn run_extract_rics(
             "{} is not a database",
             d.display()
         );
-        dbs.push(Arc::new(l2_db::open_read(d, &cache)?));
+        dbs.push(Arc::new(l2_db::open_read(d, cache)?));
     }
+    Ok(dbs)
+}
+
+/// The tasks of `run_extract_rics` on databases that are already open (the
+/// deliver driver keeps them open across batches).
+pub fn extract_rics_with(
+    dbs: &[Arc<DB>],
+    cfg: &ExtractConfig,
+    jobs: &[(String, String)],
+) -> ExtractReport {
     let results: Mutex<Vec<Value>> = Mutex::new(Vec::new());
     let failed: Mutex<Option<String>> = Mutex::new(None);
     let next = AtomicUsize::new(0);
@@ -241,8 +257,8 @@ pub fn run_extract_rics(
             });
         }
     });
-    Ok(ExtractReport {
+    ExtractReport {
         results: results.into_inner().expect("results lock"),
         failed: failed.into_inner().expect("failed lock"),
-    })
+    }
 }

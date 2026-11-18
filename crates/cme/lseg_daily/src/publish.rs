@@ -7,26 +7,22 @@
 //! * publish = temp file + fsync + footer check + no-overwrite hard link;
 //! * full SHA256 only for first/middle/last file per CF and kind.
 use anyhow::{bail, ensure, Context, Result};
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::file::statistics::Statistics;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 
-const DAY_NS: u64 = 86_400_000_000_000;
+use lseg_delivery::publish as shared;
+pub use lseg_delivery::publish::{component, Footer, Identity, Part};
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Part {
-    pub path: String,
-    pub ric: String,
-    pub kind: u8,
-    pub rows: u64,
-    pub bytes: u64,
-    pub utc_date: String,
+/// Footer checks for TAS files: the UTC day end is exclusive.
+pub fn check_footer(path: &Path, part: &Part) -> Result<Footer> {
+    shared::check_footer(path, part, false)
+}
+
+fn copy_one(source: &Path, target: &Path, part: &Part, full: bool) -> Result<bool> {
+    shared::copy_one(source, target, part, full, false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,124 +45,9 @@ pub struct Export {
     pub bytes: u64,
 }
 
-/// Lossless escaping of one RIC path component (same as `tasdb::component`).
-pub fn component(value: &str) -> String {
-    if value == "." || value == ".." {
-        return value.bytes().map(|_| "%2E").collect();
-    }
-    value
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"_-.^".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
-
 fn read_json(path: &Path) -> Result<Value> {
     serde_json::from_slice(&fs::read(path).with_context(|| format!("read {path:?}"))?)
         .with_context(|| format!("parse {path:?}"))
-}
-
-fn day_start(day: &str) -> Result<u64> {
-    let d = chrono::NaiveDate::parse_from_str(day, "%Y%m%d")
-        .with_context(|| format!("UTC day {day:?}"))?;
-    Ok(u64::try_from(
-        d.and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_nanos_opt()
-            .context("day ns")?,
-    )?)
-}
-
-/// Column names, row count and a comparable schema/metadata fingerprint.
-pub struct Footer {
-    pub names: Vec<String>,
-    pub rows: u64,
-    /// Arrow schema incl. its metadata (order-insensitive) + other footer keys.
-    pub identity: Identity,
-}
-
-pub type Identity = (arrow_schema::Schema, BTreeMap<String, Option<String>>);
-
-/// Footer checks of `check_footer()`: rows, one RIC per row group, all
-/// timestamps inside the part's UTC day.
-pub fn check_footer(path: &Path, part: &Part) -> Result<Footer> {
-    let reader =
-        SerializedFileReader::new(File::open(path).with_context(|| format!("open {path:?}"))?)
-            .with_context(|| format!("footer {path:?}"))?;
-    let meta = reader.metadata();
-    let fm = meta.file_metadata();
-    let schema = fm.schema_descr();
-    let names: Vec<String> = schema
-        .root_schema()
-        .get_fields()
-        .iter()
-        .map(|f| f.name().to_string())
-        .collect();
-    let ric_i = names
-        .iter()
-        .position(|n| n == "ric")
-        .context("no ric column")?;
-    let ts_i = names
-        .iter()
-        .position(|n| n == "ts_utc_ns")
-        .context("no ts_utc_ns column")?;
-    ensure!(
-        fm.num_rows() as u64 == part.rows,
-        "{path:?}: footer rows {} != {}",
-        fm.num_rows(),
-        part.rows
-    );
-    let start = day_start(&part.utc_date)?;
-    for rg in meta.row_groups() {
-        match rg.column(ric_i).statistics() {
-            Some(Statistics::ByteArray(s)) => {
-                let (lo, hi) = (s.min_opt(), s.max_opt());
-                ensure!(
-                    lo.zip(hi)
-                        .is_some_and(|(a, b)| a.data() == part.ric.as_bytes()
-                            && b.data() == part.ric.as_bytes()),
-                    "{path:?}: row-group RIC differs from {}",
-                    part.ric
-                );
-            }
-            _ => bail!("{path:?}: missing RIC statistics"),
-        }
-        match rg.column(ts_i).statistics() {
-            Some(Statistics::Int64(s)) => {
-                let (lo, hi) = s
-                    .min_opt()
-                    .zip(s.max_opt())
-                    .context("missing timestamp min/max")?;
-                let (lo, hi) = (*lo as u64, *hi as u64);
-                ensure!(
-                    start <= lo && lo <= hi && hi < start + DAY_NS,
-                    "{path:?}: timestamps outside UTC day {}",
-                    part.utc_date
-                );
-            }
-            _ => bail!("{path:?}: missing timestamp statistics"),
-        }
-    }
-    let kv = fm.key_value_metadata();
-    let arrow = parquet::arrow::parquet_to_arrow_schema(schema, kv)
-        .with_context(|| format!("{path:?}: arrow schema"))?;
-    let other: BTreeMap<String, Option<String>> = kv
-        .into_iter()
-        .flatten()
-        .filter(|k| k.key != "ARROW:schema")
-        .map(|k| (k.key.clone(), k.value.clone()))
-        .collect();
-    Ok(Footer {
-        names,
-        rows: fm.num_rows() as u64,
-        identity: (arrow, other),
-    })
 }
 
 fn walk(dir: &Path, root: &Path, out: &mut BTreeSet<String>, partial: &mut usize) -> Result<()> {
@@ -327,111 +208,12 @@ pub fn sampled(export: &Export) -> BTreeSet<String> {
     out
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut f = File::open(path)?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 8 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", h.finalize()))
-}
-
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Published {
     pub new_files: u64,
     pub existing_identical: u64,
     pub sha256_checked: u64,
     pub bytes: u64,
-}
-
-/// Same as an already-published target? Size, footer identity, and the full
-/// hash for sampled files. A differing target is never replaced.
-fn same(target: &Path, source: &Path, part: &Part, full: bool, src: &Footer) -> Result<()> {
-    ensure!(
-        fs::metadata(target)?.len() == part.bytes,
-        "existing delivery file differs in size (not replaced): {target:?}"
-    );
-    let f = check_footer(target, part)?;
-    ensure!(
-        f.identity == src.identity && f.rows == src.rows,
-        "existing delivery file has another footer (not replaced): {target:?}"
-    );
-    if full {
-        ensure!(
-            sha256_file(target)? == sha256_file(source)?,
-            "existing delivery file differs (not replaced): {target:?}"
-        );
-    }
-    Ok(())
-}
-
-fn copy_one(source: &Path, target: &Path, part: &Part, full: bool) -> Result<bool> {
-    let src = check_footer(source, part)?;
-    if target.exists() {
-        same(target, source, part, full, &src)?;
-        return Ok(false);
-    }
-    let dir = target.parent().context("target parent")?;
-    fs::create_dir_all(dir)?;
-    let temp = dir.join(format!(
-        ".{}.{}.partial",
-        target.file_name().unwrap().to_string_lossy(),
-        std::process::id()
-    ));
-    let result = (|| -> Result<bool> {
-        let mut digest = full.then(Sha256::new);
-        {
-            let mut input = File::open(source)?;
-            let mut out = File::options().write(true).create_new(true).open(&temp)?;
-            let mut buf = vec![0u8; 8 << 20];
-            loop {
-                let n = input.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])?;
-                if let Some(d) = digest.as_mut() {
-                    d.update(&buf[..n]);
-                }
-            }
-            out.sync_all()?;
-        }
-        ensure!(
-            fs::metadata(&temp)?.len() == part.bytes,
-            "copy size {target:?}"
-        );
-        let f = check_footer(&temp, part)?;
-        ensure!(
-            f.identity == src.identity,
-            "copied footer differs {target:?}"
-        );
-        if let Some(d) = digest {
-            let want = format!("{:x}", d.finalize());
-            ensure!(
-                sha256_file(&temp)? == want,
-                "copied SHA256 differs {target:?}"
-            );
-            ensure!(
-                sha256_file(source)? == want,
-                "source changed while copying {source:?}"
-            );
-        }
-        match fs::hard_link(&temp, target) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                same(target, source, part, full, &src)?;
-                Ok(false)
-            }
-            Err(e) => Err(e).with_context(|| format!("publish {target:?}")),
-        }
-    })();
-    let _ = fs::remove_file(&temp);
-    result
 }
 
 /// Publishes every part under `delivery_root` (the `lseg/` prefix of the
