@@ -566,6 +566,50 @@ fn prune(days: &[PathBuf], ric: &str, expired: u64) -> Result<u64> {
     Ok(removed)
 }
 
+/// Copies `l2_directories` and the `l2_*` convention rows of the catalog that this build replaces
+/// (written by `l2-sync`; the build itself never walks the share). Nothing happens if there is no
+/// such file or it has no such table. Returns the number of carried rows.
+async fn carry_l2(conn: &mut SqliteConnection, old: &Path) -> Result<i64> {
+    if !old.try_exists()? {
+        return Ok(0);
+    }
+    sqlx::query("ATTACH DATABASE ? AS old")
+        .bind(old.to_string_lossy().as_ref())
+        .execute(&mut *conn)
+        .await?;
+    let has: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM old.sqlite_master WHERE type='table' AND name='l2_directories'",
+    )
+    .persistent(false)
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut n = 0;
+    if has > 0 {
+        sqlx::query("BEGIN").execute(&mut *conn).await?;
+        let schema = L2_SCHEMA.split("INSERT OR REPLACE").next().unwrap_or("");
+        sqlx::raw_sql(schema).execute(&mut *conn).await?;
+        sqlx::query("DELETE FROM main.l2_directories")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("INSERT INTO main.l2_directories SELECT * FROM old.l2_directories")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO main.conventions SELECT key,value FROM old.conventions WHERE key LIKE 'l2\\_%' ESCAPE '\\'",
+        )
+        .execute(&mut *conn)
+        .await?;
+        n = sqlx::query_scalar("SELECT COUNT(*) FROM main.l2_directories")
+            .fetch_one(&mut *conn)
+            .await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+    }
+    sqlx::query("DETACH DATABASE old")
+        .execute(&mut *conn)
+        .await?;
+    Ok(n)
+}
+
 pub async fn build(a: Build) -> Result<()> {
     let output = a
         .output
@@ -801,6 +845,10 @@ pub async fn build(a: Build) -> Result<()> {
         let (n, ib_only) = load_ib(&mut conn, &a.root, &a.ib_manifest).await?;
         eprintln!("imported {n} IB contracts ({ib_only} IB-only)");
     }
+    let l2 = carry_l2(&mut conn, &output).await?;
+    if l2 > 0 {
+        eprintln!("carried {l2} l2_directories rows from the replaced catalog");
+    }
     conn.close().await?;
     publish_sqlite(&local, &output)?;
     println!("{}: {count} source-year/RIC entries; {active} active at product snapshot dates; {cleaned} redundant status-only dates removed",output.display());
@@ -994,6 +1042,77 @@ mod tests {
         session::{Decoder, State},
     };
     use parquet::arrow::ArrowWriter;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_carries_over_l2_rows_only_when_present() {
+        let t = tempfile::tempdir().unwrap();
+        let old = t.path().join("old.sqlite");
+        // No old file: nothing happens.
+        // A file database like the build's (an in-memory one is shared-cache and keeps the
+        // attached file's schema).
+        let mut c = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(t.path().join("new.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 0);
+        // Old catalog without the table: nothing happens.
+        let mut o = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&old)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut o).await.unwrap();
+        o.close().await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 0);
+        let none: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='l2_directories'")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(none, 0);
+        // Old catalog with L2 rows and conventions: carried exactly.
+        let mut o = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&old)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(L2_SCHEMA).execute(&mut o).await.unwrap();
+        sqlx::query("INSERT INTO l2_directories VALUES ('VXZ26',2026,'/r/cfe/2026/VXZ26','20260105','20261110',7)")
+            .execute(&mut o)
+            .await
+            .unwrap();
+        o.close().await.unwrap();
+        assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 1);
+        let row: (String, i64, String) =
+            sqlx::query_as("SELECT ric,days,last_day FROM l2_directories")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(row, ("VXZ26".to_string(), 7, "20261110".to_string()));
+        let conv: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM conventions WHERE key LIKE 'l2%' ORDER BY key")
+                .fetch_all(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(conv, vec!["l2_directory_usage", "l2_scope"]);
+        // The regular conventions are untouched.
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conventions WHERE key NOT LIKE 'l2%'")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert!(n >= 8);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn ib_manifest_import_marks_ib_only_and_directories() {

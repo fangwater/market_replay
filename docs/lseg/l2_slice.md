@@ -328,3 +328,45 @@ nice -n 10 <bin>/lseg_l2_slice backfill --workers 8 --producers 4 --segment-mib 
 **怎么用这些库提取切片**：`lseg_l2_slice extract-rics --db-dirs <库1,库2,…>`（按时间顺序给出，周期包和日库可以混用）`--rics <RIC,…> --days <日期,…>`，频率用 `--freq-ms`（默认 250），输出到 `--out-root`。
 
 **怎么延伸**：新日包用 `scripts/lseg/fetch_normalised_ll2.sh` 下载，再用同一条 `backfill` 命令加大 `--daily-end`，已完成的单元自动跳过。2024 年包可以用 `--stream p2024=<各文件,逗号分隔> --no-daily` 洗到 `_stream/p2024`。
+
+## 交付到 NFS 交付盘（2026-11-18 完成 2025 + 2026）
+
+`lseg_l2_slice deliver`：从洗好的库提取，**只用 `lseg_delivery::publish` 这一个发布流程**（写临时文件、fsync、校验 footer、硬链接发布、不覆盖；和 `lseg-daily` 共用同一份代码），目标是
+`/mnt/nfs/30.100_cta_data/lseg/<交易所>/<UTC 年>/<RIC>/<UTC YYYYMMDD>/l2_250ms.parquet`。
+
+- 可续跑：目标已是有效 L2 文件的 RIC-日直接跳过（只查 footer，不重新提取）；内容不同的已有文件只记问题、不动。
+- 每批（默认 3000 个文件）先提取到本地 NVMe 暂存，再用 8 个线程发布；提取下一批和发布这一批重叠，暂存最多两批，批完即删。每批的首、中、末三个文件做完整 SHA-256 并从交付盘读回。
+- 交付盘上**只写问题**：`meta/problems/l2_deliver/problems.csv`，第一个问题出现时才创建；进度只在本地 JSON（`--progress`）。
+- 有任务在跑、排队或 10 分钟内要开始时暂停（`/api/admin/status`，和洗库同一套门控）。
+- 交易所目录：先查交付目录 `catalog.sqlite`，再查已批准计划 `artifacts/tas_status_20261109/plan.json` 的 `exchanges`（只按 RIC 取，`year` 只是 2026 年作业的年份）。两边不一致记 `exchange_conflict` 且不交付；两边都没有记 `no_exchange_directory`，不猜。用 `scripts/lseg/l2_exchange_map.py ALL --plan <plan.json> --conflicts <out.tsv>` 生成映射。
+- 吞吐受交付盘的元数据延迟限制（8 个线程约 31–40 个文件/秒），不是带宽或客户端 CPU。
+
+**结果**：2025-01-01 ~ 2026-11-12，共 657,460 个文件、404.1 GB，**0 个问题**，全部 RIC-日都有交易所目录（0 未映射、0 冲突、0 个 RIC-日同时在两个库里）。
+
+| 段（源） | 文件数 | GB | 墙钟 |
+| --- | --- | --- | --- |
+| 2026-06-01 ~ 11-12（日库） | 213,253 | 164.1 | 2 h |
+| 2026-01-01 ~ 05-31（`p2026h1`） | 190,414 | 140.1 | 1.5 h |
+| 2025（`p2025` + `s2025`） | 253,793 | 99.9 | 1.3 h |
+
+按月 RIC-日数：2025 年每月 19,892–22,425；2026-01 ~ 05 为 38,950 / 35,795 / 39,862 / 37,175 / 38,632；2026-06 ~ 11 为 40,070 / 41,001 / 39,224 / 39,214 / 38,736 / 15,008。每月交付数与库里有数据的 RIC-日数相等。
+独立核对：13 个随机文件（跨三个源、多个交易所、含冷门 RIC 和 CFE 周合约）从库里重新提取，和交付盘文件**逐字节相同**。
+
+命令：
+
+```bash
+scripts/lseg/l2_exchange_map.py ALL --plan <plan.json> --conflicts conflicts.tsv > exchange_map.tsv
+# 日库用 --db-root <l2_db>；周期包用 --stream-dbs <库1,库2>
+nice -n 10 lseg_l2_slice deliver --exchange-map exchange_map.tsv --exchange-conflicts conflicts.tsv \
+  --db-root <l2_db> --from 2026-06-01 --to 2026-11-12 \
+  --extract-workers 6 --publish-threads 8 --batch-files 3000 --staging <本地 NVMe 目录> --progress progress.json
+lseg_l2_slice publish-bench ...   # 只测发布吞吐
+lseg_catalog l2-sync              # 交付完后更新目录索引（见下）
+```
+
+**目录索引**：`lseg_catalog l2-sync` 对交付盘做只 stat 的遍历，写表 `l2_directories(ric, utc_year, directory, first_day, last_day, days)` 和两条 `conventions`；不动 TAS 表。**每次全量 `lseg_catalog build` 之后要再跑一次**（build 会重建数据库），且只在没有任务运行时跑（目录库只有一个写入者）。
+
+**2024**：`_stream/p2024` 洗完（`runtime/l2_backfill/progress_2024.json` 的 state 为 finished）之前不要打开。洗完后：重新生成映射并看冲突/未映射，然后
+`deliver --stream-dbs <l2_db>/_stream/p2024 --from 2024-01-01 --to 2024-12-31`，再跑 `l2-sync`。
+
+**新日期**：新的日库洗完后，用同一条 `deliver --db-root … --from <新日> --to <新日>` 即可；已交付的跳过。
