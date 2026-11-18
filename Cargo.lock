@@ -2374,6 +2374,7 @@ dependencies = [
  "csv",
  "dingtalk",
  "flate2",
+ "lseg_delivery",
  "parquet",
  "reqwest",
  "serde",

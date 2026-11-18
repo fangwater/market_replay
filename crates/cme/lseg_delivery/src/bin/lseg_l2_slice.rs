@@ -6,7 +6,7 @@ use flate2::{bufread::GzDecoder, read::MultiGzDecoder};
 use lseg_delivery::{
     l2_backfill::{self, Gate},
     l2_batch::{run_batch, BatchConfig},
-    l2_db,
+    l2_db, l2_deliver,
     l2_extract::{run_extract, run_extract_rics, ExtractConfig},
     l2_report::{run_report, ReportConfig},
     l2_slice::{day_number, slice_stream, Layout, NullSink, Params, ParquetSink, DAY_NS},
@@ -24,6 +24,7 @@ use std::{
 };
 
 const DEFAULT_DB_ROOT: &str = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_db";
+const DEFAULT_TARGET_ROOT: &str = "/mnt/nfs/30.100_cta_data/lseg";
 
 #[derive(Parser)]
 #[command(about = "LSEG Normalized LL2 daily packages -> fixed-frequency downsampled Parquet")]
@@ -225,6 +226,76 @@ enum Command {
         /// Replace existing output files (default: keep them).
         #[arg(long)]
         force: bool,
+    },
+    /// Throughput test of the real publish routine (`lseg_delivery::publish`): the
+    /// staged L2 files below `--stage-root` are published into a THROWAWAY directory
+    /// (same share, outside the delivery tree), disjoint subsets per run.
+    PublishBench {
+        /// Output root of `extract` (`<exchange>/<year>/<RIC>/<day>/l2_<freq>ms.parquet`).
+        #[arg(long)]
+        stage_root: PathBuf,
+        #[arg(long)]
+        target_root: PathBuf,
+        /// Thread counts, one run each, in this order (use e.g. 1,4,8,8,4,1 to see drift).
+        #[arg(long, value_delimiter = ',', default_value = "1,4,8")]
+        threads: Vec<usize>,
+        #[arg(long, default_value_t = 700)]
+        files_per_run: usize,
+    },
+    /// Delivers the washed databases into the NFS delivery tree (resumable,
+    /// idempotent, gated on the server's job state). See `lseg_delivery::l2_deliver`.
+    Deliver {
+        /// One database per UTC day below this root (the daily packages).
+        #[arg(long)]
+        db_root: Option<PathBuf>,
+        /// Stream databases (period packages), chronological.
+        #[arg(long, value_delimiter = ',')]
+        stream_dbs: Vec<PathBuf>,
+        /// First and last UTC day, YYYY-MM-DD (inclusive).
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        /// Lines `RIC<TAB>exchange-directory` (scripts/lseg/l2_exchange_map.py ALL).
+        #[arg(long)]
+        exchange_map: PathBuf,
+        /// Lines `RIC<TAB>detail` of RICs whose exchange directory is contradictory
+        /// between sources: recorded as problems, not delivered.
+        #[arg(long)]
+        exchange_conflicts: Option<PathBuf>,
+        /// Only these exchange directories (default: all).
+        #[arg(long, value_delimiter = ',')]
+        exchanges: Vec<String>,
+        #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
+        target_root: PathBuf,
+        /// Local staging directory (NVMe); removed at the end.
+        #[arg(long)]
+        staging: PathBuf,
+        #[arg(long, default_value_t = 250)]
+        freq_ms: u64,
+        #[arg(long, default_value_t = 1800)]
+        session_gap_s: u64,
+        #[arg(long, default_value_t = limits::L2_SLICE_WORKERS)]
+        extract_workers: usize,
+        #[arg(long, default_value_t = limits::IO_THREADS)]
+        publish_threads: usize,
+        /// RIC-days per batch (also the unit of staging).
+        #[arg(long, default_value_t = 3000)]
+        batch_files: usize,
+        #[arg(long, default_value_t = 256)]
+        cache_mb: usize,
+        #[arg(long)]
+        progress: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:18313")]
+        status_addr: String,
+        #[arg(long)]
+        no_gate: bool,
+        /// Enumerate and count only.
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop after this many files (tests).
+        #[arg(long)]
+        max_files: Option<u64>,
     },
     /// In-memory micro benchmark of the row parsers on the first `rows` rows of
     /// a source file (min of 3 repeats, CPU seconds): old `parse_book`,
@@ -493,6 +564,95 @@ fn bench_parse(input: &Path, rows: usize, skip: usize) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
+        Command::PublishBench {
+            stage_root,
+            target_root,
+            threads,
+            files_per_run,
+        } => {
+            ensure!(
+                threads.iter().all(|t| (1..=limits::IO_THREADS).contains(t)),
+                "thread counts must be 1..={}",
+                limits::IO_THREADS
+            );
+            let file_name = Params::new(250, 1800)?.file_name();
+            let mut staged = l2_deliver::scan_staged(&stage_root, &file_name)?;
+            ensure!(
+                staged.len() >= threads.len() * files_per_run,
+                "{} staged files are not enough for {} runs of {files_per_run}",
+                staged.len(),
+                threads.len()
+            );
+            // interleave so that every run sees the same mix of big and small files
+            staged.sort_by(|a, b| a.part.path.cmp(&b.part.path));
+            let runs = threads.len();
+            for (k, t) in threads.iter().enumerate() {
+                let subset: Vec<_> = staged
+                    .iter()
+                    .skip(k)
+                    .step_by(runs)
+                    .take(files_per_run)
+                    .cloned()
+                    .collect();
+                let label = format!("run{k}_t{t}");
+                let r = l2_deliver::bench_publish(&subset, &target_root, &label, *t);
+                println!("{r}");
+            }
+            Ok(())
+        }
+        Command::Deliver {
+            db_root,
+            stream_dbs,
+            from,
+            to,
+            exchange_map,
+            exchange_conflicts,
+            exchanges,
+            target_root,
+            staging,
+            freq_ms,
+            session_gap_s,
+            extract_workers,
+            publish_threads,
+            batch_files,
+            cache_mb,
+            progress,
+            status_addr,
+            no_gate,
+            dry_run,
+            max_files,
+        } => {
+            let source = match (db_root, stream_dbs.is_empty()) {
+                (Some(r), true) => l2_deliver::Source::DayDbs(r),
+                (None, false) => l2_deliver::Source::Streams(stream_dbs),
+                _ => bail!("give either --db-root (day databases) or --stream-dbs"),
+            };
+            let cfg = l2_deliver::DeliverConfig {
+                source,
+                from: day_number(&from)?,
+                to: day_number(&to)?,
+                exchange_of: Arc::new(l2_deliver::load_exchange_map(&exchange_map)?),
+                exchanges: exchanges.into_iter().collect(),
+                conflicts: match &exchange_conflicts {
+                    Some(f) => l2_deliver::load_exchange_map(f)?,
+                    None => BTreeMap::new(),
+                },
+                staging,
+                target_root,
+                params: Params::new(freq_ms, session_gap_s)?,
+                extract_workers,
+                publish_threads,
+                batch_files,
+                cache_mb,
+                progress,
+                status_addr: (!no_gate).then_some(status_addr),
+                dry_run,
+                max_files,
+            };
+            let summary = l2_deliver::run_deliver(cfg)?;
+            println!("{summary}");
+            Ok(())
+        }
         Command::BenchParse { input, rows, skip } => bench_parse(&input, rows, skip),
         Command::Profile {
             input,
