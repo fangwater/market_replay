@@ -27,6 +27,9 @@ use std::{
 };
 
 const ROOT: &str = "/mnt/nfs/30.100_cta_data/lseg";
+/// Local (never on the share), independent of `--work`, so that every writer on this host
+/// meets in the same lock file for a given catalog.
+const LOCK_DIR: &str = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/catalog_lock";
 const WORK: &str = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/lseg_native_klines_20261112";
 /// Written by `ib_kline_export` after every run (one entry per published RIC).
 const IB_MANIFEST: &str =
@@ -234,14 +237,14 @@ fn publish_sqlite(local: &Path, output: &Path) -> Result<()> {
 /// Exclusive, non-blocking advisory lock per catalog file: `build`, `ib-sync` and `l2-sync` all
 /// copy the file, modify the copy and replace the original, so two of them must never overlap.
 /// Held until the returned file is dropped. (The lock does not stop a binary without it.)
-fn lock_catalog(work: &Path, output: &Path) -> Result<File> {
-    fs::create_dir_all(work)?;
+fn lock_catalog(lock_dir: &Path, output: &Path) -> Result<File> {
+    fs::create_dir_all(lock_dir)?;
     let name: String = output
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let path = work.join(format!("catalog_writer{name}.lock"));
+    let path = lock_dir.join(format!("catalog_writer{name}.lock"));
     let file = File::create(&path)?;
     if let Err(e) = file.try_lock() {
         anyhow::bail!(
@@ -258,7 +261,7 @@ pub async fn ib_sync(a: IbSync) -> Result<()> {
         .database
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
-    let _lock = lock_catalog(&a.work, &output)?;
+    let _lock = lock_catalog(Path::new(LOCK_DIR), &output)?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_ib_sync.sqlite.partial");
     fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
@@ -669,7 +672,7 @@ pub async fn build(a: Build) -> Result<()> {
         !(a.year.is_some() || a.product.is_some()) || a.output.is_some(),
         "filtered builds require a separate --output"
     );
-    let _lock = lock_catalog(&a.work, &output)?;
+    let _lock = lock_catalog(Path::new(LOCK_DIR), &output)?;
     let cfg = Config {
         project: a.project.clone(),
         plan: a.plan.clone(),
@@ -1101,7 +1104,7 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
         .database
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
-    let _lock = lock_catalog(&a.work, &output)?;
+    let _lock = lock_catalog(Path::new(LOCK_DIR), &output)?;
     let found = l2_walk(&a.root, &a.file_name)?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_l2_sync.sqlite.partial");
