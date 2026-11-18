@@ -215,4 +215,5 @@
   - TAS（`normalised`）、Normalized LL2、Raw LL2 和采购目录里的 `raw` 是不同的源，不能混称。生产 RocksDB 只读。
   - `kline.parquet` 只有这 10 列：`ric, ts_utc_ns, open, high, low, close, volume, trade_count, is_ffill, status`。`status` 的取值是 TRADING / SCHEDULED_CLOSED / HALTED / PARTIAL / UNKNOWN。
   - 改撤按 `correction_policy_version=1` 处理，冲销在原生引擎内完成（见证库 `artifacts/tas_trade_witnesses_20261110`，见 `docs/lseg/tas_trade_revisions.md`）。原 237 个 RIC 没有见证库时拒绝重算；比对窗口外的原 Python 文件不改。
+- **L2（Normalized LL2）洗库：** 2025 + 2026（到 2026-11-12）的全部品种已洗进 RocksDB，在 `/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_db/`（周期包各一个库 `_stream/{p2025,s2025,p2026h1}`，日包每个 UTC 日一个库，共约 924 GB；不进 NFS 交付盘）。完成报告在 `runtime/l2_backfill/report.json`。用 `lseg_l2_slice extract-rics`/`extract` 按需要的频率提取切片（不再重新解压）。用法、校验和延伸方法见 [docs/lseg/l2_slice.md](docs/lseg/l2_slice.md)「全量洗库」。
 - **IB：** 来源是 MySQL `ib_data.minute_data`，只做纯导出，用于对比："有多少切多少"，不补、不改、不对齐。

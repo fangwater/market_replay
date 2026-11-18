@@ -286,3 +286,45 @@ lseg_l2_slice wash --products <品种,…> --days 2026-11-12,2026-11-13
 lseg_l2_slice extract --out-root /mnt/hdd-raid5-72t/liang_torch/lseg_data/l2_parquet_trial \
   --exchange-map /tmp/ric_exchange.tsv --products <品种,…> --days 2026-11-12,2026-11-13
 ```
+
+## 全量洗库：2025 + 2026（2026-11-18 完成）
+
+把 Normalized LL2 的**全部品种**洗进 RocksDB，之后任意频率都从库里提取，不再重新解压。完成标志是 `runtime/l2_backfill/report.json`（`complete: true`）。
+
+**位置和覆盖**（`/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_db/`，共 923.7 GB，是压缩包 2,306 GB 的 0.40 倍）：
+
+| 库 | 来源 | 源行数 | RIC | 时间 | 压缩包 → 库 |
+| --- | --- | --- | --- | --- | --- |
+| `_stream/p2025` | 2025 原始周期包，3 个文件 | 236.4 亿 | 1,495 | 2025-01-01 ~ 12-31 | 283.9 → 116.9 GB |
+| `_stream/s2025` | 2025 补充包（`merged-Data.csv.gz`） | 90.4 亿 | 44 | 2025-01-01 ~ 12-31 | 96.8 → 44.2 GB |
+| `_stream/p2026h1` | 2026 上半年周期包，9 个文件 | 969.5 亿 | 2,356 | 2026-01-01 ~ 05-31 | 883.2 → 383.0 GB |
+| `YYYYMMDD`（每个 UTC 日一个库） | 2026-06-01 ~ 11-12 的日包，全部 120 个品种 | 约 740 亿 | — | — | 约 1,042 → 379.6 GB |
+
+- 补充包只有 44 个 RIC 有数据（输入列表是 71 个），其余是源端版权抑制，不是漏洗。
+- 周期包的每个文件是一整条 gzip 流、按 RIC 再按时间排序，所以**一个 RIC 可以横跨两个文件**（ESH26 在 `p2026h1` 的第 0、1 个文件之间，GCV26 在第 1、2 个之间）。每个周期包是一个库，文件按顺序当一条流读入。
+- 覆盖到 2026-11-12。源端的缺口（远端没有的文件）记在 `runtime/l2_backfill/source_gaps.json`，共 374 个，没有 `.part` 未下完的。
+
+**怎么跑的**：`runtime/l2_backfill/run_backfill.sh`，即
+
+```bash
+nice -n 10 <bin>/lseg_l2_slice backfill --workers 8 --producers 4 --segment-mib 512 \
+  --progress <root>/progress.json --gaps <root>/source_gaps.json
+```
+
+- 每个单元（一个周期包，或一个品种日）洗完才写完成标记，再跑一次会跳过已完成的单元。
+- 开始前和每个新单元前查服务器的 `/api/admin/status`：有任务在跑，或 10 分钟内有定时任务要开始（`cn-daily`、`ib-kline-daily`、`lseg-daily`、`cn-reference-daily`）就暂停，不和日更任务并发。
+- 总共 19,264 个单元，约 11 小时（含暂停）；8 个线程，内存约 8–12 GB，没有错误。
+- 二进制是从固定位置的副本运行的，不要直接用构建目录里的。
+
+**校验**（证据在 `runtime/l2_backfill/`：`report.json`、`spotcheck.jsonl`、`boundary_*.jsonl`）：
+
+- 10 个 RIC 日的独立抽查（`scripts/lseg/verify_l2_ricday.py`，另一套 numpy 代码按源 csv.gz 重算 250 ms 切片，和库里提取的逐点比较时间点、最后更新时间、锚点、60 个盘口字段）：2025 年 5 个（原始包 3 个文件、补充包、一个后期日），2026 年 5 个（上半年包 3 个文件、2 个日包含 06-01 衔接日），**全部 0 不一致**。
+- 2 个**横跨两个文件的 RIC 日**：ESH26 2026-02-10（1,006 万源行 → 24.5 万行切片）、GCV26 2026-02-13（167 万源行 → 12.4 万行切片），**0 不一致**，缝上没有多余的锚点行。
+- 衔接处没有重叠：2025/2026 年交界、周期包与 2026-06-01 日包交界。
+- **没有做的**：从库里把全部更新条数读回来逐一核对（没有这样的读取接口）；2025 原始包和补充包之间相同行的重复个数没有记录（两者在不同的库里，运行中没有冲突报错）。
+
+**报告**：`scripts/lseg/l2_backfill_report.py --root <runtime/l2_backfill> --db-root <runtime/l2_db>`，只有真的完成才写 `report.json`，否则写 `report.incomplete.json`。
+
+**怎么用这些库提取切片**：`lseg_l2_slice extract-rics --db-dirs <库1,库2,…>`（按时间顺序给出，周期包和日库可以混用）`--rics <RIC,…> --days <日期,…>`，频率用 `--freq-ms`（默认 250），输出到 `--out-root`。
+
+**怎么延伸**：新日包用 `scripts/lseg/fetch_normalised_ll2.sh` 下载，再用同一条 `backfill` 命令加大 `--daily-end`，已完成的单元自动跳过。2024 年包可以用 `--stream p2024=<各文件,逗号分隔> --no-daily` 洗到 `_stream/p2024`。
