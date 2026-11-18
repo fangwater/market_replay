@@ -1,9 +1,12 @@
 pub mod catalog;
+pub mod l2_backfill;
 pub mod l2_batch;
 pub mod l2_db;
 pub mod l2_extract;
 pub mod l2_layout;
+pub mod l2_report;
 pub mod l2_slice;
+pub mod l2_stream;
 pub mod limits;
 pub mod merge;
 pub mod native_kline;

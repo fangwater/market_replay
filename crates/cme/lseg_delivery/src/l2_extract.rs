@@ -167,3 +167,82 @@ pub fn run_extract(cfg: &ExtractConfig, jobs: Vec<(String, String)>) -> Result<E
         failed: failed.into_inner().expect("failed lock"),
     })
 }
+
+/// Extract mode for explicit RICs (no completion markers needed): every
+/// (RIC, UTC day) is one task; `db_dirs` are opened read-only and searched in
+/// the given (chronological) order.
+pub fn run_extract_rics(
+    cfg: &ExtractConfig,
+    db_dirs: &[PathBuf],
+    jobs: Vec<(String, String)>,
+) -> Result<ExtractReport> {
+    ensure!(cfg.workers >= 1, "workers must be >= 1");
+    let cache = SharedCache::new(Tuning::new(cfg.cache_mb, 64));
+    let mut dbs: Vec<Arc<DB>> = Vec::new();
+    for d in db_dirs {
+        ensure!(
+            d.join("CURRENT").exists(),
+            "{} is not a database",
+            d.display()
+        );
+        dbs.push(Arc::new(l2_db::open_read(d, &cache)?));
+    }
+    let results: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+    let failed: Mutex<Option<String>> = Mutex::new(None);
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..cfg.workers {
+            scope.spawn(|| loop {
+                if failed.lock().expect("failed lock").is_some() {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((ric, day)) = jobs.get(i) else { break };
+                let r = (|| -> Result<Value> {
+                    let layout = Layout {
+                        out_root: cfg.out_root.clone(),
+                        exchange_of: Arc::clone(&cfg.exchange_of),
+                        default_exchange: cfg.default_exchange.clone(),
+                        day: day.clone(),
+                        force: cfg.force,
+                    };
+                    let dn = day_number(day)?;
+                    let mut sink = ParquetSink::new(&layout, cfg.params, dn * DAY_NS);
+                    let refs: Vec<&DB> = dbs.iter().map(|d| d.as_ref()).collect();
+                    let stats = l2_db::extract_ric_day(&refs, ric, dn, &cfg.params, &mut sink)?;
+                    let mut counted = 0u64;
+                    for d in &refs {
+                        counted += l2_db::count_updates(
+                            d,
+                            ric,
+                            (dn * 86_400) as u32,
+                            ((dn + 1) * 86_400) as u32,
+                        )?;
+                    }
+                    ensure!(
+                        sink.skipped.len() == 1 || stats.updates == counted,
+                        "{ric} {day}: {} updates decoded, {counted} counted in the keys",
+                        stats.updates
+                    );
+                    Ok(json!({"ric": ric, "day": day, "updates": stats.updates,
+                              "emitted_rows": stats.emitted, "anchor_rows": stats.anchors,
+                              "written": sink.outputs.len(), "kept_existing": sink.skipped.len()}))
+                })()
+                .with_context(|| format!("{ric} {day}"));
+                match r {
+                    Ok(v) => results.lock().expect("results lock").push(v),
+                    Err(e) => {
+                        failed
+                            .lock()
+                            .expect("failed lock")
+                            .get_or_insert(format!("{e:#}"));
+                    }
+                }
+            });
+        }
+    });
+    Ok(ExtractReport {
+        results: results.into_inner().expect("results lock"),
+        failed: failed.into_inner().expect("failed lock"),
+    })
+}
