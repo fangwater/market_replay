@@ -55,6 +55,14 @@ stop_timeout_s = 10
 env = { EXCHANGE_MCP_HOST = "0.0.0.0", EXCHANGE_MCP_PORT = "8780", EXCHANGE_MCP_ALLOWED_HOSTS = "172.16.30.38", PYTHONUNBUFFERED = "1", TZ = "UTC" }
 
 [[service]]
+name = "cn-minute-cache"
+description = "国内全市场 ZMQ 已闭合 baseline_1min 缓存"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-minute-cache"
+args = ["--config", "/home/fanghaizhou/market_replay/config/cn_kline_server.toml"]
+stop_timeout_s = 10
+
+[[service]]
 name = "mdl-replay"
 description = "MDL 单日回放（ZMQ :13100，按需启用）"
 enabled = false

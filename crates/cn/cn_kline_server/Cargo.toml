@@ -8,6 +8,10 @@ description = "gRPC (cn_market.v1) minute bars for CN futures read from baseline
 name = "cn-kline-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "cn-minute-cache"
+path = "src/minute_cache_main.rs"
+
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
@@ -21,6 +25,7 @@ cn_futures_roll = { path = "../cn_futures_roll" }
 cn_market_proto = { path = "../../proto/cn_market_proto" }
 mdl_replay = { path = "../../mdl_replay" }
 prost = "0.14"
+rocksdb = { version = "0.25", default-features = false, features = ["lz4"] }
 csv = "1.3"
 reqwest = { version = "0.12.19", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }

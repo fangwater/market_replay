@@ -53,6 +53,7 @@
 
 - **对外接口：** gRPC `cn_market.v1` 在 :18312；HTTP 在 :18313，提供主力合约 API、管理 API `/api/admin/*`，以及数据看板“数据处理进度与品种查询”（`crates/web/data_dashboard`，页面在 `/`，接口 `/api/dashboard/*`，配置 `config/data_dashboard.toml`；`/admin` 跳到看板的“服务与任务”页）。看板严格只读：catalog.sqlite 以 read_only+immutable 打开，PostgreSQL 只走 `default_transaction_read_only` 的 psql，NFS 只做少量 readdir，后台一个任务按固定间隔刷新。页面顶部的“任务进度”表只回答“跑完了没有”（任务、状态、数据到、最近一次结束、下次运行；状态取自 `/api/admin/status`，“数据到”取自各数据集已读取的进度，`size-thresholds-monthly` 另读阈值目录的月份目录列表），“换月”页只读 `/api/v1/dominant`（外加对当天换月品种的一次历史请求，用来取旧合约）；两者都没有新增访问类型。
 - **常驻服务：** 参考数据 API（:8765）、参考数据每日同步、CME 参考数据（:8770）、MCP（:8780），以及默认关闭的 `mdl-replay`，都是这个进程的子进程，退出后自动按退避重启。
+- **国内盘中分钟缓存：** `cn-minute-cache` 由 Market Replay 托管为独立子进程，消费六家交易所的公司 ZMQ 单腿期货行情，把闭合的 baseline_1min 按 Protobuf 写到 NVMe RocksDB。主进程用只读 secondary 从 `GetMinuteBars` 补齐连续缺口。保留一个原生交易日，盘后归档成功后自动清理。见 [盘中分钟缓存](docs/cn_intraday_cache.md)。
 - **每日任务：** `cn-daily`（上海 16:30）和 `ib-kline-daily`（上海 09:30）由它按时排程，走同一个队列依次执行，各自发钉钉。以后新的任务（例如 lseg-daily）只在 `config/market_replay_server.toml` 里加 `[[job]]`，**不得再单独注册 PM2 进程**。
 - **生产二进制：** 只从 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin` 运行，由 `scripts/deploy-release.sh <commit>` 从干净的 checkout 构建。不得让生产配置指向 `target/release`，因为 worktree 和开发构建共用这个目录。
 - 切换前的 PM2 进程列表保存在 `/mnt/nvme-raid0-28t/fanghaizhou/pm2_jlist_before_unify_20261116.json`（权限 600，内含环境变量）。各项目自己的 `ecosystem*.cjs` 和 `pm2-start.sh` 已删除，以免重复启动。

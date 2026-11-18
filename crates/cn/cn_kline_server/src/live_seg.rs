@@ -77,6 +77,37 @@ impl Row {
         }
     }
 
+    pub(crate) fn from_mdl(q: cn_futures_core::mdl::MdlQuote<'_>) -> Result<Self> {
+        let mut v = [f64::NAN; 24];
+        let quantity = |n: u64| {
+            if n == cn_futures_core::mdl::UNKNOWN_QUANTITY {
+                f64::NAN
+            } else {
+                n as f64
+            }
+        };
+        v[0] = quantity(q.volume);
+        v[1] = q.turnover;
+        v[2] = q.last_price;
+        v[3] = q.open_interest;
+        for i in 0..5 {
+            v[4 + i] = q.bid[i].price;
+            v[9 + i] = quantity(q.bid[i].quantity);
+            v[14 + i] = q.ask[i].price;
+            v[19 + i] = quantity(q.ask[i].quantity);
+        }
+        Ok(Self {
+            ts_ns: q
+                .exchange_ts_us
+                .checked_mul(1000)
+                .context("MDL timestamp range")?,
+            seq: i64::try_from(q.source_sequence)?,
+            source_row: 0,
+            file_order: 0,
+            v,
+        })
+    }
+
     pub fn snapshot(&self, instrument: &str, day: NaiveDate) -> Snapshot {
         let lv = |o: usize| -> [Option<f64>; 5] { std::array::from_fn(|i| opt(self.v[o + i])) };
         Snapshot {

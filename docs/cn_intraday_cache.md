@@ -1,13 +1,11 @@
-# SN 盘中缓存
+# 国内期货盘中分钟缓存
 
-最后更新：2026-11-16
+`cn-minute-cache` 是 Market Replay 托管的独立 Rust 进程。它订阅公司 ZMQ 的六条单腿期货行情频道，按交易所、原生合约和原生交易日处理累计成交与五档行情。已闭合的 `baseline_1min` 使用 Protobuf 按分钟写进 NVMe RocksDB，当前分钟的原始行情保存在进程内存。时段、乘数、tick 和分桶阈值与 `GetMinuteBars` 共用来源。
 
-`market-replay-server` 内的 CN gRPC 服务同时运行 SDK-free 的 ZMQ 采集和延迟 MDL 落盘导入，不另建 PM2 进程。配置在 `config/cn_kline_server.toml` 的 `[intraday]`，当前只缓存上期所 SN 全部交割月；SQLite WAL/FULL 存储在 NVMe，保留 7 个自然日。NFS 始终只读。
+Market Replay 通过只读 RocksDB secondary 读取缓存。常规查询直接走 `GetMinuteBars`。盘中 MDL 数据优先，缓存用最后一个已闭合且逐字段相同的分钟接上后续数据。有完整开盘覆盖时，缓存也能提供这个交易日的连续前缀。跨休市按参考交易时段检查。断线换代或缺失盘中分钟会停止向后补齐，等 MDL 覆盖后再建立接续点。
 
-`StreamIntradayFrames` 接收交易所、原生合约、交易日和已覆盖历史的结束时间，按原生 `ActionDay/SeqNo` 返回原始 MDL 帧。批次有 cursor、覆盖证明和明确的 final marker；读取固定 SQLite 快照，最多 200,000 帧、256 帧/批、2 个并发读者。无 final marker 不得切到实时。
+同一合约的重叠闭合分钟逐字段比较。服务日志的 `minute_cache_comparison` 记录相符数、差异数、单边缺失数和首次差异时间。
 
-缓存连接早于历史截止时点，或延迟落盘已从历史截止时点完整导入并与当前连续 ZMQ 连接中的新鲜快照逐字段一致，才声明 ready。原生身份重复只存一次，内容冲突、源文件截断或已导入尾部变动会阻止覆盖证明。重启/重连都会换 epoch，旧 overlap 不能证明新连接的完整性；需等待落盘追上新连接。源目录按自然日，归属按 TradDay；不把文件当前长度当作已完成的整交易日。
+配置在 `config/cn_kline_server.toml` 的 `[minute_cache]`。RocksDB 只保留一个原生交易日，自然日零点按交易所 `TradDay` 归属。盘后 `cn-daily` 确认该日归档后，采集进程在下一轮维护删除缓存并回收空间。下一交易日开始写入时，旧交易日退出可读范围。
 
-CTA 先订阅实时并缓冲，再通过 gRPC 回放，找到同一原生快照后去重切换。历史/缓存只重建因子，不回补过去仓位。缺口仍未被落盘覆盖时保留事实仓位并重试，不能保证断线后立即恢复。
-
-验证：`cargo test --release -p cn_kline_server --lib`；`cargo clippy --release -p cn_kline_server --all-targets -- -D warnings`。测试覆盖非零开盘、重复与身份冲突、半行追加、重连及过期 overlap、固定快照 final/cursor。
+旧版 `[intraday]` 配置对应上期所 SN 原始帧回放服务。启用该配置的环境可继续使用 `StreamIntradayFrames`。

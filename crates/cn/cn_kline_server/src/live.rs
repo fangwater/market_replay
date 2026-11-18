@@ -287,6 +287,26 @@ impl Live {
         }
     }
 
+    pub(crate) fn in_session(&self, exchange: &str, product: &str, ts: i64) -> bool {
+        reference_venue(exchange)
+            .and_then(|venue| self.sessions.matcher(venue, product))
+            .is_ok_and(|matcher| matcher.contains_ts(ts))
+    }
+
+    pub(crate) fn first_session_minute(&self, exchange: &str, product: &str, ts: i64) -> bool {
+        let Ok(matcher) =
+            reference_venue(exchange).and_then(|venue| self.sessions.matcher(venue, product))
+        else {
+            return false;
+        };
+        let windows = matcher.windows();
+        let first = windows
+            .iter()
+            .map(|&(start, _)| start)
+            .min_by_key(|&start| (start + 4 * 3600) % 86400);
+        first.is_some_and(|s| (ts + 8 * 3600).rem_euclid(86400) as u32 == s)
+    }
+
     pub fn serves(&self, product: &str) -> bool {
         self.cfg.products.is_empty()
             || self

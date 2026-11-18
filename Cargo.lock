@@ -914,6 +914,7 @@ dependencies = [
  "mdl_replay",
  "prost",
  "reqwest",
+ "rocksdb",
  "serde",
  "serde_json",
  "sha2 0.10.9",

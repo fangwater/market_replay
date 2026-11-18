@@ -31,6 +31,7 @@ pub mod dominant;
 pub mod intraday;
 pub mod live;
 pub mod live_seg;
+pub mod minute_cache;
 pub mod replay_api;
 pub mod selection;
 pub mod size_thr;
@@ -58,6 +59,8 @@ pub struct Config {
     pub roll_dir: Option<PathBuf>,
     #[serde(default)]
     pub intraday: Option<intraday::Config>,
+    #[serde(default)]
+    pub minute_cache: Option<minute_cache::Config>,
     /// In-progress day rebuilt from the NFS MDL files.
     #[serde(default)]
     pub live: Option<live::Config>,
@@ -285,6 +288,7 @@ struct Service {
     selection_slots: Arc<tokio::sync::Semaphore>,
     replay: Option<replay_api::ReplayService>,
     intraday: Option<Arc<intraday::Cache>>,
+    minute_cache: Option<minute_cache::Reader>,
     live: Option<Arc<live::Live>>,
     cfg: Config,
     meta: Arc<RwLock<Metadata>>,
@@ -499,6 +503,7 @@ impl Service {
         }
         // In-progress day: rebuilt from the NFS MDL files (see `live`).
         let mut live_state = (0u32, 0i64);
+        let mut unavailable = None;
         if let Some(live) = self.live.as_ref().filter(|l| l.serves(&product)) {
             let last_done = self.latest_trading_day();
             let want_of = |id: &str, td: u32| canonical(id, td) == canonical(contract, td);
@@ -524,6 +529,7 @@ impl Service {
                             )?);
                         }
                         let tick = out_contract.as_ref().expect("set above").price_tick;
+                        let mut live_bars = Vec::new();
                         for r in &lb.minutes {
                             if let Some(bar) = make_bar(
                                 r,
@@ -531,22 +537,100 @@ impl Service {
                                 multiplier,
                                 tick,
                                 true,
-                                req.include_empty_minutes,
-                                window,
+                                true,
+                                None,
                                 live.has_size_thresholds(&product, r.ts),
                             )? {
-                                bars.push(bar);
+                                live_bars.push(bar);
                             }
                         }
+                        if let Some(cache) = &self.minute_cache {
+                            match cache.bars(td, exchange, &lb.native_code, &self.cfg.session_as_of)
+                            {
+                                Ok(cached) if !cached.is_empty() => {
+                                    let check =
+                                        minute_cache::compare(&live_bars, &cached, lb.through_ms);
+                                    if check.first_difference_ms.is_some() {
+                                        eprintln!(
+                                            "{}",
+                                            serde_json::json!({
+                                                "event": "minute_cache_comparison", "exchange": venue,
+                                                "contract": lb.native_code, "trading_day": td,
+                                                "matched": check.matched, "different": check.different,
+                                                "cache_only": check.cache_only, "mdl_only": check.mdl_only,
+                                                "first_difference_ms": check.first_difference_ms,
+                                            })
+                                        );
+                                    }
+                                    live_state.1 = minute_cache::extend(
+                                        &mut live_bars,
+                                        cached,
+                                        lb.through_ms,
+                                        |ms| live.in_session(dir_name, &product, ms / 1000),
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(error) => eprintln!(
+                                    "cn-market: minute cache {} unavailable: {error:#}",
+                                    lb.native_code
+                                ),
+                            }
+                        }
+                        bars.extend(live_bars.into_iter().filter(|bar| {
+                            (req.include_empty_minutes || bar.volume_lots > 0.)
+                                && window.is_none_or(|(a, b)| (a..=b).contains(&bar.open_time_ms))
+                        }));
                     }
                 }
                 Ok(None) => {}
-                Err(e) if req_day.is_some_and(|d| d > last_done) => {
+                Err(e) => unavailable = Some(e),
+            }
+            if live_state.0 == 0 {
+                if let Some(cache) = &self.minute_cache {
+                    match cache.current(exchange, contract, &self.cfg.session_as_of) {
+                        Ok(Some((td, native, cached)))
+                            if td > last_done && req_day.is_none_or(|d| d == td) =>
+                        {
+                            if let Some((through, minutes)) = minute_cache::from_open(
+                                cached,
+                                |ms| live.first_session_minute(dir_name, &product, ms / 1000),
+                                |ms| live.in_session(dir_name, &product, ms / 1000),
+                            ) {
+                                if out_contract.is_none() {
+                                    out_contract = Some(make_contract(
+                                        &meta,
+                                        exchange,
+                                        venue,
+                                        &product,
+                                        &native,
+                                        td,
+                                        &canonical(contract, td),
+                                        multiplier,
+                                    )?);
+                                }
+                                live_state = (td, through);
+                                bars.extend(minutes.into_iter().filter(|bar| {
+                                    (req.include_empty_minutes || bar.volume_lots > 0.)
+                                        && window.is_none_or(|(a, b)| {
+                                            (a..=b).contains(&bar.open_time_ms)
+                                        })
+                                }));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("cn-market: minute cache {contract} unavailable: {error:#}")
+                        }
+                    }
+                }
+            }
+            if let Some(error) = unavailable {
+                if live_state.0 == 0 && req_day.is_some_and(|d| d > last_done) {
                     return Err(Status::unavailable(format!(
-                        "in-progress day unavailable: {e:#}"
+                        "in-progress day unavailable: {error:#}"
                     )));
                 }
-                Err(e) => eprintln!("cn-market: live day failed: {e:#}"),
+                eprintln!("cn-market: live day failed: {error:#}");
             }
         }
         bars.sort_by_key(|b| b.open_time_ms);
@@ -1005,6 +1089,11 @@ pub async fn components(cfg: Config) -> Result<Components> {
         }
         None => None,
     };
+    let minute_cache = cfg
+        .minute_cache
+        .clone()
+        .map(minute_cache::Reader::new)
+        .transpose()?;
     let grpc = CnFuturesMarketServer::new(Grpc(Arc::new(Service {
         selection_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         replay: cfg.replay.clone().map(replay_api::ReplayService::new),
@@ -1012,6 +1101,7 @@ pub async fn components(cfg: Config) -> Result<Components> {
         cfg,
         meta,
         intraday,
+        minute_cache,
     })));
     Ok(Components {
         grpc,
@@ -1126,6 +1216,7 @@ mod tests {
                 selection_slots: Arc::new(tokio::sync::Semaphore::new(2)),
                 replay: None,
                 intraday: None,
+                minute_cache: None,
                 live,
                 cfg,
                 meta,

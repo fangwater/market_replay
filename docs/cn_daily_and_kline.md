@@ -66,7 +66,7 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 
 ## 盘中补缺：当天 bar 直接从 NFS MDL 重算（2026-11-17）
 
-`cn-daily` 16:30 才产出当天 parquet。盘中 `GetMinuteBars` 现在可以补上"最后一个已归档交易日之后"的当天 bar，只读 NFS，不用 SQLite，也不接 ZMQ。ZMQ 仍然只管实盘；这条路径用来补 ZMQ 写盘失败或服务重启造成的缺口，以及给实盘因子起算时取历史（ZMQ 只需缓存一小段，等 MDL 追上后从 gRPC 取，再按时间接上）。
+`cn-daily` 16:30 才产出当天 parquet。盘中 `GetMinuteBars` 返回最近归档日之后的当天 bar。服务从 NFS MDL 计算前缀，并用本机 ZMQ 分钟缓存补上经过核对的连续缺口，供实盘策略初始化或恢复。[盘中分钟缓存](cn_intraday_cache.md)
 
 - **配置：** `config/cn_kline_server.toml` 的 `[live]`：`msg_root`；`products`（`["*"]` 或空表示全部六个交易所的全部品种，也可以只列几个）；`min_refresh_ms`（请求触发刷新的最小间隔，默认 2000）；`background_s`（后台刷新周期，默认 5，0 为关闭）；`lookback_days`（默认 16）；`segment_dir`（见下，不配置则整天都留在内存里，和以前一样）、`finalize_margin_s`、`tail_quiet_s`、`step_mb`、`manifest_every_s`。不配置 `[live]` 则行为和以前完全一样。收口在后台任务里做，`background_s = 0` 时不收口。
 - **做法：** 用 `source::read_tail` 只读 NFS 文件里新增的完整行（残行留到下次），只保留配置品种的快照（内存里，重启后重读）。每个交易所各自加锁，另有后台任务每 `background_s` 秒追一次文件，所以请求基本都命中已追平的状态。每次请求对被查合约重跑盘后导出的同一条链：`process_instrument` → `synthesize_minutes` → `fill_session_minutes_with_twap` → 按 `session_as_of` 的时段快照裁剪。当天由所在交易所最新目录最后一行的 `TradDay` 决定，必须大于 `last_done`；`cn-daily` 处理完这一天后自动回到读 parquet。
@@ -87,7 +87,7 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
   - **预热：** 无 manifest 的首次装载约 90 秒（分步读，落盘了 625 个段文件）；重启读 manifest 后约 45 秒（只重放检查点之后的范围，此时上午段还没收口所以重放范围较大，收口后更短）。
 - **响应：**
   - 来自 NFS 的 bar 带 `provisional = true`，其余字段和 parquet 同口径。`size_buckets` 现在有了：配置 `[live] size_threshold_dir` 后，实时成交按上一个完整月的主力逐日阈值分档（见下"实时大小分类阈值"）；该品种没有阈值、或某分钟有成交却没有被分档（例如落盘时文件还不存在）时，`size_buckets` 不设值，不用 0 冒充。
-  - `DataState.live_trading_day` 是当前补缺的交易日，`live_through_ms` 是 NFS 已追到的最新快照时间（UTC 毫秒）。`open_time + 60s <= live_through_ms` 的 bar 才算走完。NFS 是整点附近分批更新，所以这个时间会滞后于 ZMQ，客户端按它决定从哪里衔接。
+  - `DataState.live_trading_day` 是当前补缺的交易日，`live_through_ms` 是 NFS 已追到的最新快照时间（UTC 毫秒）。`open_time + 60s <= live_through_ms` 的 bar 才算走完。NFS 在整点附近分批更新。`GetMinuteBars` 接上缓存时将响应内的水位推进到最终返回的连续分钟的结束时间。`GetDataState` 继续报告 NFS 的交易所水位。
 - **验证：** 用 `examples/live_check` 在已收盘的 20261116 和 20261113 上重建 SN，与生产 parquet 比对：共 11,128 根，成交、成交额、OHLC、twap、mid、买卖量逐值一致，缺失和多余都是 0（不做时段裁剪时会多出收盘快照那几分钟）。`examples/live_query` 查真实服务：首次请求读文件约 9 秒，之后约 46 毫秒。
 - **全品种实测（2026-11-17 10:40）：** 除 SN 外，另用 `live_check` 对 20261116 的 IF（中金所）、M（大商所）、CF（郑商所）、SC（能源中心）、SI（广期所）重建，共 19,590 根，与 parquet 逐值一致，缺失和多余为 0。全品种服务启动后约 70 秒预热完成（读六个交易所当天文件），之后每次请求 10–70 毫秒。内存随当天快照数线性增长。内存里每行快照用紧凑结构（24 个 f64 加两个整数，约 216 字节，缺失值用 NaN，合约名只作为表的键）存放，请求时才还原成 `Snapshot`；最初版本直接存 `Snapshot`（两个 String 加 24 个 `Option<f64>`，约 540 字节），同一时刻实测 9.05 GB，改后 3.84 GB，同一批合约的 bar 摘要逐一相同。启动时 `wait_reference_api` 先等参考数据 API 的 `/api/v1/health` 就绪（它是 Python 子进程，比主进程晚几秒），避免第一次取元数据时报 `Connection refused` 再等 5 秒重试。
 - **落盘延迟（2026-11-17）：** 最后一段（午休、收盘、夜盘收盘前的那一段）不再只靠 2 小时静默，而是用交易时段表证明：合约最后一行落在某个"后面至少隔 30 分钟才开盘"的连续时段末尾（`SessionMatcher::break_end`，10:15 的 15 分钟茶歇不算），文件已读到末尾，并且墙钟已过最后一行 `delay_s`（默认 600 秒），就落盘，切点取时段结束后 `tail_grace_s`（默认 300 秒），这样收盘后几秒写入的收盘快照仍归本段；之后再到的更早的行会被标为迟到并重建该交易所。2 小时静默规则保留作兜底。

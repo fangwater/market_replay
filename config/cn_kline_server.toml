@@ -9,12 +9,11 @@ metadata_refresh_s = 3600
 http_listen = "0.0.0.0:18313"
 roll_dir = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/roll/result"
 
-# Durable SN intraday raw cache, served by the existing gRPC server.
-[intraday]
-directory = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/intraday_cache"
-msg_root = "/mnt/nfs/30.3_tonglian_msg"
+# The supervised cn-minute-cache child writes closed ZMQ baseline minutes.
+[minute_cache]
+directory = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/zmq_baseline_1min"
+secondary_directory = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/zmq_baseline_1min_secondary"
 zmq_endpoint = "tcp://10.61.20.12:13005"
-retention_days = 7
 
 # In-progress trading day rebuilt from the NFS MDL files (no DB, no ZMQ), all products: fills
 # GetMinuteBars between the last archived day and what NFS has received.
