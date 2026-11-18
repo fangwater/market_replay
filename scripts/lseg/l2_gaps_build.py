@@ -37,6 +37,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--out")
 ap.add_argument("--reports", nargs="*", default=[])
 ap.add_argument("--packages-json")
+ap.add_argument("--inventory-json", help="l2_inventory_all_periods.json (per year: packages with GB, kind, RIC counts)")
+ap.add_argument("--main-glob", default="/mnt/hdd-raid5-72t/liang_torch/lseg_data/future/normalisedLL2/*/merged-Report.csv.gz")
 ap.add_argument("--problems")
 ap.add_argument("--years", default="2024,2025,2026")
 ap.add_argument("--threads", type=int, default=8)
@@ -110,8 +112,9 @@ reports = {}  # package -> {ric: (count, start, end)}
 paths = []
 for d in a.reports:
     paths += sorted(glob.glob(os.path.join(d, "*.Report.csv.gz")))
+paths += sorted(glob.glob(a.main_glob))  # the local main packages: name = their directory
 for p in paths:
-    name = os.path.basename(p)[: -len(".Report.csv.gz")]
+    name = os.path.basename(p)[: -len(".Report.csv.gz")] if p.endswith(".Report.csv.gz") else os.path.basename(os.path.dirname(p))
     rows = {}
     with gzip.open(p, "rt", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
@@ -233,29 +236,84 @@ if os.path.exists(a.out):
 db = sqlite3.connect(a.out)
 db.executescript("""
 CREATE TABLE l2_unfillable (
- ric TEXT NOT NULL, utc_year INTEGER NOT NULL, product TEXT NOT NULL, exchange_dir TEXT NOT NULL,
- tas_first_day TEXT, tas_last_day TEXT, tas_days INTEGER NOT NULL, l2_days INTEGER NOT NULL,
+ ric TEXT, utc_year INTEGER NOT NULL, product TEXT NOT NULL, exchange_dir TEXT,
+ tas_first_day TEXT, tas_last_day TEXT, tas_days INTEGER, l2_days INTEGER,
  l2_first_day TEXT, l2_last_day TEXT, kind TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT NOT NULL,
- checked_packages TEXT NOT NULL, checked_utc TEXT NOT NULL, PRIMARY KEY(ric, utc_year));
+ checked_packages TEXT NOT NULL, checked_utc TEXT NOT NULL, n_rics INTEGER);
+CREATE UNIQUE INDEX l2_unfillable_ric ON l2_unfillable(ric, utc_year) WHERE ric IS NOT NULL;
+CREATE UNIQUE INDEX l2_unfillable_prod ON l2_unfillable(product, utc_year) WHERE ric IS NULL;
 CREATE TABLE l2_package_inventory (
- package TEXT PRIMARY KEY, period TEXT, gb REAL, rics_with_data INTEGER, products INTEGER,
- washed_utc TEXT, delivered_rics_days INTEGER);
+ package TEXT PRIMARY KEY, period TEXT, kind TEXT, gb REAL, rics_with_data INTEGER, products INTEGER,
+ washed_utc TEXT, delivered_rics_days INTEGER, note TEXT);
+CREATE TABLE l2_year_summary (
+ utc_year INTEGER PRIMARY KEY, main_gb REAL, main_rics INTEGER, supplement_gb REAL, l2_rics_total INTEGER,
+ l2_products INTEGER, tas_products INTEGER, tas_products_without_l2 INTEGER, note TEXT);
 CREATE TABLE conventions (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE VIEW l2_unfillable_products AS
- SELECT product, utc_year, COUNT(*) rics, kind, GROUP_CONCAT(DISTINCT reason) reasons
+ SELECT product, utc_year, SUM(COALESCE(n_rics, 1)) rics, kind, GROUP_CONCAT(DISTINCT reason) reasons
  FROM l2_unfillable GROUP BY product, utc_year, kind;
 """)
 for r in rows:
-    db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-               r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(checked), now))
+    db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+               r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now))
 inv = json.load(open(a.packages_json)) if a.packages_json else {}
+allp = json.load(open(a.inventory_json)) if a.inventory_json else {}
+meta = {p["job"]: p for y in allp.values() for p in y["packages"]}
 for n in checked:
     rr = reports[n]
     rics = [k for k, v in rr.items() if v[0] > 0]
     pr = {prod_ex.get(k, ("?",))[0] for k in rics}
     inf = inv.get(n, {})
-    db.execute("insert into l2_package_inventory values (?,?,?,?,?,?,?)",
-               (n, "%s..%s" % pkg_years(n), inf.get("gb"), len(rics), len(pr), inf.get("washed_utc"), inf.get("delivered_rics_days")))
+    pre = pkg_years(n)[0][:4] < "2024"
+    note = "empty: no RIC with data" if not rics else ("not washed: inventory only (before 2024)" if pre else None)
+    db.execute("insert into l2_package_inventory values (?,?,?,?,?,?,?,?,?)",
+               (n, "%s..%s" % pkg_years(n), meta.get(n, {}).get("kind"), meta.get(n, {}).get("gb"), len(rics), len(pr),
+                None if pre else inf.get("washed_utc"), 0 if pre else inf.get("delivered_rics_days"), note))
+
+# products (and their TAS RIC counts) per UTC year before the window: nothing was washed there, so a product is
+# 'not_washed' when some package holds L2 for it and 'not_in_any_package' when none does
+early = collections.defaultdict(lambda: collections.defaultdict(set))
+for _, prod, ric, y, d in cat.execute("select source_year, product, ric, utc_year, directory from directories where utc_year < %d" % min(years)):
+    early[y][prod].add(ric)
+for y in sorted(early):
+    names = pkgs_for(y)
+    prod_pkgs = collections.defaultdict(lambda: collections.defaultdict(int))
+    for n in names:
+        for ric, v in reports[n].items():
+            if v[0] > 0:
+                prod_pkgs[prod_ex.get(ric, ("?",))[0]][n] += 1
+    for prod, rs in sorted(early[y].items()):
+        if prod in prod_pkgs:
+            kind, rs_ = "not_washed", "washed_nothing_before_2024"
+            ev = "L2 exists in " + "; ".join("%s (%d RICs)" % (n[:60], c) for n, c in sorted(prod_pkgs[prod].items()))
+        else:
+            kind, rs_ = "not_in_any_package", "not_in_any_package"
+            ev = "no RIC of the product has data in any of the %d packages of the year" % len(names)
+        db.execute("insert into l2_unfillable values (NULL,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?)",
+                   (y, prod, kind, rs_, ev, json.dumps(names), now, len(rs)))
+
+# per-year summary: packages/GB/RICs from the all-periods inventory; for the window years the products without L2
+# are recomputed from what is delivered (l2_directories); the inventory's number (no package at all) stays in the note
+for y in sorted(int(k) for k in allp):
+    x = allp[str(y)]
+    mg = sum(p["gb"] for p in x["packages"] if p["kind"] == "main")
+    sg = sum(p["gb"] for p in x["packages"] if p["kind"] != "main")
+    twl, note = x["tas_products_without_l2"], None
+    if y in years:
+        tp = collections.defaultdict(set)
+        for (ric, yy), (pr_, _) in tas.items():
+            if yy == y:
+                tp[pr_].add(ric)
+        dl = {prod_ex.get(r, ("?",))[0] for (r, yy) in l2 if yy == y}
+        twl = sum(1 for pr_ in tp if pr_ not in dl)
+        note = "delivered L2 products %d; inventory (no package at all, before washing the supplements): %d" % (len(dl), x["tas_products_without_l2"])
+    if x["tas_products"] == 0:
+        note = "TAS has no data in the catalog for this year (tas_products=0): nothing to compare against"
+    elif y < min(years):
+        note = "inventory only, nothing washed; tas_products_without_l2 = no package has the product"
+    db.execute("insert into l2_year_summary values (?,?,?,?,?,?,?,?,?)",
+               (y, round(mg, 1), sum(p["rics_with_data"] for p in x["packages"] if p["kind"] == "main"), round(sg, 1),
+                x["rics_with_data_total"], x["l2_products_mapped"], x["tas_products"], twl, note))
 conv = {
     "built_utc": now, "years": a.years, "tas_source": "catalog.sqlite directories (RIC-years with TAS directories) + day directories listed on NFS",
     "l2_source": "catalog.sqlite l2_directories (lseg_catalog l2-sync); last L2 day %s" % LAST_L2_DAY,
