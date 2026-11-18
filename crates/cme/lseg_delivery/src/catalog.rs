@@ -231,11 +231,34 @@ fn publish_sqlite(local: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Exclusive, non-blocking advisory lock per catalog file: `build`, `ib-sync` and `l2-sync` all
+/// copy the file, modify the copy and replace the original, so two of them must never overlap.
+/// Held until the returned file is dropped. (The lock does not stop a binary without it.)
+fn lock_catalog(work: &Path, output: &Path) -> Result<File> {
+    fs::create_dir_all(work)?;
+    let name: String = output
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = work.join(format!("catalog_writer{name}.lock"));
+    let file = File::create(&path)?;
+    if let Err(e) = file.try_lock() {
+        anyhow::bail!(
+            "another catalog writer holds {} ({e}); not touching {}",
+            path.display(),
+            output.display()
+        );
+    }
+    Ok(file)
+}
+
 pub async fn ib_sync(a: IbSync) -> Result<()> {
     let output = a
         .database
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    let _lock = lock_catalog(&a.work, &output)?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_ib_sync.sqlite.partial");
     fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
@@ -619,6 +642,7 @@ pub async fn build(a: Build) -> Result<()> {
         !(a.year.is_some() || a.product.is_some()) || a.output.is_some(),
         "filtered builds require a separate --output"
     );
+    let _lock = lock_catalog(&a.work, &output)?;
     let cfg = Config {
         project: a.project.clone(),
         plan: a.plan.clone(),
@@ -990,6 +1014,7 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
         .database
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    let _lock = lock_catalog(&a.work, &output)?;
     let found = l2_walk(&a.root, &a.file_name)?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_l2_sync.sqlite.partial");
@@ -1042,6 +1067,17 @@ mod tests {
         session::{Decoder, State},
     };
     use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn catalog_writers_exclude_each_other_per_file() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a.sqlite"), t.path().join("b.sqlite"));
+        let first = lock_catalog(t.path(), &a).unwrap();
+        assert!(lock_catalog(t.path(), &a).is_err());
+        let _other = lock_catalog(t.path(), &b).unwrap();
+        drop(first);
+        assert!(lock_catalog(t.path(), &a).is_ok());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_carries_over_l2_rows_only_when_present() {
