@@ -27,6 +27,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("products")
 ap.add_argument("--plan")
 ap.add_argument("--conflicts")
+ap.add_argument("--ric-catalog")
+ap.add_argument("--third-out")
 a = ap.parse_args()
 
 want = None if a.products == "ALL" else set(a.products.split(","))
@@ -56,13 +58,37 @@ if want is None:
             conflict_lines[ric] = f"delivery catalog says {seen[ric]}, approved plan says {ex}"
             out.pop(ric, None)
 
+third = {}
+if a.ric_catalog and want is None:
+    import csv
+
+    with open(a.ric_catalog, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            ric, ex = r["ric"], r["exchange"].strip().lower()
+            if not ex:
+                continue
+            if ric in conflict_lines:
+                continue
+            if ric in out:
+                if out[ric] != ex:
+                    conflicts += 1
+                    conflict_lines[ric] = f"delivery catalog/plan say {out[ric]}, purchase catalog says {ex}"
+                    out.pop(ric, None)
+            elif ric not in seen and ric not in plan:
+                third[ric] = ex
+                out[ric] = ex
+
 for ric in sorted(out):
     print(f"{ric}\t{out[ric]}")
+if a.third_out:
+    with open(a.third_out, "w") as f:
+        for ric in sorted(third):
+            f.write(f"{ric}\t{third[ric]}\n")
 if a.conflicts:
     with open(a.conflicts, "w") as f:
         for ric in sorted(conflict_lines):
             f.write(f"{ric}\t{conflict_lines[ric]}\n")
 print(
-    f"catalog RICs {len(seen)}, plan-only RICs {plan_only}, conflicts {conflicts}, map lines {len(out)}",
+    f"catalog RICs {len(seen)}, plan-only RICs {plan_only}, purchase-catalog-only RICs {len(third)}, conflicts {conflicts}, map lines {len(out)}",
     file=sys.stderr,
 )
