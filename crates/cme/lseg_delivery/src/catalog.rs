@@ -852,6 +852,140 @@ pub async fn list(a: Query) -> Result<()> {
     Ok(())
 }
 
+/// Refresh only the L2 table of an existing catalog: which (RIC, UTC year) directories hold
+/// `l2_<freq>ms.parquet` and for which days. Stat-only walk of the share, one thread.
+#[derive(Args)]
+pub struct L2Sync {
+    #[arg(long, default_value = ROOT)]
+    pub root: PathBuf,
+    /// Defaults to <root>/meta/catalog.sqlite.
+    #[arg(long)]
+    pub database: Option<PathBuf>,
+    #[arg(long, default_value = "l2_250ms.parquet")]
+    pub file_name: String,
+    #[arg(long, default_value = WORK)]
+    pub work: PathBuf,
+}
+
+const L2_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS l2_directories (
+ ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL,
+ first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL, PRIMARY KEY(ric,utc_year)
+);
+INSERT OR REPLACE INTO conventions VALUES
+ ('l2_scope','l2_directories: Normalized LL2 (10 levels) sampled on a 250 ms grid, l2_250ms.parquet; only rows where the book changed plus anchor rows; includes RICs without TAS (e.g. cfe weeklies)'),
+ ('l2_directory_usage','SELECT directory FROM l2_directories WHERE ric=?; read <directory>/<UTC YYYYMMDD>/l2_250ms.parquet (days between first_day and last_day may have gaps)');
+"#;
+
+struct L2Dir {
+    ric: String,
+    year: i32,
+    dir: PathBuf,
+    first: String,
+    last: String,
+    days: i64,
+}
+
+fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
+    let names = |p: &Path| -> Result<Vec<String>> {
+        let mut v = Vec::new();
+        for e in fs::read_dir(p)? {
+            v.push(e?.file_name().to_string_lossy().into_owned());
+        }
+        v.sort();
+        Ok(v)
+    };
+    let mut out = Vec::new();
+    for ex in names(root)? {
+        if ex == "meta" || ex.starts_with('.') {
+            continue;
+        }
+        let ex_dir = root.join(&ex);
+        if !ex_dir.is_dir() {
+            continue;
+        }
+        for year in names(&ex_dir)? {
+            let Ok(y) = year.parse::<i32>() else { continue };
+            let year_dir = ex_dir.join(&year);
+            for ric_dir in names(&year_dir)? {
+                let dir = year_dir.join(&ric_dir);
+                let mut first = String::new();
+                let mut last = String::new();
+                let mut days = 0i64;
+                for day in names(&dir)? {
+                    if day.len() == 8 && dir.join(&day).join(file_name).is_file() {
+                        if first.is_empty() {
+                            first = day.clone();
+                        }
+                        last = day;
+                        days += 1;
+                    }
+                }
+                if days > 0 {
+                    out.push(L2Dir {
+                        ric: tasdb::unescape_component(&ric_dir),
+                        year: y,
+                        dir,
+                        first,
+                        last,
+                        days,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn l2_sync(a: L2Sync) -> Result<()> {
+    let output = a
+        .database
+        .clone()
+        .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
+    let found = l2_walk(&a.root, &a.file_name)?;
+    fs::create_dir_all(&a.work)?;
+    let local = a.work.join("catalog_l2_sync.sqlite.partial");
+    fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
+    let mut conn = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&local)
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full),
+    )
+    .await?;
+    sqlx::raw_sql(L2_SCHEMA).execute(&mut conn).await?;
+    sqlx::query("BEGIN").execute(&mut conn).await?;
+    sqlx::query("DELETE FROM l2_directories")
+        .execute(&mut conn)
+        .await?;
+    for d in &found {
+        sqlx::query("INSERT INTO l2_directories VALUES (?,?,?,?,?,?)")
+            .bind(&d.ric)
+            .bind(d.year)
+            .bind(d.dir.to_string_lossy().as_ref())
+            .bind(&d.first)
+            .bind(&d.last)
+            .bind(d.days)
+            .execute(&mut conn)
+            .await?;
+    }
+    sqlx::query("COMMIT").execute(&mut conn).await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut conn)
+        .await?;
+    ensure!(integrity == "ok", "SQLite integrity failure: {integrity}");
+    conn.close().await?;
+    publish_sqlite(&local, &output)?;
+    fs::remove_file(&local)?;
+    println!(
+        "{}: {} L2 directories, {} files",
+        output.display(),
+        found.len(),
+        found.iter().map(|d| d.days).sum::<i64>()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

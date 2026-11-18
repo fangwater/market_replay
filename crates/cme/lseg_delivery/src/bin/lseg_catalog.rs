@@ -1,7 +1,7 @@
 //! Ordinary, bounded Rust tool for the user-facing SQLite instrument index.
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use lseg_delivery::catalog::{self, Build, IbSync, Query};
+use lseg_delivery::catalog::{self, Build, IbSync, L2Sync, Query};
 
 #[derive(Parser)]
 #[command(about = "LSEG SQLite instrument index: query product/RIC without selecting dates")]
@@ -14,6 +14,8 @@ enum Command {
     Build(Build),
     /// Refresh only ib_contracts / ib_directories from the IB manifest.
     IbSync(IbSync),
+    /// Refresh only l2_directories by a stat-only walk of the share.
+    L2Sync(L2Sync),
     List(Query),
 }
 #[tokio::main(flavor = "current_thread")]
@@ -22,6 +24,7 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Build(args) => catalog::build(args).await,
         Command::IbSync(args) => catalog::ib_sync(args).await,
+        Command::L2Sync(args) => catalog::l2_sync(args).await,
         Command::List(args) => catalog::list(args).await,
     }
 }

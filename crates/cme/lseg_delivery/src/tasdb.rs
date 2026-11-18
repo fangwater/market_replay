@@ -154,6 +154,28 @@ pub fn component(value: &str) -> String {
         .collect()
 }
 
+/// Inverse of [`component`]; a name that is not valid escaped UTF-8 is returned unchanged.
+pub fn unescape_component(name: &str) -> String {
+    let b = name.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| name.to_string())
+}
+
 /// Pretty JSON via `<name>.json.partial` + rename; creates the parent.
 pub fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
     fs::create_dir_all(path.parent().context("json parent")?)?;
@@ -172,6 +194,13 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_round_trips() {
+        for r in ["ESZ26", "A/B", "VX^26", "a%b", "x y"] {
+            assert_eq!(unescape_component(&component(r)), r);
+        }
+    }
 
     #[test]
     fn event_time_wraps_to_nearest_day_and_falls_back() {
