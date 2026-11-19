@@ -280,13 +280,13 @@ message MinuteBar {
 
 // Interval-turnover classes, NOT real order sizes: each inferred interval
 // trade is classed by its turnover against the product's P50 / P90 (>= P90
-// large, [P50, P90) medium, < P50 small). Rule for the published minute
-// archives from 2026-01-01 and for live bars: P50 / P90 of the interval turnover of the
-// dominant contract of each trading day (merged across rolls) over the
-// complete PRECEDING Shanghai calendar month, applied to each trade by the
-// month of its Shanghai timestamp. Known in advance, causal. Archives before
-// 2026 use the older rule (same month, all contracts pooled). The
-// numbers in force are in GetMinuteBarsResponse.size_thresholds.
+// large, [P50, P90) medium, < P50 small). Live bars use P50 / P90 of the
+// interval turnover of the dominant contract of each trading day over the
+// complete preceding Shanghai calendar month. Each trade uses the thresholds
+// for the month before its Shanghai timestamp. Published archives from 2024
+// onward use the same rule where an applicable threshold exists. Earlier
+// archives use the same month with all contracts pooled. GetSizeThresholds
+// returns the values in force.
 message SizeBuckets {
   double large_turnover_cny = 1;
   double medium_turnover_cny = 2;
