@@ -38,3 +38,20 @@ lseg_l2_slice backfill --no-daily --stream raw2024=<part0>,<part1>,… --raw-ll2
 - `lseg_catalog l2-sync` 按标记填 `catalog.sqlite` 的 `l2_directories.source`（`normalized` | `raw`，旧目录库自动加列，旧行默认 `normalized`；`build` 的 carry-over 也带着这一列）。`conventions` 里有 `l2_source` 说明。
 - `l2_gaps.sqlite` 的表 `l2_raw_versions` 列出所有 Raw 来源的 RIC-年（`l2_gaps_build.py` 从目录库生成）。
 - 查询：`SELECT ric, utc_year, days FROM l2_directories WHERE source='raw'`。
+
+## 只取需要的段（2026-11-19）
+
+Raw 包的每个文件是许多独立 gzip 成员（头 `1f8b0800 00000000 00ff`，每个约 20 MB 压缩 / 350 MB 文本）拼接，且全包按 RIC 排序。
+所以不必整包下载和解压：`scripts/lseg/rawll2_segments.py --source <目录或 URL> --wanted <RIC 清单> --out <目录>` 按字节偏移二分查 RIC，
+只取包含要补 RIC 的成员（前后各多取一个成员，保证被边界切开的消息完整），每段存成一个独立的 gz 文件。本地文件和 HTTP Range 都支持。
+洗库时 `backfill --raw-ll2-segments` 把这些段当作互不连续的输入（段边界处被切开的消息丢弃，段首的孤立 FID 行忽略；不洗的 RIC 可以在不同段重复出现）。
+
+核对：段里要补 RIC 的消息条数和 Report 的 `Count` 逐个相等（2024：411 个 RIC，628,719 条，0 个不等）。
+
+| 包 | 要补 RIC | 要补 RIC 占全包消息 | 取的段 | 全包 |
+| --- | --- | --- | --- | --- |
+| 2024 | 411 | 0.0007% | 8.9 GB | 1.7 TB |
+| 2026-01..05 | 420 | 0.0003% | 7.7 GB | 1.5 TB |
+| 2025 | 1816 | 67% | 1.40 TB | 2.3 TB |
+
+洗入的深度更新条数：2024 年 49,187，2026 年 34,632（这些 RIC 大多是几乎没有盘口更新的远月合约）。

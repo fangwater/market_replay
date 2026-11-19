@@ -159,6 +159,14 @@ impl RawConverter {
         Ok(())
     }
 
+    /// The next input is not the continuation of the previous one (a separately cut segment of a
+    /// package): a message cut at the end of the previous segment is dropped, orphan FID rows at the
+    /// start of the next one are tolerated. The RIC and its state are kept.
+    pub fn discontinuity(&mut self) {
+        self.open = false;
+        self.started = false;
+    }
+
     /// At the end of the stream: a message still open is truncated data.
     pub fn finish(&self) -> Result<()> {
         ensure!(
@@ -193,17 +201,18 @@ impl RawConverter {
         self.messages += 1;
         let ric = fields[0];
         if ric != self.ric.as_slice() {
-            ensure!(
-                self.seen.insert(ric.to_vec()),
-                "RIC {} appears in more than one block of the stream",
-                String::from_utf8_lossy(ric)
-            );
             self.ric.clear();
             self.ric.extend_from_slice(ric);
             self.ric_wanted = match &self.wanted {
                 None => true,
                 Some(w) => std::str::from_utf8(ric).is_ok_and(|r| w.contains(r)),
             };
+            // Only RICs that are washed must be contiguous (separately cut segments may repeat others).
+            ensure!(
+                !self.ric_wanted || self.seen.insert(ric.to_vec()),
+                "RIC {} appears in more than one block of the stream",
+                String::from_utf8_lossy(ric)
+            );
             self.last_ts.clear();
             for s in &mut self.slots {
                 s.clear();
@@ -414,6 +423,57 @@ BBB,Market Price,2024-01-01T10:00:04.000000000Z,-6,Legacy Level 2,UPDATE,UNSPECI
         let tail = ",,,,FID,22,,BEST_BID1,1,\nBBB,Market Price,2024-01-01T10:00:04.000000000Z,-6,Legacy Level 2,UPDATE,UNSPECIFIED,,,,1,,6,1\n,,,,FID,22,,BEST_BID2,9.5,\n";
         let out = run(tail, None, 1 << 20);
         assert_eq!(out.lines().count(), 1);
+    }
+
+    #[test]
+    fn separately_cut_segments_drop_the_cut_message_and_may_repeat_unwanted_rics() {
+        let hdr = |ric: &str, ts: &str, n: usize| {
+            format!("{ric},Market Price,2024-01-01T{ts}Z,-6,Legacy Level 2,UPDATE,UNSPECIFIED,,,,1,,1,{n}\n")
+        };
+        let fid = |name: &str, v: &str| format!(",,,,FID,22,,{name},{v},\n");
+        let mut c = RawConverter::new(Some(Arc::new(["BBB".to_string()].into())));
+        let mut out = Vec::new();
+        // segment 1: unwanted AAA, then BBB, then a BBB message cut after 1 of 2 FIDs
+        let seg1 = format!(
+            "{}{}{}{}{}{}",
+            hdr("AAA", "10:00:00.000000001", 1),
+            fid("BEST_BID1", "1"),
+            hdr("BBB", "10:00:01.000000000", 1),
+            fid("BEST_BID1", "2"),
+            hdr("BBB", "10:00:02.000000000", 2),
+            fid("BEST_BID1", "3"),
+        );
+        c.convert(seg1.as_bytes(), &mut out).unwrap();
+        c.discontinuity();
+        // segment 2: orphan row of the cut message, BBB goes on, then unwanted AAA again
+        let seg2 = format!(
+            "{}{}{}{}{}",
+            fid("BEST_ASK1", "9"),
+            hdr("BBB", "10:00:03.000000000", 1),
+            fid("BEST_BID1", "4"),
+            hdr("AAA", "10:00:04.000000000", 1),
+            fid("BEST_BID1", "5"),
+        );
+        c.convert(seg2.as_bytes(), &mut out).unwrap();
+        c.finish().unwrap();
+        let rows: Vec<String> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        // the cut message (10:00:02) is dropped, the others of BBB are kept
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].contains("10:00:01") && rows[1].contains("10:00:03"));
+        // a wanted RIC coming back after another RIC is still an error
+        let mut c = RawConverter::new(Some(Arc::new(["BBB".to_string()].into())));
+        let mut out = Vec::new();
+        let bad = format!(
+            "{}{}{}",
+            hdr("BBB", "10:00:01.000000000", 0),
+            hdr("CCC", "10:00:02.000000000", 0),
+            hdr("BBB", "10:00:03.000000000", 0)
+        );
+        assert!(c.convert(bad.as_bytes(), &mut out).is_err());
     }
 
     #[test]

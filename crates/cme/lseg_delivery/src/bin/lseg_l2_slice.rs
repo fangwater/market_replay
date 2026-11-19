@@ -125,6 +125,10 @@ enum Command {
         /// use an id starting with `raw`.
         #[arg(long)]
         raw_ll2_rics: Option<PathBuf>,
+        /// With --raw-ll2-rics: the parts of a --stream are separately cut segments
+        /// (`scripts/lseg/rawll2_segments.py`), not one continuous stream.
+        #[arg(long)]
+        raw_ll2_segments: bool,
     },
     /// Stages 1+2: decompress `<raw-root>/<PRODUCT>/<PRODUCT>_<day>_normll2.csv.gz`
     /// once into RIC-aligned zstd shards and wash them into the day RocksDB
@@ -762,6 +766,7 @@ fn main() -> Result<()> {
             status_addr,
             no_gate,
             raw_ll2_rics,
+            raw_ll2_segments,
         } => {
             ensure!(
                 (2..=limits::L2_SLICE_WORKERS).contains(&workers),
@@ -829,6 +834,7 @@ fn main() -> Result<()> {
                 block_bytes: lseg_delivery::l2_stream::BLOCK_BYTES,
                 gate: Arc::new(move || g2.wait()),
                 progress: Arc::clone(&progress_state),
+                raw_segments: raw_ll2_segments,
                 raw_ll2: raw_ll2_rics
                     .as_deref()
                     .map(l2_raw::read_ric_list)
@@ -919,6 +925,7 @@ fn main() -> Result<()> {
                     gate: Arc::new(|| {}),
                     progress: Arc::new(Progress::default()),
                     raw_ll2: None,
+                    raw_segments: false,
                 };
                 let rep = run_stream(&cfg, units)?;
                 let washed = rep

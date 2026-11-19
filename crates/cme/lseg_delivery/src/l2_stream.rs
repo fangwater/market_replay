@@ -116,6 +116,9 @@ pub struct StreamConfig {
     /// Raw LL2 mode: the stream units are Raw LL2 packages, converted into
     /// Normalized rows (`l2_raw`) before washing; only these RICs are washed.
     pub raw_ll2: Option<Arc<std::collections::BTreeSet<String>>>,
+    /// Raw LL2 mode: the parts are separately cut segments of a package (`rawll2_segments.py`),
+    /// not one continuous stream: every part starts a new message boundary.
+    pub raw_segments: bool,
 }
 
 #[derive(Debug, Default)]
@@ -224,6 +227,8 @@ struct PartReader {
     header: String,
     /// Raw LL2 mode: raw text lines in, Normalized rows out.
     raw: Option<(RawConverter, Vec<u8>)>,
+    /// Raw mode: every part is its own segment (`RawConverter::discontinuity` at each open).
+    segments: bool,
 }
 
 impl PartReader {
@@ -232,6 +237,7 @@ impl PartReader {
         start: usize,
         progress: Arc<Progress>,
         raw: Option<Arc<std::collections::BTreeSet<String>>>,
+        segments: bool,
     ) -> Self {
         let header = if raw.is_some() {
             cme_tas_replay::raw_ll2::HEADER.to_string()
@@ -247,6 +253,7 @@ impl PartReader {
             progress,
             header,
             raw: raw.map(|w| (RawConverter::new(Some(w)), Vec::new())),
+            segments,
         }
     }
 
@@ -274,6 +281,11 @@ impl PartReader {
         }
         self.cur = Some(rd);
         self.next_part += 1;
+        if self.segments {
+            if let Some((conv, _)) = self.raw.as_mut() {
+                conv.discontinuity();
+            }
+        }
         Ok(true)
     }
 
@@ -628,7 +640,13 @@ fn init_prod(rt: &Rt, ui: usize) -> Prod {
     };
     u.state.lock().expect("unit lock").started = Some(Instant::now());
     Prod {
-        rd: PartReader::new(parts, start, Arc::clone(&cfg.progress), cfg.raw_ll2.clone()),
+        rd: PartReader::new(
+            parts,
+            start,
+            Arc::clone(&cfg.progress),
+            cfg.raw_ll2.clone(),
+            cfg.raw_segments,
+        ),
         block: Vec::with_capacity(cfg.block_bytes + (1 << 20)),
         seg: Vec::new(),
         cur: Vec::new(),
@@ -1351,6 +1369,7 @@ mod tests {
             gate: Arc::new(|| {}),
             progress: Arc::new(Progress::default()),
             raw_ll2: None,
+            raw_segments: false,
         }
     }
     fn ecfg(t: &Path, db_root: PathBuf, out: &str, params: Params) -> ExtractConfig {
