@@ -1,6 +1,6 @@
 # 国内期货每日 1 分钟处理与 gRPC kline 服务
 
-最后更新：2026-11-15。
+最后更新：2026-11-19。
 
 ## 每日任务 `cn-daily`
 
@@ -63,6 +63,21 @@ target/release/examples/kline_check http://127.0.0.1:18312 \
 ```
 
 客户端用 git + rev 依赖 `cn_market_proto`，方式和 mkt_signal 依赖 core 一样。
+
+### 主力连续 HFQ
+
+`cn-hfq-daily` 在上海 17:00 进入 `market-replay-server` 的任务队列，
+以 `cn-daily` 已完成水位、分类完成的原生分钟和同日主力表为输入。
+普通交易日复用旧分区并补新文件，主力或复权截面变化时重算相应品种。
+验证全部预期日文件后，原子交换正式分钟 HFQ 目录。原归档首次迁移的备份保存在同级目录。
+手工更正已归档的原生分钟后，可用同一入口加 `--rebuild` 重建。
+
+`GetHfqMinuteBars(exchange, product, time, generation)` 读取已发布
+`baseline_data_1min_hfq`。OHLC、VWAP、mid 和盘口采用加法复权，
+手数、成交额和 12 个分桶字段保留原口径。响应包含档案的复权基准日、
+最新原生合约和已确认的下一主力换月价差。调用方分页时传回首个响应的
+`generation`，归档切换时 RPC 返回 `ABORTED`，重新从第一页获取。
+`GetMinuteBars` 继续提供原生合约分钟；CTA 用它核对首根完整 ZMQ 分钟。
 
 ## 盘中补缺：当天 bar 直接从 NFS MDL 重算（2026-11-17）
 

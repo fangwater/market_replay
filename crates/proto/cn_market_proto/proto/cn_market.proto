@@ -10,6 +10,8 @@ package cn_market.v1;
 service CnFuturesMarket {
   // Closed one-minute bars of one contract from baseline_data_1min.
   rpc GetMinuteBars(GetMinuteBarsRequest) returns (GetMinuteBarsResponse);
+  // Closed, additive-back-adjusted minutes for the historical dominant of a product.
+  rpc GetHfqMinuteBars(GetHfqMinuteBarsRequest) returns (GetHfqMinuteBarsResponse);
   // Which trading days are available. With an exchange, also how far the
   // in-progress day has been read from NFS for that exchange (cheap to poll).
   rpc GetDataState(GetDataStateRequest) returns (DataState);
@@ -173,6 +175,31 @@ message GetMinuteBarsRequest {
   // Return the synthesized baseline's zero-volume minutes as well. Required
   // for source-consecutive hourly aggregation; no new minutes are invented.
   bool include_empty_minutes = 5;
+}
+
+message GetHfqMinuteBarsRequest {
+  Exchange exchange = 1;
+  string product = 2;
+  TimeRange time = 3;
+  // Empty for the first page. Subsequent pages must repeat the returned generation.
+  string generation = 4;
+}
+
+message GetHfqMinuteBarsResponse {
+  // Stable across all pages of one published archive.
+  string generation = 1;
+  uint32 basis_trading_day = 2;
+  uint32 last_trading_day = 3;
+  string last_contract = 4;
+  double volume_multiple = 5;
+  // OHLC, all VWAP variants, mid and depth prices are additive HFQ.
+  // Lots, turnover and size buckets retain their original native units.
+  // These are archived bars. high/low equal snapshot_high/snapshot_low.
+  repeated MinuteBar bars = 6;
+  // If a new main is scheduled, its name and the previous reference close
+  // spread to add to this archive before warming on the new contract's scale.
+  optional string scheduled_next = 7;
+  optional double next_gap = 8;
 }
 
 message Contract {

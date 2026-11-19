@@ -83,6 +83,15 @@ schedule = { tz = "Asia/Shanghai", at = ["16:30"] }
 timeout_minutes = 600
 
 [[job]]
+name = "cn-hfq-daily"
+description = "国内主力连续 1 分钟 HFQ：从已归档分钟和主力表增量更新，换月重算受影响品种"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/usr/bin/python3"
+args = ["scripts/update_cn_hfq.py", "--config", "config/cn_daily.toml", "--exporter", "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/export_hfq_1min"]
+schedule = { tz = "Asia/Shanghai", at = ["17:00"] }
+timeout_minutes = 180
+
+[[job]]
 name = "ib-kline-daily"
 description = "IB 分钟线：MySQL 增量 -> kline_ib.parquet + catalog（钉钉）"
 cwd = "/home/fanghaizhou/market_replay"

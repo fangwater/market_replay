@@ -641,7 +641,7 @@ impl Contract {
             &self.previous.as_ref().unwrap().1,
             self.trading_day,
             self.multiplier,
-            self.tick,
+            Some(self.tick),
             true,
             true,
             None,
@@ -1174,7 +1174,9 @@ mod tests {
         let expected: Vec<_> = expected
             .iter()
             .filter(|m| m.ts > start && m.ts < start + 180)
-            .filter_map(|r| crate::make_bar(r, 20261118, 1., 10., true, true, None, false).unwrap())
+            .filter_map(|r| {
+                crate::make_bar(r, 20261118, 1., Some(10.), true, true, None, false).unwrap()
+            })
             .collect();
         assert_eq!(actual.len(), 2);
         assert_eq!(expected.len(), actual.len());
