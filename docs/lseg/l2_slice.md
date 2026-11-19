@@ -370,3 +370,41 @@ lseg_catalog l2-sync              # 交付完后更新目录索引（见下）
 `deliver --stream-dbs <l2_db>/_stream/p2024 --from 2024-01-01 --to 2024-12-31`，再跑 `l2-sync`。
 
 **新日期**：新的日库洗完后，用同一条 `deliver --db-root … --from <新日> --to <新日>` 即可；已交付的跳过。
+
+## 补充包与 2024 主包（2026-11-18）
+
+**清点**：`scripts/lseg/l2_supplement_inventory.py --work <dir>` 只读远端 `future_supplement/normalisedLL2/` 的目录和各包的 `merged-Report.csv.gz`（缓存在 `runtime/l2_supplement/reports/`），逐包对比主包 Report 和已交付的 `l2_directories`，给出新增 RIC、新增品种、交易所映射状态，并为每个包写出"新 RIC"清单（`only_rics/<包>.txt`）。结论：只有 5 个包带来新数据——`comex_globex` 2024（112 个 RIC）、`comex` 2025（162）、`futures_11` 2024 / 2025 / 2026（320 / 321 / 138）。`comex` 2024 与 `comex` 2026 的 RIC 都已在主包里（2026 的补充包行数更少），不洗。
+
+**2024 主包**：`_stream/p2024` 交付 380,573 个文件（220.9 GB，0 个问题，0 未映射）；9 个分片各抽 1 个 RIC-日做源级独立核对（0 不一致），另有 11 个 RIC-日从库里重新提取，与交付盘文件逐字节相同。
+
+**补充包**：每个包洗进自己的 `_stream/<id>`（`sg2024`、`sc2025`、`sf2024`、`sf2025`、`sf2026`；RIC 数与清单一致：112 / 162 / 358 / 359 / 282），再用 `deliver --stream-dbs <库> --only-rics <清单>` 一个库一个库地交付，**只交付该时段的新 RIC**。同一 RIC-日在两个库里会被 `deliver` 记成 `in_two_databases` 且两边都不交付，所以补充包不能和主包一起交付。
+
+| 包 | 新增 RIC-日 | GB |
+| --- | --- | --- |
+| `comex_globex` 2024（`sg2024`） | 15,453 | 16.0 |
+| `futures_11` 2024（`sf2024`） | 57,253 | 17.2 |
+| `futures_11` 2025（`sf2025`） | 56,758 | 16.3 |
+| `comex` 2025（`sc2025`） | 30,848 | 29.3 |
+| `futures_11` 2026（`sf2026`） | 12,764 | 3.3 |
+
+全部 0 个问题。**重叠**：补充包里和主包重叠的 RIC，抽 40 个 RIC-日从补充库提取，与交付盘上已有的文件**逐字节相同**（40/40），没有覆盖任何文件。独立核对：新 RIC-日 19 个，源级核对加逐字节比对，0 不一致。
+
+**交易所映射**：先目录库，再计划，最后才用采购目录 `artifacts/lseg_exchange_groups_20261109/ric_catalog.csv`（`l2_exchange_map.py --ric-catalog`，只补前两处都没有的 RIC，不一致记入冲突；它与前两处已知的 16,969 个 RIC 100% 一致）。`comex_globex` 的 112 个 RIC 只有它有（全是 `comex`）。
+
+**下载**：`scripts/lseg/fetch_supplement_ll2.sh <包目录…>`（不属于 lseg-daily）。
+
+## L2 补不起来的 RIC：`meta/l2_gaps.sqlite`
+
+TAS 有、L2 没有（或只有一部分）的 RIC-年，单独放在交付盘的 `lseg/meta/l2_gaps.sqlite`（不放进 `catalog.sqlite`：lseg-daily 每次从头重建目录，写入者锁也是同一把）。一句话查询：
+
+```sql
+select product, rics, kind, reasons from l2_unfillable_products where utc_year=2025 order by rics desc;
+```
+
+- `l2_unfillable(ric, utc_year, product, exchange_dir, tas_first_day, tas_last_day, tas_days, l2_days, l2_first_day, l2_last_day, kind, reason, evidence, checked_packages, checked_utc, n_rics)`：2024–2026 每个 RIC-年一行；2010–2023 只做了清点（没有洗库），按品种一行（`ric` 为空，`n_rics` 是该品种当年有 TAS 的 RIC 数）。
+- `kind`：`none`（有 TAS、没有任何 L2 文件）、`partial`（`l2_days < 0.8 * tas_days`）、`not_washed`（2010–2023：远端有 L2、本地没洗）、`not_in_any_package`（2010–2023：没有任何包有该品种）。
+- `reason`：`not_in_any_package`（所有检查过的 Report 里都没有这个 RIC）、`report_count_zero`（Report 里有但 Count 为 0）、`outside_package_window`（有数据但日期没盖住 TAS 的区间，容差 7 天）、`unmapped_exchange`、`overlap_conflict`、`in_package_not_delivered`（有数据且盖住却没交付，是缺陷，应为 0）。`evidence` 是 Report 行或一句话，`checked_packages` 是检查过的包列表（JSON）。
+- `tas_days` = RIC-年目录下的日目录数（到 2026-11-12）；怀疑 `partial` 的 RIC-年才逐日检查有没有 `trade.parquet` / `quote.parquet`。`l2_days` 取自 `l2_directories`。2026-06 起的 L2 来自日包，没有 Report，所以 2026 的原因只认得到 2026-05-30 的包。
+- 另有 `l2_package_inventory`（2010–2026 每个包一行，空包标注；2024 之前 `washed`/`delivered` 为 0）、`l2_year_summary`（每年主包与补充包 GB、RIC 数、L2 品种数、TAS 品种数、没有 L2 的 TAS 品种数；2012–2016 目录里没有 TAS，无从比较）和 `conventions`（方法、阈值、生成时间）。
+- 重建：`scripts/lseg/l2_gaps_build.py --out <本地.sqlite> --reports <runtime/l2_supplement/reports> --packages-json … --inventory-json …`（先在任务空闲时跑 `lseg_catalog l2-sync`；NFS 只做 ≤8 线程的 listdir，约 1.5 分钟、内存 143 MB），再 `--publish <本地.sqlite>` 发布：新文件用硬链接不覆盖；刷新时加 `--replace`，是同目录里写临时文件后原子 rename，读者要么看到旧的完整文件、要么看到新的完整文件。
+- 按品种的覆盖范围另有 `scripts/lseg/l2_coverage.py`（每个品种首末日和没有 L2 的月份）。

@@ -456,6 +456,8 @@ pub struct DeliverConfig {
     pub exchange_of: Arc<BTreeMap<String, String>>,
     /// Only these exchange directories (empty = all).
     pub exchanges: BTreeSet<String>,
+    /// Only these RICs (empty = all); the others are skipped before anything is counted.
+    pub only_rics: BTreeSet<String>,
     /// RICs whose exchange directory is contradictory between two sources:
     /// recorded as a problem and not delivered until resolved (RIC -> detail).
     pub conflicts: BTreeMap<String, String>,
@@ -526,6 +528,9 @@ pub fn run_deliver(cfg: DeliverConfig) -> Result<Value> {
     let mut overlaps = 0u64;
     let mut with_data: BTreeMap<String, u64> = BTreeMap::new(); // month -> RIC-days (mapped or not)
     let mut note = |dn: i64, ric: &str, work: &mut BTreeMap<i64, Vec<String>>| {
+        if !cfg.only_rics.is_empty() && !cfg.only_rics.contains(ric) {
+            return;
+        }
         *with_data
             .entry(day_string(dn)[..7].to_string())
             .or_default() += 1;

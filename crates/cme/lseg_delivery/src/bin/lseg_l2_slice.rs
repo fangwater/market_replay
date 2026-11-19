@@ -266,6 +266,11 @@ enum Command {
         /// Only these exchange directories (default: all).
         #[arg(long, value_delimiter = ',')]
         exchanges: Vec<String>,
+        /// Only the RICs listed in this file (one per line); other RICs of the
+        /// databases are neither counted nor delivered (supplement packages: their
+        /// RICs that the main package already holds are left to the main one).
+        #[arg(long)]
+        only_rics: Option<PathBuf>,
         #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
         target_root: PathBuf,
         /// Local staging directory (NVMe); removed at the end.
@@ -608,6 +613,7 @@ fn main() -> Result<()> {
             exchange_map,
             exchange_conflicts,
             exchanges,
+            only_rics,
             target_root,
             staging,
             freq_ms,
@@ -633,6 +639,15 @@ fn main() -> Result<()> {
                 to: day_number(&to)?,
                 exchange_of: Arc::new(l2_deliver::load_exchange_map(&exchange_map)?),
                 exchanges: exchanges.into_iter().collect(),
+                only_rics: match &only_rics {
+                    Some(f) => std::fs::read_to_string(f)
+                        .with_context(|| format!("read {}", f.display()))?
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect(),
+                    None => Default::default(),
+                },
                 conflicts: match &exchange_conflicts {
                     Some(f) => l2_deliver::load_exchange_map(f)?,
                     None => BTreeMap::new(),
