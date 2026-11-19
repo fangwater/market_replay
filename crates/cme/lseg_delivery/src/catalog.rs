@@ -6,7 +6,7 @@ use crate::native_kline::{
     io, DAY,
 };
 use crate::tasdb::{self, Tuning};
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use clap::Args;
 use cme_tas_replay::product::encode_all_key;
 use parquet::arrow::{
@@ -614,9 +614,20 @@ async fn carry_l2(conn: &mut SqliteConnection, old: &Path) -> Result<i64> {
         sqlx::query("DELETE FROM main.l2_directories")
             .execute(&mut *conn)
             .await?;
-        sqlx::query("INSERT INTO main.l2_directories SELECT * FROM old.l2_directories")
-            .execute(&mut *conn)
-            .await?;
+        let old_source: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('l2_directories','old') WHERE name='source'",
+        )
+        .persistent(false)
+        .fetch_one(&mut *conn)
+        .await?;
+        let copy = if old_source > 0 {
+            "INSERT INTO main.l2_directories(ric,utc_year,directory,first_day,last_day,days,source) \
+             SELECT ric,utc_year,directory,first_day,last_day,days,source FROM old.l2_directories"
+        } else {
+            "INSERT INTO main.l2_directories(ric,utc_year,directory,first_day,last_day,days,source) \
+             SELECT ric,utc_year,directory,first_day,last_day,days,'normalized' FROM old.l2_directories"
+        };
+        sqlx::query(copy).execute(&mut *conn).await?;
         sqlx::query(
             "INSERT OR REPLACE INTO main.conventions SELECT key,value FROM old.conventions WHERE key LIKE 'l2\\_%' ESCAPE '\\'",
         )
@@ -939,15 +950,49 @@ pub struct L2Sync {
     pub work: PathBuf,
 }
 
+/// Added after the first release of the table (older catalogs lack it).
+const L2_SOURCE_COLUMN: &str =
+    "ALTER TABLE l2_directories ADD COLUMN source TEXT NOT NULL DEFAULT 'normalized'";
+
+/// Marker file in a RIC-year directory whose L2 files were built from Raw LL2.
+pub const L2_SOURCE_FILE: &str = "l2_source";
+
+/// Adds `l2_directories.source` to a catalog that has the table without it.
+async fn ensure_l2_source_column(conn: &mut SqliteConnection) -> Result<()> {
+    let has: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('l2_directories') WHERE name='source'",
+    )
+    .persistent(false)
+    .fetch_one(&mut *conn)
+    .await?;
+    if has == 0 {
+        sqlx::query(L2_SOURCE_COLUMN).execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
 const L2_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS l2_directories (
  ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL,
- first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL, PRIMARY KEY(ric,utc_year)
+ first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL,
+ source TEXT NOT NULL DEFAULT 'normalized' CHECK (source IN ('normalized','raw')), PRIMARY KEY(ric,utc_year)
 );
 INSERT OR REPLACE INTO conventions VALUES
- ('l2_scope','l2_directories: Normalized LL2 (10 levels) sampled on a 250 ms grid, l2_250ms.parquet; only rows where the book changed plus anchor rows; includes RICs without TAS (e.g. cfe weeklies)'),
+ ('l2_scope','l2_directories: L2 (10 levels) sampled on a 250 ms grid, l2_250ms.parquet; only rows where the book changed plus anchor rows; includes RICs without TAS (e.g. cfe weeklies); the source of every RIC-year is in column source'),
+ ('l2_source','l2_directories.source: normalized = Normalized LL2 (the book as the vendor delivers it); raw = Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us: slots never assigned are empty, a REFRESH drops earlier knowledge; see docs/lseg/l2_raw.md). A raw RIC-year has the file <directory>/l2_source with the text raw. A RIC-year has exactly one source'),
  ('l2_directory_usage','SELECT directory FROM l2_directories WHERE ric=?; read <directory>/<UTC YYYYMMDD>/l2_250ms.parquet (days between first_day and last_day may have gaps)');
 "#;
+
+/// `raw` if the RIC-year directory carries the marker file, else `normalized`.
+fn l2_source_of(dir: &Path) -> Result<&'static str> {
+    let marker = dir.join(L2_SOURCE_FILE);
+    match fs::read_to_string(&marker) {
+        Ok(t) if t.trim() == "raw" => Ok("raw"),
+        Ok(t) => bail!("{}: unknown L2 source {:?}", marker.display(), t.trim()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("normalized"),
+        Err(e) => Err(e).with_context(|| format!("read {}", marker.display())),
+    }
+}
 
 struct L2Dir {
     ric: String,
@@ -956,6 +1001,7 @@ struct L2Dir {
     first: String,
     last: String,
     days: i64,
+    source: &'static str,
 }
 
 fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
@@ -994,6 +1040,7 @@ fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
                     }
                 }
                 if days > 0 {
+                    let source = l2_source_of(&dir)?;
                     out.push(L2Dir {
                         ric: tasdb::unescape_component(&ric_dir),
                         year: y,
@@ -1001,6 +1048,7 @@ fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
                         first,
                         last,
                         days,
+                        source,
                     });
                 }
             }
@@ -1027,18 +1075,22 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
     )
     .await?;
     sqlx::raw_sql(L2_SCHEMA).execute(&mut conn).await?;
+    ensure_l2_source_column(&mut conn).await?;
     sqlx::query("BEGIN").execute(&mut conn).await?;
     sqlx::query("DELETE FROM l2_directories")
         .execute(&mut conn)
         .await?;
     for d in &found {
-        sqlx::query("INSERT INTO l2_directories VALUES (?,?,?,?,?,?)")
+        sqlx::query(
+            "INSERT INTO l2_directories(ric,utc_year,directory,first_day,last_day,days,source) VALUES (?,?,?,?,?,?,?)",
+        )
             .bind(&d.ric)
             .bind(d.year)
             .bind(d.dir.to_string_lossy().as_ref())
             .bind(&d.first)
             .bind(&d.last)
             .bind(d.days)
+            .bind(d.source)
             .execute(&mut conn)
             .await?;
     }
@@ -1123,24 +1175,32 @@ mod tests {
         .await
         .unwrap();
         sqlx::raw_sql(L2_SCHEMA).execute(&mut o).await.unwrap();
-        sqlx::query("INSERT INTO l2_directories VALUES ('VXZ26',2026,'/r/cfe/2026/VXZ26','20260105','20261110',7)")
+        sqlx::query("INSERT INTO l2_directories(ric,utc_year,directory,first_day,last_day,days) VALUES ('VXZ26',2026,'/r/cfe/2026/VXZ26','20260105','20261110',7)")
             .execute(&mut o)
             .await
             .unwrap();
         o.close().await.unwrap();
         assert_eq!(carry_l2(&mut c, &old).await.unwrap(), 1);
-        let row: (String, i64, String) =
-            sqlx::query_as("SELECT ric,days,last_day FROM l2_directories")
+        let row: (String, i64, String, String) =
+            sqlx::query_as("SELECT ric,days,last_day,source FROM l2_directories")
                 .fetch_one(&mut c)
                 .await
                 .unwrap();
-        assert_eq!(row, ("VXZ26".to_string(), 7, "20261110".to_string()));
+        assert_eq!(
+            row,
+            (
+                "VXZ26".to_string(),
+                7,
+                "20261110".to_string(),
+                "normalized".to_string()
+            )
+        );
         let conv: Vec<String> =
             sqlx::query_scalar("SELECT key FROM conventions WHERE key LIKE 'l2%' ORDER BY key")
                 .fetch_all(&mut c)
                 .await
                 .unwrap();
-        assert_eq!(conv, vec!["l2_directory_usage", "l2_scope"]);
+        assert_eq!(conv, vec!["l2_directory_usage", "l2_scope", "l2_source"]);
         // The regular conventions are untouched.
         let n: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM conventions WHERE key NOT LIKE 'l2%'")
@@ -1314,5 +1374,47 @@ mod tests {
             .await?;
         assert_eq!(n, 2);
         Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn l2_source_marker_column_and_old_catalogs() {
+        // A catalog written before the column existed: carried with source 'normalized'.
+        let t = tempfile::tempdir().unwrap();
+        let old = t.path().join("old.sqlite");
+        let mut o = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&old)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&mut o).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE l2_directories (ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL, \
+             first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL, PRIMARY KEY(ric,utc_year));\
+             INSERT INTO l2_directories VALUES ('ESH24',2024,'/r/cme/2024/ESH24','20240102','20240315',50);",
+        )
+        .execute(&mut o)
+        .await
+        .unwrap();
+        // the in-place migration of a catalog that has the old table
+        ensure_l2_source_column(&mut o).await.unwrap();
+        ensure_l2_source_column(&mut o).await.unwrap(); // idempotent
+        let src: String = sqlx::query_scalar("SELECT source FROM l2_directories")
+            .fetch_one(&mut o)
+            .await
+            .unwrap();
+        assert_eq!(src, "normalized");
+        o.close().await.unwrap();
+
+        // the marker decides the source of a walked RIC-year directory
+        let d = t.path().join("cme/2024/CLF24");
+        fs::create_dir_all(&d).unwrap();
+        assert_eq!(l2_source_of(&d).unwrap(), "normalized");
+        fs::write(d.join(L2_SOURCE_FILE), "raw\n").unwrap();
+        assert_eq!(l2_source_of(&d).unwrap(), "raw");
+        fs::write(d.join(L2_SOURCE_FILE), "other\n").unwrap();
+        assert!(l2_source_of(&d).is_err());
     }
 }

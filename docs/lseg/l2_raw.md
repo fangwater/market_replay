@@ -29,3 +29,12 @@ lseg_l2_slice backfill --no-daily --stream raw2024=<part0>,<part1>,… --raw-ll2
   （`RAW_LL2_SAMPLE=<part> cargo test --release real_sample -- --ignored`）。
 - 端到端：ESH24 2024-01-04 的 Raw 路径 250 ms 切片与交付盘上 Normalized 的切片相比，12,851 行时间戳完全相同，
   60 个盘口列和 `last_update_ts_ns` 逐值一致，唯一不同的是样本截断处的最后一行。
+
+## 来源标记（交付后在 SQLite 里写清哪些版本来自 Raw）
+
+2026-11-19 用户要求在 SQLite 里写清楚哪些版本来自 Raw。一个 RIC-年只有一个来源，Raw 只补 Normalized 没有的 RIC。
+
+- 交付时 `lseg_l2_slice deliver --l2-source raw`：给每个交付的 RIC-年目录写标记文件 `<RIC 目录>/l2_source`（内容 `raw`）；交付前检查：目录里已有 Normalized 的 `l2_250ms.parquet` 就拒绝（不混来源），反过来 Normalized 交付进有标记的目录也拒绝。
+- `lseg_catalog l2-sync` 按标记填 `catalog.sqlite` 的 `l2_directories.source`（`normalized` | `raw`，旧目录库自动加列，旧行默认 `normalized`；`build` 的 carry-over 也带着这一列）。`conventions` 里有 `l2_source` 说明。
+- `l2_gaps.sqlite` 的表 `l2_raw_versions` 列出所有 Raw 来源的 RIC-年（`l2_gaps_build.py` 从目录库生成）。
+- 查询：`SELECT ric, utc_year, days FROM l2_directories WHERE source='raw'`。

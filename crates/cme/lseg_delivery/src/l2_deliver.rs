@@ -475,6 +475,75 @@ pub struct DeliverConfig {
     pub dry_run: bool,
     /// Stop after this many files (tests).
     pub max_files: Option<u64>,
+    /// The databases hold Raw LL2 books (`l2_raw`): every delivered RIC-year directory gets the
+    /// marker file `l2_source` (text `raw`), which `lseg_catalog l2-sync` turns into
+    /// `l2_directories.source = 'raw'`. A RIC-year never mixes sources.
+    pub source_raw: bool,
+}
+
+/// Source guard and marker: a RIC-year directory holds L2 of exactly one source. Raw delivery
+/// refuses a directory that already has Normalized L2 files and writes the marker; Normalized
+/// delivery refuses a directory that carries the Raw marker.
+fn guard_and_mark_sources(
+    cfg: &DeliverConfig,
+    work: &BTreeMap<i64, Vec<String>>,
+    file_name: &str,
+) -> Result<u64> {
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    for (dn, rics) in work {
+        let year = &day_string(*dn)[..4];
+        for ric in rics {
+            let ex = cfg.exchange_of.get(ric).context("exchange of a work RIC")?;
+            dirs.insert(
+                cfg.target_root
+                    .join(ex)
+                    .join(year)
+                    .join(crate::tasdb::component(ric)),
+            );
+        }
+    }
+    let mut marked = 0;
+    for dir in &dirs {
+        let marker = dir.join(crate::catalog::L2_SOURCE_FILE);
+        let has_marker = marker.is_file();
+        if !cfg.source_raw {
+            ensure!(
+                !has_marker,
+                "{} holds Raw LL2 (marker {}): not delivering Normalized L2 into it",
+                dir.display(),
+                marker.display()
+            );
+            continue;
+        }
+        if has_marker {
+            continue;
+        }
+        if dir.is_dir() {
+            for day in subdirs(dir)? {
+                ensure!(
+                    !day.join(file_name).is_file(),
+                    "{} already holds Normalized L2 ({}): not mixing sources",
+                    dir.display(),
+                    day.display()
+                );
+            }
+        }
+        fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!(
+            ".{}.{}",
+            crate::catalog::L2_SOURCE_FILE,
+            std::process::id()
+        ));
+        fs::write(&tmp, b"raw\n")?;
+        let linked = fs::hard_link(&tmp, &marker);
+        fs::remove_file(&tmp)?;
+        match linked {
+            Ok(()) => marked += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("write {}", marker.display())),
+        }
+    }
+    Ok(marked)
 }
 
 #[derive(Default)]
@@ -608,7 +677,13 @@ pub fn run_deliver(cfg: DeliverConfig) -> Result<Value> {
     }
     let total: u64 = work.values().map(|v| v.len() as u64).sum();
     counters.jobs_total.store(total, Ordering::Relaxed);
+    let sources_marked = if cfg.dry_run {
+        0
+    } else {
+        guard_and_mark_sources(&cfg, &work, &file_name)?
+    };
     let enumeration = json!({
+        "raw_markers_written": sources_marked,
         "ric_days_with_data_by_month": with_data,
         "ric_days_to_deliver": total,
         "days": work.len(),
@@ -898,6 +973,71 @@ pub fn run_deliver(cfg: DeliverConfig) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::l2_slice::{day_number, write_all, Params};
+
+    #[test]
+    fn raw_marker_guards_and_marks_ric_year_directories() {
+        let t = tempfile::tempdir().unwrap();
+        let mk = |raw: bool| DeliverConfig {
+            source: Source::Streams(Vec::new()),
+            from: 0,
+            to: 0,
+            exchange_of: Arc::new(BTreeMap::from([
+                ("CLF24".to_string(), "nymex".to_string()),
+                ("ESH24".to_string(), "cme".to_string()),
+            ])),
+            exchanges: BTreeSet::new(),
+            only_rics: BTreeSet::new(),
+            conflicts: BTreeMap::new(),
+            staging: t.path().join("stg"),
+            target_root: t.path().join("root"),
+            params: Params::new(250, 1800).unwrap(),
+            extract_workers: 1,
+            publish_threads: 1,
+            batch_files: 10,
+            cache_mb: 8,
+            progress: t.path().join("p.json"),
+            status_addr: None,
+            dry_run: false,
+            max_files: None,
+            source_raw: raw,
+        };
+        let dn = day_number("2024-01-04").unwrap();
+        let work = BTreeMap::from([(dn, vec!["CLF24".to_string(), "ESH24".to_string()])]);
+        // ESH24 already has Normalized L2 files: raw delivery must refuse.
+        let day = t.path().join("root/cme/2024/ESH24/20240104");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(day.join("l2_250ms.parquet"), b"x").unwrap();
+        assert!(guard_and_mark_sources(&mk(true), &work, "l2_250ms.parquet").is_err());
+        // Only CLF24 (TAS files but no L2): marked once, idempotent.
+        let only_cl = BTreeMap::from([(dn, vec!["CLF24".to_string()])]);
+        fs::create_dir_all(t.path().join("root/nymex/2024/CLF24/20240104")).unwrap();
+        fs::write(
+            t.path()
+                .join("root/nymex/2024/CLF24/20240104/trade.parquet"),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(
+            guard_and_mark_sources(&mk(true), &only_cl, "l2_250ms.parquet").unwrap(),
+            1
+        );
+        assert_eq!(
+            guard_and_mark_sources(&mk(true), &only_cl, "l2_250ms.parquet").unwrap(),
+            0
+        );
+        let marker = t
+            .path()
+            .join("root/nymex/2024/CLF24")
+            .join(crate::catalog::L2_SOURCE_FILE);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "raw\n");
+        // Normalized delivery into a marked directory is refused, into an unmarked one it is fine.
+        assert!(guard_and_mark_sources(&mk(false), &only_cl, "l2_250ms.parquet").is_err());
+        let only_es = BTreeMap::from([(dn, vec!["ESH24".to_string()])]);
+        assert_eq!(
+            guard_and_mark_sources(&mk(false), &only_es, "l2_250ms.parquet").unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn day_strings_round_trip() {

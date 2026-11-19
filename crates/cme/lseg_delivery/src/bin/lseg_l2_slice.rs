@@ -278,6 +278,11 @@ enum Command {
         /// RICs that the main package already holds are left to the main one).
         #[arg(long)]
         only_rics: Option<PathBuf>,
+        /// Source of the databases: `normalized` (default) or `raw` (Raw LL2, docs/lseg/l2_raw.md):
+        /// raw RIC-year directories get the marker file `l2_source`, which the catalog turns into
+        /// `l2_directories.source = 'raw'`; a RIC-year never mixes the two.
+        #[arg(long, default_value = "normalized", value_parser = ["normalized", "raw"])]
+        l2_source: String,
         #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
         target_root: PathBuf,
         /// Local staging directory (NVMe); removed at the end.
@@ -619,6 +624,7 @@ fn main() -> Result<()> {
             to,
             exchange_map,
             exchange_conflicts,
+            l2_source,
             exchanges,
             only_rics,
             target_root,
@@ -670,6 +676,7 @@ fn main() -> Result<()> {
                 status_addr: (!no_gate).then_some(status_addr),
                 dry_run,
                 max_files,
+                source_raw: l2_source == "raw",
             };
             let summary = l2_deliver::run_deliver(cfg)?;
             println!("{summary}");

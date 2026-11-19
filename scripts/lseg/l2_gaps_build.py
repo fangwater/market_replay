@@ -251,6 +251,9 @@ CREATE TABLE l2_year_summary (
  utc_year INTEGER PRIMARY KEY, main_gb REAL, main_rics INTEGER, supplement_gb REAL, l2_rics_total INTEGER,
  l2_products INTEGER, tas_products INTEGER, tas_products_without_l2 INTEGER, note TEXT);
 CREATE TABLE conventions (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE l2_raw_versions (
+ ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL, first_day TEXT NOT NULL,
+ last_day TEXT NOT NULL, days INTEGER NOT NULL, product TEXT, PRIMARY KEY(ric, utc_year));
 CREATE VIEW l2_unfillable_products AS
  SELECT product, utc_year, SUM(COALESCE(n_rics, 1)) rics, kind, GROUP_CONCAT(DISTINCT reason) reasons
  FROM l2_unfillable GROUP BY product, utc_year, kind;
@@ -258,6 +261,12 @@ CREATE VIEW l2_unfillable_products AS
 for r in rows:
     db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now))
+# RIC-years whose L2 files were built from Raw LL2 (catalog l2_directories.source = 'raw'; older catalogs have no column)
+if any(r[1] == "source" for r in cat.execute("pragma table_info(l2_directories)")):
+    prod_of = {r: p for r, p in cat.execute("select ric, product from contracts")}
+    for r, y, d, fd, ld, n in cat.execute(
+            "select ric, utc_year, directory, first_day, last_day, days from l2_directories where source='raw'"):
+        db.execute("insert into l2_raw_versions values (?,?,?,?,?,?,?)", (r, y, d, fd, ld, n, prod_of.get(r)))
 inv = json.load(open(a.packages_json)) if a.packages_json else {}
 allp = json.load(open(a.inventory_json)) if a.inventory_json else {}
 meta = {p["job"].strip("/"): p for y in allp.values() for p in y["packages"]}
@@ -325,6 +334,7 @@ conv = {
     "partial_threshold": "l2_days < %.1f * tas_days" % THRESHOLD, "window_slack_days": str(SLACK_DAYS),
     "reasons": "not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict | in_package_not_delivered",
     "daily_2026_note": "L2 from 2026-06-01 comes from daily files that have no Report here; 2026 reasons only know the package Reports up to 2026-05-30",
+    "l2_raw_versions": "RIC-years whose L2 files are built from Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us, see docs/lseg/l2_raw.md), not from Normalized LL2; every other L2 RIC-year is Normalized. Same information: catalog.sqlite l2_directories.source",
     "query": "select product, rics, kind, reasons from l2_unfillable_products where utc_year=2025 order by product",
 }
 db.executemany("insert into conventions values (?,?)", conv.items())
