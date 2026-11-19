@@ -82,7 +82,7 @@ cargo run --release -p cn_futures_l2 --example compare_l2_db -- <临时目录>/d
 
 2026-11-17 对 20261116 的上期所、郑商所、大商所、中金所重放（可续算状态机上线后），共 15,042,235 条记录与生产库逐字节相同，缺失和多余都是 0。因为大小单分桶的输入就是这些成交记录，分桶结果也不会变。
 
-## 大小单分桶与阈值文件（2026-11-17 起的新规则）
+## 大小单分桶与阈值文件
 
 `fill_1min_size_buckets` 现在只有两种用法，共用 `cn_futures_l2::size_thresholds`（文件格式、校验、月份规则）：
 
@@ -93,7 +93,7 @@ fill_1min_size_buckets --start 2026-11-17 --end 2026-11-17 --workers 4
 fill_1min_size_buckets --product SN --export-month 202610
 ```
 
-- **阈值：** 来源月里每个交易日只取当天**主力合约**（`roll/result/<ex>_dominant.csv`，用 `--dominant-dir` 改）的区间成交额，逐日合并后取线性 P50/P90；一笔成交用"它自己上海时间所在月的上月"的阈值。新规则从 2026-11-01 的交易日开始；更早的文件保持旧规则（同月、品种全部合约合并），工具不会也不应该再去改它们。
+- **阈值：** 来源月里每个交易日只取当天**主力合约**（`roll/result/<ex>_dominant.csv`，用 `--dominant-dir` 改）的区间成交额，逐日合并后取线性 P50/P90；一笔成交用"它自己上海时间所在月的上月"的阈值。2026 年 1–10 月已于 2026-11-19 正式回补，和 11 月交易日采用同一口径。2025 年及以前的档案使用旧规则（同月、品种全部合约合并）。
 - **文件：** `--threshold-dir`（默认 `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/size_thresholds`）下 `dominant_by_day/<YYYYMM>/<品种>.json`，原子写入；覆盖日文件时缺文件会现算并写入。
 - **缺阈值：** 上月没有该品种的主力成交（新上市）时，该品种当天文件原样保留，标准错误输出 `MISSING-THRESHOLDS ...`，不写 0、不用别的月份替代。
 - **改动安全：** 只改写 `--start/--end` 范围内的日文件；`cn-daily` 传本次处理的第一天到最后一天。
