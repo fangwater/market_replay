@@ -8,7 +8,8 @@
 //!
 //! An explicit `--start` and `--end` are required and only day files inside
 //! that range are rewritten: files of earlier days keep whatever rule filled
-//! them (the old same-month all-contract thresholds before 2026-11-17).
+//! them. In the published archive the preceding-month rule covers 2026
+//! trading days after the January–October 2026 historical backfill.
 //! A product/day whose prior-month thresholds do not exist (new listing, no
 //! dominant trades) is left exactly as it is and reported as
 //! `MISSING-THRESHOLDS`; thresholds are never invented.

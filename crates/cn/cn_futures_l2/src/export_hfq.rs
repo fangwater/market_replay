@@ -39,7 +39,7 @@ pub struct HfqArgs {
     pub in_root: PathBuf,
     pub roll_root: PathBuf,
     pub out_root: PathBuf,
-    pub ylabel_out: PathBuf,
+    pub ylabel_out: Option<PathBuf>,
     pub start: NaiveDate,
     pub end: NaiveDate,
     pub workers: usize,
@@ -133,10 +133,12 @@ fn export_product(args: &HfqArgs, exchange: &str, product: &str) -> Result<Expor
         for row in &mut rows {
             row.contract_id = product.to_string();
         }
-        hfq_by_id
-            .entry(product.to_string())
-            .or_default()
-            .extend(rows.iter().cloned());
+        if args.ylabel_out.is_some() {
+            hfq_by_id
+                .entry(product.to_string())
+                .or_default()
+                .extend(rows.iter().cloned());
+        }
         let n = rows.len() as u64;
         write_day_parquet(&dest, &rows)?;
         stats.files += 1;
@@ -146,6 +148,9 @@ fn export_product(args: &HfqArgs, exchange: &str, product: &str) -> Result<Expor
             day.format("%Y%m%d")
         );
     }
+    let Some(ylabel_out) = &args.ylabel_out else {
+        return Ok(stats);
+    };
     let mut y_by_day: HashMap<NaiveDate, Vec<crate::ylabel_1m::YlabelRow>> = HashMap::new();
     for (contract_id, mut rows) in hfq_by_id {
         rows.sort_by_key(|row| row.ts);
@@ -161,8 +166,7 @@ fn export_product(args: &HfqArgs, exchange: &str, product: &str) -> Result<Expor
     let mut ydays: Vec<NaiveDate> = y_by_day.keys().copied().collect();
     ydays.sort();
     for day in ydays {
-        let dest = args
-            .ylabel_out
+        let dest = ylabel_out
             .join(exchange)
             .join(product)
             .join(format!("{}.parquet", day.format("%Y%m%d")));
@@ -183,8 +187,8 @@ pub fn run_export(args: HfqArgs) -> Result<ExportStats> {
     if args.out_root.to_string_lossy().contains("cme_tas_rocksdb")
         || args
             .ylabel_out
-            .to_string_lossy()
-            .contains("cme_tas_rocksdb")
+            .as_ref()
+            .is_some_and(|path| path.to_string_lossy().contains("cme_tas_rocksdb"))
     {
         bail!("refusing to write hfq into a CME RocksDB path");
     }
@@ -195,7 +199,9 @@ pub fn run_export(args: HfqArgs) -> Result<ExportStats> {
         bail!("--workers must be positive");
     }
     fs::create_dir_all(&args.out_root)?;
-    fs::create_dir_all(&args.ylabel_out)?;
+    if let Some(path) = &args.ylabel_out {
+        fs::create_dir_all(path)?;
+    }
     let exchanges = list_roll_exchanges(&args.roll_root)?;
     let mut jobs = Vec::new();
     for exchange in exchanges {
