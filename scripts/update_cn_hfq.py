@@ -90,13 +90,17 @@ def build(root, stage, roll, raw, through, exporter, workers, staged, rebuild):
     selected, adjustments = read_roll(roll, through, raw)
     old_manifest = root / MANIFEST
     old_through = ""
+    old_markets = {}
     old_selected, old_adjustments = {}, {}
     if old_manifest.is_file():
-        old_through = json.loads(old_manifest.read_text())["through"].replace("-", "")
+        previous = json.loads(old_manifest.read_text())
+        old_through = previous["through"].replace("-", "")
+        old_markets = previous["markets"]
         if old_through > through:
             raise ValueError("cn-daily watermark is behind the published HFQ generation")
         old_selected, old_adjustments = read_roll(root / PROVENANCE / "roll", old_through, raw)
     expected = {}
+    known_gaps = {}
     groups = defaultdict(list)
     for (exchange, product), dates in sorted(selected.items()):
         market = exchange, product
@@ -109,7 +113,13 @@ def build(root, stage, roll, raw, through, exporter, workers, staged, rebuild):
         existing = parquet_days(original)
         selected_days = {day for day in dates if first <= day and skipped <= day}
         missing_raw = selected_days - available
-        if any(day > max(existing, default="") for day in missing_raw):
+        previous_market = old_markets.get(f"{exchange}/{product}", {})
+        gaps = set(previous_market.get("source_gaps", []))
+        last_existing = max(existing, default="")
+        if not old_markets and staged:
+            gaps = {day for day in selected_days - parquet_days(stage / exchange / product)
+                    if day <= last_existing}
+        if missing_raw - gaps:
             raise ValueError(f"missing new raw source for {exchange}/{product}: {sorted(missing_raw)}")
         days = selected_days & available
         if not existing <= days:
@@ -118,6 +128,7 @@ def build(root, stage, roll, raw, through, exporter, workers, staged, rebuild):
         if not days:
             continue
         expected[market] = days
+        known_gaps[market] = gaps
         if staged:
             continue
         carry = set()
@@ -130,7 +141,7 @@ def build(root, stage, roll, raw, through, exporter, workers, staged, rebuild):
             for day in sorted(carry):
                 name = f"{day}.parquet"
                 os.link(original / name, destination / name)
-        if missing := days - carry:
+        if missing := days - carry - (gaps if carry else set()):
             groups[min(missing)].append(product)
     if not expected:
         raise ValueError("archive has no selected products")
@@ -149,13 +160,15 @@ def build(root, stage, roll, raw, through, exporter, workers, staged, rebuild):
     markets = {}
     for (exchange, product), days in expected.items():
         actual = parquet_days(stage / exchange / product)
-        if actual != days:
+        gaps = known_gaps[exchange, product]
+        if actual - days or days - actual - gaps or not actual or max(actual) != max(days):
             raise ValueError(f"{exchange}/{product} staged coverage mismatch: "
                              f"missing {sorted(days - actual)[:5]}, extra {sorted(actual - days)[:5]}")
         latest = max(days)
         markets[f"{exchange}/{product}"] = {
             "first_day": min(days), "last_day": latest, "last_contract": selected[exchange, product][latest],
-            "files": len(days),
+            "files": len(actual),
+            "source_gaps": sorted(gaps - actual),
         }
         if latest == through:
             markets[f"{exchange}/{product}"].update(
