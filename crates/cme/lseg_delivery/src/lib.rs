@@ -5,6 +5,7 @@ pub mod l2_db;
 pub mod l2_deliver;
 pub mod l2_extract;
 pub mod l2_layout;
+pub mod l2_raw;
 pub mod l2_report;
 pub mod l2_slice;
 pub mod l2_stream;

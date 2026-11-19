@@ -29,6 +29,7 @@
 //!   Only the first part carries a `#RIC` header line.
 //! * A failing unit is reported and gets no marker; the other units go on.
 use crate::l2_db::{self, RicOutcome, WashTarget, WashedRic};
+use crate::l2_raw::RawConverter;
 use crate::l2_slice::{day_number, expected_header};
 use anyhow::{bail, ensure, Context, Result};
 use flate2::read::MultiGzDecoder;
@@ -112,6 +113,9 @@ pub struct StreamConfig {
     /// Called by producers before each block; blocks while the run is paused.
     pub gate: Arc<dyn Fn() + Send + Sync>,
     pub progress: Arc<Progress>,
+    /// Raw LL2 mode: the stream units are Raw LL2 packages, converted into
+    /// Normalized rows (`l2_raw`) before washing; only these RICs are washed.
+    pub raw_ll2: Option<Arc<std::collections::BTreeSet<String>>>,
 }
 
 #[derive(Debug, Default)]
@@ -218,10 +222,22 @@ struct PartReader {
     carry: Vec<u8>,
     progress: Arc<Progress>,
     header: String,
+    /// Raw LL2 mode: raw text lines in, Normalized rows out.
+    raw: Option<(RawConverter, Vec<u8>)>,
 }
 
 impl PartReader {
-    fn new(parts: Vec<PathBuf>, start: usize, progress: Arc<Progress>) -> Self {
+    fn new(
+        parts: Vec<PathBuf>,
+        start: usize,
+        progress: Arc<Progress>,
+        raw: Option<Arc<std::collections::BTreeSet<String>>>,
+    ) -> Self {
+        let header = if raw.is_some() {
+            cme_tas_replay::raw_ll2::HEADER.to_string()
+        } else {
+            expected_header()
+        };
         Self {
             parts,
             next_part: start,
@@ -229,7 +245,8 @@ impl PartReader {
             pending: None,
             carry: Vec::new(),
             progress,
-            header: expected_header(),
+            header,
+            raw: raw.map(|w| (RawConverter::new(Some(w)), Vec::new())),
         }
     }
 
@@ -261,8 +278,30 @@ impl PartReader {
     }
 
     /// Replaces `out` by whole lines, about `limit` bytes (read in big reads, not
-    /// line by line); false when the stream is over and nothing was read.
+    /// line by line); false when the stream is over and nothing was read. In Raw
+    /// mode the lines are converted Normalized rows (a block that yields none is
+    /// skipped).
     fn read_block(&mut self, out: &mut Vec<u8>, limit: usize) -> Result<bool> {
+        if self.raw.is_none() {
+            return self.read_text_block(out, limit);
+        }
+        let mut text = std::mem::take(&mut self.raw.as_mut().expect("raw").1);
+        let result = (|| loop {
+            out.clear();
+            if !self.read_text_block(&mut text, limit)? {
+                self.raw.as_ref().expect("raw").0.finish()?;
+                return Ok(false);
+            }
+            self.raw.as_mut().expect("raw").0.convert(&text, out)?;
+            if !out.is_empty() {
+                return Ok(true);
+            }
+        })();
+        self.raw.as_mut().expect("raw").1 = text;
+        result
+    }
+
+    fn read_text_block(&mut self, out: &mut Vec<u8>, limit: usize) -> Result<bool> {
         loop {
             out.clear();
             out.append(&mut self.carry);
@@ -322,8 +361,8 @@ pub fn first_ric_of_part(path: &Path) -> Result<String> {
             "{}: no data row",
             path.display()
         );
-        if line.first() == Some(&b'#') || trim_eol(&line).is_empty() {
-            continue;
+        if matches!(line.first(), Some(b'#' | b',')) || trim_eol(&line).is_empty() {
+            continue; // header, blank, or the FID rows of a Raw LL2 message
         }
         let ric = line.split(|b| *b == b',').next().unwrap_or(&[]);
         return Ok(String::from_utf8_lossy(ric).into_owned());
@@ -589,7 +628,7 @@ fn init_prod(rt: &Rt, ui: usize) -> Prod {
     };
     u.state.lock().expect("unit lock").started = Some(Instant::now());
     Prod {
-        rd: PartReader::new(parts, start, Arc::clone(&cfg.progress)),
+        rd: PartReader::new(parts, start, Arc::clone(&cfg.progress), cfg.raw_ll2.clone()),
         block: Vec::with_capacity(cfg.block_bytes + (1 << 20)),
         seg: Vec::new(),
         cur: Vec::new(),
@@ -1311,6 +1350,7 @@ mod tests {
             block_bytes: 4_097, // cuts lines in the middle: exercises the carry
             gate: Arc::new(|| {}),
             progress: Arc::new(Progress::default()),
+            raw_ll2: None,
         }
     }
     fn ecfg(t: &Path, db_root: PathBuf, out: &str, params: Params) -> ExtractConfig {

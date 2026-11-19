@@ -1,7 +1,7 @@
 # LSEG L2：按固定频率下采样的 parquet（试跑）
 
 2026-11-17 用户要求补一份 LSEG 的 L2 数据，用 parquet 表示，并支持按固定频率切片。
-本数据**只由 Normalized LL2（`normalisedLL2`）日包直接处理**，不用 Raw LL2：用户说明此前比较过，Raw LL2 没有 Normalized 之外的新增数据
+本数据**由 Normalized LL2（`normalisedLL2`）日包直接处理**。Raw LL2 只用于 Normalized 缺失的 RIC（2026-11-19 起，见 [l2_raw.md](l2_raw.md)）：此前比较过，Raw 对 Normalized 已有的 RIC 没有新增数据，但 Normalized 完全没有的品种（CL、NG、美债等）Raw 里有
 （数据契约见 `preprocess/data_format/lseg/normalisedLL2.md` 和 `rawLL2.md`）。
 本轮是试跑：只做 CME 品种，不并入 `lseg-daily`，输出写在本机，不写交付盘。
 

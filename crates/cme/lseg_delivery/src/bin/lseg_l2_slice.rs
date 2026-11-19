@@ -8,6 +8,7 @@ use lseg_delivery::{
     l2_batch::{run_batch, BatchConfig},
     l2_db, l2_deliver,
     l2_extract::{run_extract, run_extract_rics, ExtractConfig},
+    l2_raw,
     l2_report::{run_report, ReportConfig},
     l2_slice::{day_number, slice_stream, Layout, NullSink, Params, ParquetSink, DAY_NS},
     l2_stream::{run_stream, Progress, StreamConfig, Unit, UnitKind},
@@ -118,6 +119,12 @@ enum Command {
         status_addr: String,
         #[arg(long)]
         no_gate: bool,
+        /// Raw LL2 mode: the `--stream` units are Raw LL2 packages (`Legacy Level 2`);
+        /// they are converted to Normalized rows (docs/lseg/l2_raw.md) and only the
+        /// RICs of this file (one per line) are washed. Databases go to `_stream/<id>`;
+        /// use an id starting with `raw`.
+        #[arg(long)]
+        raw_ll2_rics: Option<PathBuf>,
     },
     /// Stages 1+2: decompress `<raw-root>/<PRODUCT>/<PRODUCT>_<day>_normll2.csv.gz`
     /// once into RIC-aligned zstd shards and wash them into the day RocksDB
@@ -747,6 +754,7 @@ fn main() -> Result<()> {
             gaps,
             status_addr,
             no_gate,
+            raw_ll2_rics,
         } => {
             ensure!(
                 (2..=limits::L2_SLICE_WORKERS).contains(&workers),
@@ -814,6 +822,11 @@ fn main() -> Result<()> {
                 block_bytes: lseg_delivery::l2_stream::BLOCK_BYTES,
                 gate: Arc::new(move || g2.wait()),
                 progress: Arc::clone(&progress_state),
+                raw_ll2: raw_ll2_rics
+                    .as_deref()
+                    .map(l2_raw::read_ric_list)
+                    .transpose()?
+                    .map(Arc::new),
             };
             let started = Instant::now();
             let rep = run_stream(&cfg, units);
@@ -898,6 +911,7 @@ fn main() -> Result<()> {
                     block_bytes: lseg_delivery::l2_stream::BLOCK_BYTES,
                     gate: Arc::new(|| {}),
                     progress: Arc::new(Progress::default()),
+                    raw_ll2: None,
                 };
                 let rep = run_stream(&cfg, units)?;
                 let washed = rep
