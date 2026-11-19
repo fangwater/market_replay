@@ -20,6 +20,8 @@ struct Args {
     #[arg(long, default_value = DEFAULT_YLABEL_OUT)]
     ylabel_out: PathBuf,
     #[arg(long)]
+    baseline_only: bool,
+    #[arg(long)]
     start: String,
     #[arg(long)]
     end: String,
@@ -34,10 +36,11 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.out_root.to_string_lossy().contains("cme_tas_rocksdb")
-        || args
-            .ylabel_out
-            .to_string_lossy()
-            .contains("cme_tas_rocksdb")
+        || (!args.baseline_only
+            && args
+                .ylabel_out
+                .to_string_lossy()
+                .contains("cme_tas_rocksdb"))
     {
         bail!("refusing to write hfq into a CME RocksDB path");
     }
@@ -51,7 +54,7 @@ fn main() -> Result<()> {
         in_root: args.in_root,
         roll_root: args.roll_root,
         out_root: args.out_root,
-        ylabel_out: args.ylabel_out,
+        ylabel_out: (!args.baseline_only).then_some(args.ylabel_out),
         start: parse_day(&args.start)?,
         end: parse_day(&args.end)?,
         workers: args.workers,

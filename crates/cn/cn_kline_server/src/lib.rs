@@ -17,9 +17,9 @@ use cn_futures_l2::multipliers::{load_multiplier_catalog, ProductMultiplier};
 use cn_market_proto::cn_futures_market_server::{CnFuturesMarket, CnFuturesMarketServer};
 use cn_market_proto::{
     get_minute_bars_request::Range, BookLevel, Contract, DataState, Exchange, GetDataStateRequest,
-    GetMinuteBarsRequest, GetMinuteBarsResponse, GetSizeThresholdsRequest,
-    GetSizeThresholdsResponse, GetTradingSessionsRequest, GetTradingSessionsResponse, MinuteBar,
-    ProductSessions, ProductThresholds, SizeBuckets,
+    GetHfqMinuteBarsRequest, GetHfqMinuteBarsResponse, GetMinuteBarsRequest, GetMinuteBarsResponse,
+    GetSizeThresholdsRequest, GetSizeThresholdsResponse, GetTradingSessionsRequest,
+    GetTradingSessionsResponse, MinuteBar, ProductSessions, ProductThresholds, SizeBuckets,
 };
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -28,6 +28,7 @@ use std::sync::{Arc, RwLock};
 use tonic::{Request, Response, Status};
 
 pub mod dominant;
+mod hfq;
 pub mod intraday;
 pub mod live;
 pub mod live_seg;
@@ -491,7 +492,7 @@ impl Service {
                     r,
                     td,
                     multiplier,
-                    tick,
+                    Some(tick),
                     false,
                     req.include_empty_minutes,
                     window,
@@ -535,7 +536,7 @@ impl Service {
                                 r,
                                 td,
                                 multiplier,
-                                tick,
+                                Some(tick),
                                 true,
                                 true,
                                 None,
@@ -722,7 +723,7 @@ fn make_bar(
     r: &cn_futures_core::baseline_1min::BaselineMinute,
     td: u32,
     multiplier: f64,
-    tick: f64,
+    tick: Option<f64>,
     provisional: bool,
     include_empty: bool,
     window: Option<(i64, i64)>,
@@ -736,16 +737,14 @@ fn make_bar(
         return Ok(None);
     }
     let (o, h, l, c) = minute_prices(r.open, r.high, r.low, r.close, r.volume)?;
-    let vwap = if r.volume > 0.0 {
+    let vwap = if r.volume > 0.0 && tick.is_some() {
         r.amount / r.volume / multiplier
     } else {
         r.vwap.unwrap_or(f64::NAN)
     };
-    let (hh, ll, widened) = if r.volume > 0.0 {
-        widen(h, l, vwap, tick)
-    } else {
-        (h, l, false)
-    };
+    let (hh, ll, widened) = tick
+        .filter(|_| r.volume > 0.0)
+        .map_or((h, l, false), |tick| widen(h, l, vwap, tick));
     Ok(Some(MinuteBar {
         provisional,
         size_buckets: size_buckets_for(r, provisional, thresholds),
@@ -801,6 +800,16 @@ fn book5(b: &cn_futures_core::baseline_1min::Book5) -> cn_market_proto::Book5 {
 
 #[tonic::async_trait]
 impl CnFuturesMarket for Grpc {
+    async fn get_hfq_minute_bars(
+        &self,
+        request: Request<GetHfqMinuteBarsRequest>,
+    ) -> Result<Response<GetHfqMinuteBarsResponse>, Status> {
+        let service = self.0.clone();
+        tokio::task::spawn_blocking(move || service.hfq_bars(request.into_inner()))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map(Response::new)
+    }
     type StreamReplayFramesStream =
         tokio_stream::wrappers::ReceiverStream<Result<cn_market_proto::ReplayFrameBatch, Status>>;
     async fn stream_replay_frames(

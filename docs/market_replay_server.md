@@ -30,6 +30,8 @@ scripts/market_replay_server.sh restart --execute   # 有任务在跑时会拒�
 | 常驻服务 `[[service]]` | 子进程，退出后按 2 秒起、最长 60 秒的退避自动重启：`cn-reference-ui`（Python，仅 127.0.0.1:18766，:8765 转发给它）、`cme-reference`（:8770）、`exchange-mcp`（:8780），以及 `mdl-replay`（默认关闭，按需在配置里启用） |
 | 定时任务 `[[job]]` | 按时区和时刻排程，所有任务走同一个队列依次执行：`cn-daily`（上海 16:30）、`ib-kline-daily`（上海 09:30）、`cn-reference-daily`（上海 18:15）。每个任务各自发钉钉 |
 
+`cn-hfq-daily` 在上海 17:00 排队，随后按国内分钟归档水位更新主力连续 HFQ。见 [国内期货每日处理](cn_daily_and_kline.md#主力连续-hfq)。
+
 ## 参考数据 API（`[reference]` 段，2026-11-17 起 Rust）
 
 `crates/ref/cn_reference` 作为库挂在本进程里，`[reference].listen`（`0.0.0.0:8765`）由 Rust 直接监听，先于 cn_market 和看板启动，所以 kline 等下游取元数据不再依赖 Python 子进程的启动顺序。数据库连接串只从环境变量 `CN_FUTURES_REF_DATABASE_URL` 或 `[reference].env_file`（`reference/.env`）读取，不打印。
