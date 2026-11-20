@@ -108,6 +108,8 @@ pub struct RawConverter {
     started: bool,
     pub messages: u64,
     pub rows_out: u64,
+    /// Messages per washed RIC (header rows seen), to check against the vendor Report.
+    pub counts: std::collections::BTreeMap<String, u64>,
 }
 
 impl RawConverter {
@@ -129,6 +131,7 @@ impl RawConverter {
             started: false,
             messages: 0,
             rows_out: 0,
+            counts: Default::default(),
         }
     }
 
@@ -217,6 +220,12 @@ impl RawConverter {
             for s in &mut self.slots {
                 s.clear();
             }
+        }
+        if self.ric_wanted {
+            *self
+                .counts
+                .entry(String::from_utf8_lossy(&self.ric).into_owned())
+                .or_default() += 1;
         }
         let class = fields[5];
         ensure!(

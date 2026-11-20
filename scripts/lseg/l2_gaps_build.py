@@ -42,6 +42,8 @@ ap.add_argument("--main-glob", default="/mnt/hdd-raid5-72t/liang_torch/lseg_data
 ap.add_argument("--problems")
 ap.add_argument("--years", default="2024,2025,2026")
 ap.add_argument("--threads", type=int, default=8)
+ap.add_argument("--ric-catalog", default="/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/ric_catalog.csv",
+                help="purchase catalog (routed_product, source_layers per RIC): tells whether an L2 layer was ever ordered")
 ap.add_argument("--no-gate", action="store_true")
 ap.add_argument("--publish")
 ap.add_argument("--replace", action="store_true")
@@ -120,6 +122,39 @@ for p in paths:
         for r in csv.DictReader(f):
             rows[r["#RIC"]] = (int(r.get("Count") or 0), r["Start"][:10], r["End"][:10])
     reports[name] = rows
+
+
+# purchase catalog: which source layers (tas, summarised, normalisedLL2, rawLL2, ...) exist per RIC / per product
+layers_of, prod_layers = {}, collections.defaultdict(set)
+if os.path.exists(a.ric_catalog):
+    with open(a.ric_catalog, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            ls = set(r["source_layers"].split("|"))
+            layers_of[r["ric"]] = ls
+            prod_layers[r["routed_product"]] |= ls
+HAS_L2 = {"normalisedLL2", "rawLL2"}
+
+
+def cause_of(ric, prod, reason, ev):
+    """The reason in plain words (what is missing and why), for the person reading the table."""
+    if reason == "not_in_any_package":
+        ls = layers_of.get(ric) if ric else prod_layers.get(prod)
+        if ls is None:
+            return "No L2 data: no L2 package lists it and the purchase catalog has no entry for it (TAS only)."
+        if not (ls & HAS_L2):
+            return ("No L2 data: L2 was never ordered for it. The purchase catalog has only %s for this %s, no normalisedLL2 / rawLL2 layer, "
+                    "so LSEG never exported L2 for it (a new LSEG L2 job would be needed)." % ("+".join(sorted(ls)), "RIC" if ric else "product"))
+        if ev.startswith("TAS only after 2026-06-01") or "daily L2 files of that period have no Report" in ev:
+            return ("No L2 data: it only trades after 2026-06-01, where L2 comes from the daily files; those hold only the near contracts "
+                    "of the product and this RIC is not one of them.")
+        return "Unexpected: the purchase catalog lists an L2 layer for it but no downloaded package does; check the package list."
+    if reason == "report_count_zero":
+        return "No L2 data: the LSEG package lists the RIC but with Count 0 (the vendor has no L2 messages for it in the period)."
+    if reason == "outside_package_window":
+        return "Partly missing: the LSEG package covers %s only; the rest of the TAS period is outside it." % ev.split("Start..End ")[-1].split(", TAS")[0]
+    if reason == "in_package_not_delivered":
+        return "Defect: a package holds data for it but nothing was delivered; to be fixed."
+    return reason
 
 
 def pkg_years(name):
@@ -241,7 +276,8 @@ CREATE TABLE l2_unfillable (
  ric TEXT, utc_year INTEGER NOT NULL, product TEXT NOT NULL, exchange_dir TEXT,
  tas_first_day TEXT, tas_last_day TEXT, tas_days INTEGER, l2_days INTEGER,
  l2_first_day TEXT, l2_last_day TEXT, kind TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT NOT NULL,
- checked_packages TEXT NOT NULL, checked_utc TEXT NOT NULL, n_rics INTEGER);
+ checked_packages TEXT NOT NULL, checked_utc TEXT NOT NULL, n_rics INTEGER,
+ cause TEXT NOT NULL DEFAULT '', purchase_layers TEXT);
 CREATE UNIQUE INDEX l2_unfillable_ric ON l2_unfillable(ric, utc_year) WHERE ric IS NOT NULL;
 CREATE UNIQUE INDEX l2_unfillable_prod ON l2_unfillable(product, utc_year) WHERE ric IS NULL;
 CREATE TABLE l2_package_inventory (
@@ -259,8 +295,10 @@ CREATE VIEW l2_unfillable_products AS
  FROM l2_unfillable GROUP BY product, utc_year, kind;
 """)
 for r in rows:
-    db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
-               r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now))
+    ls = layers_of.get(r[0])
+    db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)",
+               r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now,
+                        cause_of(r[0], r[2], r[11], r[12]), "|".join(sorted(ls)) if ls else None))
 # RIC-years whose L2 files were built from Raw LL2 (catalog l2_directories.source = 'raw'; older catalogs have no column)
 if any(r[1] == "source" for r in cat.execute("pragma table_info(l2_directories)")):
     prod_of = {r: p for r, p in cat.execute("select ric, product from contracts")}
@@ -300,8 +338,11 @@ for y in sorted(early):
         else:
             kind, rs_ = "not_in_any_package", "not_in_any_package"
             ev = "no RIC of the product has data in any of the %d packages of the year" % len(names)
-        db.execute("insert into l2_unfillable values (NULL,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?)",
-                   (y, prod, kind, rs_, ev, json.dumps(names), now, len(rs)))
+        cause = ("Not washed yet: an L2 package of that year holds the product (inventory only for years before 2024)." if kind == "not_washed"
+                 else cause_of(None, prod, "not_in_any_package", ev))
+        pl = prod_layers.get(prod)
+        db.execute("insert into l2_unfillable values (NULL,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,?)",
+                   (y, prod, kind, rs_, ev, json.dumps(names), now, len(rs), cause, "|".join(sorted(pl)) if pl else None))
 
 # per-year summary: packages/GB/RICs from the all-periods inventory; for the window years the products without L2
 # are recomputed from what is delivered (l2_directories); the inventory's number (no package at all) stays in the note
@@ -334,6 +375,7 @@ conv = {
     "partial_threshold": "l2_days < %.1f * tas_days" % THRESHOLD, "window_slack_days": str(SLACK_DAYS),
     "reasons": "not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict | in_package_not_delivered",
     "daily_2026_note": "L2 from 2026-06-01 comes from daily files that have no Report here; 2026 reasons only know the package Reports up to 2026-05-30",
+    "cause": "plain-language reason per row; purchase_layers = source layers of the RIC/product in the purchase catalog (artifacts/lseg_exchange_groups_20261109/ric_catalog.csv): no normalisedLL2/rawLL2 there means L2 was never ordered",
     "l2_raw_versions": "RIC-years whose L2 files are built from Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us, see docs/lseg/l2_raw.md), not from Normalized LL2; every other L2 RIC-year is Normalized. Same information: catalog.sqlite l2_directories.source",
     "query": "select product, rics, kind, reasons from l2_unfillable_products where utc_year=2025 order by product",
 }
