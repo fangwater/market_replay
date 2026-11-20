@@ -287,6 +287,10 @@ enum Command {
         /// `l2_directories.source = 'raw'`; a RIC-year never mixes the two.
         #[arg(long, default_value = "normalized", value_parser = ["normalized", "raw"])]
         l2_source: String,
+        /// With `--l2-source raw`: RIC-years that already hold Normalized L2 days get their missing days from
+        /// Raw; the marker says `mixed` and lists the Raw days (catalog: `l2_directories.source = 'mixed'`).
+        #[arg(long)]
+        allow_mixed: bool,
         #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
         target_root: PathBuf,
         /// Local staging directory (NVMe); removed at the end.
@@ -629,6 +633,7 @@ fn main() -> Result<()> {
             exchange_map,
             exchange_conflicts,
             l2_source,
+            allow_mixed,
             exchanges,
             only_rics,
             target_root,
@@ -681,6 +686,7 @@ fn main() -> Result<()> {
                 dry_run,
                 max_files,
                 source_raw: l2_source == "raw",
+                allow_mixed,
             };
             let summary = l2_deliver::run_deliver(cfg)?;
             println!("{summary}");

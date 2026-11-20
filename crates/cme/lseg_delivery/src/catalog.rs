@@ -628,6 +628,22 @@ async fn carry_l2(conn: &mut SqliteConnection, old: &Path) -> Result<i64> {
              SELECT ric,utc_year,directory,first_day,last_day,days,'normalized' FROM old.l2_directories"
         };
         sqlx::query(copy).execute(&mut *conn).await?;
+        let old_days: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM old.sqlite_master WHERE type='table' AND name='l2_raw_days'",
+        )
+        .persistent(false)
+        .fetch_one(&mut *conn)
+        .await?;
+        if old_days > 0 {
+            sqlx::query("DELETE FROM main.l2_raw_days")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "INSERT INTO main.l2_raw_days SELECT ric,utc_year,utc_day FROM old.l2_raw_days",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
         sqlx::query(
             "INSERT OR REPLACE INTO main.conventions SELECT key,value FROM old.conventions WHERE key LIKE 'l2\\_%' ESCAPE '\\'",
         )
@@ -972,24 +988,45 @@ async fn ensure_l2_source_column(conn: &mut SqliteConnection) -> Result<()> {
 }
 
 const L2_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS l2_raw_days (
+ ric TEXT NOT NULL, utc_year INTEGER NOT NULL, utc_day TEXT NOT NULL, PRIMARY KEY(ric,utc_year,utc_day)
+);
 CREATE TABLE IF NOT EXISTS l2_directories (
  ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL,
  first_day TEXT NOT NULL, last_day TEXT NOT NULL, days INTEGER NOT NULL,
- source TEXT NOT NULL DEFAULT 'normalized' CHECK (source IN ('normalized','raw')), PRIMARY KEY(ric,utc_year)
+ source TEXT NOT NULL DEFAULT 'normalized' CHECK (source IN ('normalized','raw','mixed')), PRIMARY KEY(ric,utc_year)
 );
 INSERT OR REPLACE INTO conventions VALUES
  ('l2_scope','l2_directories: L2 (10 levels) sampled on a 250 ms grid, l2_250ms.parquet; only rows where the book changed plus anchor rows; includes RICs without TAS (e.g. cfe weeklies); the source of every RIC-year is in column source'),
- ('l2_source','l2_directories.source: normalized = Normalized LL2 (the book as the vendor delivers it); raw = Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us: slots never assigned are empty, a REFRESH drops earlier knowledge; see docs/lseg/l2_raw.md). A raw RIC-year has the file <directory>/l2_source with the text raw. A RIC-year has exactly one source'),
+ ('l2_source','l2_directories.source: normalized = Normalized LL2 (the book as the vendor delivers it); raw = Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us: slots never assigned are empty, a REFRESH drops earlier knowledge; see docs/lseg/l2_raw.md). A raw RIC-year has the file <directory>/l2_source with the text raw. A RIC-year has one source, except mixed: it holds Normalized days, and the days in table l2_raw_days come from Raw (marker file: first line mixed, then one line raw_day YYYYMMDD per Raw day)'),
  ('l2_directory_usage','SELECT directory FROM l2_directories WHERE ric=?; read <directory>/<UTC YYYYMMDD>/l2_250ms.parquet (days between first_day and last_day may have gaps)');
 "#;
 
-/// `raw` if the RIC-year directory carries the marker file, else `normalized`.
-fn l2_source_of(dir: &Path) -> Result<&'static str> {
+/// Source of a RIC-year directory by its marker file: `normalized` (none), `raw`, or `mixed` with the Raw days.
+fn l2_source_of(dir: &Path) -> Result<(&'static str, Vec<String>)> {
     let marker = dir.join(L2_SOURCE_FILE);
     match fs::read_to_string(&marker) {
-        Ok(t) if t.trim() == "raw" => Ok("raw"),
+        Ok(t) if t.trim() == "raw" => Ok(("raw", Vec::new())),
+        Ok(t) if t.starts_with("mixed\n") => {
+            let days: Vec<String> = t
+                .lines()
+                .skip(1)
+                .map(|l| {
+                    l.strip_prefix("raw_day ")
+                        .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))
+                        .map(str::to_string)
+                        .with_context(|| format!("{}: bad line {l:?}", marker.display()))
+                })
+                .collect::<Result<_>>()?;
+            ensure!(
+                !days.is_empty(),
+                "{}: mixed without Raw days",
+                marker.display()
+            );
+            Ok(("mixed", days))
+        }
         Ok(t) => bail!("{}: unknown L2 source {:?}", marker.display(), t.trim()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("normalized"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(("normalized", Vec::new())),
         Err(e) => Err(e).with_context(|| format!("read {}", marker.display())),
     }
 }
@@ -1002,6 +1039,7 @@ struct L2Dir {
     last: String,
     days: i64,
     source: &'static str,
+    raw_days: Vec<String>,
 }
 
 fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
@@ -1040,7 +1078,7 @@ fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
                     }
                 }
                 if days > 0 {
-                    let source = l2_source_of(&dir)?;
+                    let (source, raw_days) = l2_source_of(&dir)?;
                     out.push(L2Dir {
                         ric: tasdb::unescape_component(&ric_dir),
                         year: y,
@@ -1049,6 +1087,7 @@ fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
                         last,
                         days,
                         source,
+                        raw_days,
                     });
                 }
             }
@@ -1080,7 +1119,18 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
     sqlx::query("DELETE FROM l2_directories")
         .execute(&mut conn)
         .await?;
+    sqlx::query("DELETE FROM l2_raw_days")
+        .execute(&mut conn)
+        .await?;
     for d in &found {
+        for day in &d.raw_days {
+            sqlx::query("INSERT INTO l2_raw_days(ric,utc_year,utc_day) VALUES (?,?,?)")
+                .bind(&d.ric)
+                .bind(d.year)
+                .bind(day)
+                .execute(&mut conn)
+                .await?;
+        }
         sqlx::query(
             "INSERT INTO l2_directories(ric,utc_year,directory,first_day,last_day,days,source) VALUES (?,?,?,?,?,?,?)",
         )
@@ -1411,9 +1461,23 @@ mod tests {
         // the marker decides the source of a walked RIC-year directory
         let d = t.path().join("cme/2024/CLF24");
         fs::create_dir_all(&d).unwrap();
-        assert_eq!(l2_source_of(&d).unwrap(), "normalized");
+        assert_eq!(l2_source_of(&d).unwrap().0, "normalized");
         fs::write(d.join(L2_SOURCE_FILE), "raw\n").unwrap();
-        assert_eq!(l2_source_of(&d).unwrap(), "raw");
+        assert_eq!(l2_source_of(&d).unwrap().0, "raw");
+        fs::write(
+            d.join(L2_SOURCE_FILE),
+            "mixed\nraw_day 20260105\nraw_day 20260106\n",
+        )
+        .unwrap();
+        assert_eq!(
+            l2_source_of(&d).unwrap(),
+            (
+                "mixed",
+                vec!["20260105".to_string(), "20260106".to_string()]
+            )
+        );
+        fs::write(d.join(L2_SOURCE_FILE), "mixed\n").unwrap();
+        assert!(l2_source_of(&d).is_err());
         fs::write(d.join(L2_SOURCE_FILE), "other\n").unwrap();
         assert!(l2_source_of(&d).is_err());
     }

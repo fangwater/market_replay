@@ -44,6 +44,8 @@ ap.add_argument("--years", default="2024,2025,2026")
 ap.add_argument("--threads", type=int, default=8)
 ap.add_argument("--ric-catalog", default="/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/lseg_exchange_groups_20261109/ric_catalog.csv",
                 help="purchase catalog (routed_product, source_layers per RIC): tells whether an L2 layer was ever ordered")
+ap.add_argument("--raw-reports", default="/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_raw",
+                help="directory with report_<year>.csv.gz of the Raw LL2 packages (used to say whether Raw has the RIC)")
 ap.add_argument("--no-gate", action="store_true")
 ap.add_argument("--publish")
 ap.add_argument("--replace", action="store_true")
@@ -125,17 +127,25 @@ for p in paths:
 
 
 # purchase catalog: which source layers (tas, summarised, normalisedLL2, rawLL2, ...) exist per RIC / per product
-layers_of, prod_layers = {}, collections.defaultdict(set)
+layers_of, prod_layers, years_of = {}, collections.defaultdict(set), {}
+raw_count = {}  # (ric, year) -> Count in the Raw LL2 Report of that year
+for _y in (2024, 2025, 2026):
+    _p = os.path.join(a.raw_reports, "report_%d.csv.gz" % _y)
+    if os.path.exists(_p):
+        with gzip.open(_p, "rt", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                raw_count[(r["#RIC"], _y)] = int(r.get("Count") or 0)
 if os.path.exists(a.ric_catalog):
     with open(a.ric_catalog, encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             ls = set(r["source_layers"].split("|"))
             layers_of[r["ric"]] = ls
+            years_of[r["ric"]] = set(r["source_years"].split("|"))
             prod_layers[r["routed_product"]] |= ls
 HAS_L2 = {"normalisedLL2", "rawLL2"}
 
 
-def cause_of(ric, prod, reason, ev):
+def cause_of(ric, prod, reason, ev, year=None):
     """The reason in plain words (what is missing and why), for the person reading the table."""
     if reason == "not_in_any_package":
         ls = layers_of.get(ric) if ric else prod_layers.get(prod)
@@ -144,12 +154,21 @@ def cause_of(ric, prod, reason, ev):
         if not (ls & HAS_L2):
             return ("No L2 data: L2 was never ordered for it. The purchase catalog has only %s for this %s, no normalisedLL2 / rawLL2 layer, "
                     "so LSEG never exported L2 for it (a new LSEG L2 job would be needed)." % ("+".join(sorted(ls)), "RIC" if ric else "product"))
+        if ric and str(y) not in years_of.get(ric, set()):
+            return ("No L2 data: the L2 layer in the purchase catalog belongs to an earlier contract with the same code (years %s; the one-digit "
+                    "year of the code repeats every ten years). This %d contract was never ordered with L2." % ("|".join(sorted(years_of.get(ric, set()))), y))
         if ev.startswith("TAS only after 2026-06-01") or "daily L2 files of that period have no Report" in ev:
             return ("No L2 data: it only trades after 2026-06-01, where L2 comes from the daily files; those hold only the near contracts "
                     "of the product and this RIC is not one of them.")
         return "Unexpected: the purchase catalog lists an L2 layer for it but no downloaded package does; check the package list."
     if reason == "report_count_zero":
-        return "No L2 data: the LSEG package lists the RIC but with Count 0 (the vendor has no L2 messages for it in the period)."
+        rc = raw_count.get((ric, year)) if ric else None
+        base = "Ordered, but the Normalized LL2 package lists the RIC with Count 0 (LSEG has no Normalized L2 messages for it in the period)."
+        if rc is None:
+            return base + " Raw LL2: no Report for that year or the RIC is not listed, so no L2 from Raw either."
+        if rc == 0:
+            return base + " The Raw LL2 package lists it with Count 0 as well: no L2 exists at LSEG for it. Cannot be filled."
+        return base + " The Raw LL2 package has %d messages for it: fillable from Raw (see l2_raw_versions)." % rc
     if reason == "outside_package_window":
         return "Partly missing: the LSEG package covers %s only; the rest of the TAS period is outside it." % ev.split("Start..End ")[-1].split(", TAS")[0]
     if reason == "in_package_not_delivered":
@@ -289,7 +308,8 @@ CREATE TABLE l2_year_summary (
 CREATE TABLE conventions (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE l2_raw_versions (
  ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL, first_day TEXT NOT NULL,
- last_day TEXT NOT NULL, days INTEGER NOT NULL, product TEXT, PRIMARY KEY(ric, utc_year));
+ last_day TEXT NOT NULL, days INTEGER NOT NULL, product TEXT, source TEXT NOT NULL, PRIMARY KEY(ric, utc_year));
+CREATE TABLE l2_raw_days (ric TEXT NOT NULL, utc_year INTEGER NOT NULL, utc_day TEXT NOT NULL, PRIMARY KEY(ric, utc_year, utc_day));
 CREATE VIEW l2_unfillable_products AS
  SELECT product, utc_year, SUM(COALESCE(n_rics, 1)) rics, kind, GROUP_CONCAT(DISTINCT reason) reasons
  FROM l2_unfillable GROUP BY product, utc_year, kind;
@@ -298,13 +318,16 @@ for r in rows:
     ls = layers_of.get(r[0])
     db.execute("insert into l2_unfillable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)",
                r[:2] + (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], json.dumps(pkgs_for(r[1])), now,
-                        cause_of(r[0], r[2], r[11], r[12]), "|".join(sorted(ls)) if ls else None))
+                        cause_of(r[0], r[2], r[11], r[12], r[1]), "|".join(sorted(ls)) if ls else None))
 # RIC-years whose L2 files were built from Raw LL2 (catalog l2_directories.source = 'raw'; older catalogs have no column)
 if any(r[1] == "source" for r in cat.execute("pragma table_info(l2_directories)")):
     prod_of = {r: p for r, p in cat.execute("select ric, product from contracts")}
-    for r, y, d, fd, ld, n in cat.execute(
-            "select ric, utc_year, directory, first_day, last_day, days from l2_directories where source='raw'"):
-        db.execute("insert into l2_raw_versions values (?,?,?,?,?,?,?)", (r, y, d, fd, ld, n, prod_of.get(r)))
+    for r, y, d, fd, ld, n, src in cat.execute(
+            "select ric, utc_year, directory, first_day, last_day, days, source from l2_directories where source in ('raw','mixed')"):
+        db.execute("insert into l2_raw_versions values (?,?,?,?,?,?,?,?)", (r, y, d, fd, ld, n, prod_of.get(r), src))
+    if cat.execute("select count(*) from sqlite_master where name='l2_raw_days'").fetchone()[0]:
+        for row in cat.execute("select ric, utc_year, utc_day from l2_raw_days"):
+            db.execute("insert into l2_raw_days values (?,?,?)", row)
 inv = json.load(open(a.packages_json)) if a.packages_json else {}
 allp = json.load(open(a.inventory_json)) if a.inventory_json else {}
 meta = {p["job"].strip("/"): p for y in allp.values() for p in y["packages"]}

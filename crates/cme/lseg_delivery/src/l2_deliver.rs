@@ -479,6 +479,9 @@ pub struct DeliverConfig {
     /// marker file `l2_source` (text `raw`), which `lseg_catalog l2-sync` turns into
     /// `l2_directories.source = 'raw'`. A RIC-year never mixes sources.
     pub source_raw: bool,
+    /// With `source_raw`: a RIC-year that already holds Normalized L2 days may get its missing days from Raw;
+    /// the marker file then says `mixed` and lists the Raw days.
+    pub allow_mixed: bool,
 }
 
 /// Source guard and marker: a RIC-year directory holds L2 of exactly one source. Raw delivery
@@ -489,21 +492,23 @@ fn guard_and_mark_sources(
     work: &BTreeMap<i64, Vec<String>>,
     file_name: &str,
 ) -> Result<u64> {
-    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut dirs: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     for (dn, rics) in work {
-        let year = &day_string(*dn)[..4];
+        let day = day_string(*dn);
         for ric in rics {
             let ex = cfg.exchange_of.get(ric).context("exchange of a work RIC")?;
-            dirs.insert(
+            dirs.entry(
                 cfg.target_root
                     .join(ex)
-                    .join(year)
+                    .join(&day[..4])
                     .join(crate::tasdb::component(ric)),
-            );
+            )
+            .or_default()
+            .insert(day.replace('-', ""));
         }
     }
     let mut marked = 0;
-    for dir in &dirs {
+    for (dir, ric_days) in &dirs {
         let marker = dir.join(crate::catalog::L2_SOURCE_FILE);
         let has_marker = marker.is_file();
         if !cfg.source_raw {
@@ -515,26 +520,62 @@ fn guard_and_mark_sources(
             );
             continue;
         }
-        if has_marker {
-            continue;
+        let old = if has_marker {
+            fs::read_to_string(&marker)?
+        } else {
+            String::new()
+        };
+        if old.starts_with("raw") {
+            continue; // a pure Raw RIC-year: nothing to add
         }
-        if dir.is_dir() {
+        let mixed_before = old.starts_with("mixed");
+        let mut normalized_days = false;
+        if !mixed_before && dir.is_dir() {
             for day in subdirs(dir)? {
-                ensure!(
-                    !day.join(file_name).is_file(),
-                    "{} already holds Normalized L2 ({}): not mixing sources",
-                    dir.display(),
-                    day.display()
-                );
+                if day.join(file_name).is_file() {
+                    normalized_days = true;
+                    break;
+                }
             }
         }
+        if normalized_days {
+            ensure!(
+                cfg.allow_mixed,
+                "{} already holds Normalized L2: not mixing sources (--allow-mixed fills its missing days from Raw)",
+                dir.display()
+            );
+        }
+        let text = if normalized_days || mixed_before {
+            // Raw days = the days of this run that have no L2 file yet (those of earlier runs stay listed)
+            let mut days: BTreeSet<String> = old
+                .lines()
+                .filter_map(|l| l.strip_prefix("raw_day ").map(str::to_string))
+                .collect();
+            for d in ric_days {
+                if !dir.join(d).join(file_name).is_file() {
+                    days.insert(d.clone());
+                }
+            }
+            let mut t = String::from("mixed\n");
+            for d in days {
+                t.push_str(&format!("raw_day {d}\n"));
+            }
+            t
+        } else {
+            "raw\n".to_string()
+        };
         fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(
             ".{}.{}",
             crate::catalog::L2_SOURCE_FILE,
             std::process::id()
         ));
-        fs::write(&tmp, b"raw\n")?;
+        fs::write(&tmp, text.as_bytes())?;
+        if has_marker {
+            fs::rename(&tmp, &marker)?; // only the marker is replaced (mixed lists grow); data files never are
+            marked += 1;
+            continue;
+        }
         let linked = fs::hard_link(&tmp, &marker);
         fs::remove_file(&tmp)?;
         match linked {
@@ -977,7 +1018,7 @@ mod tests {
     #[test]
     fn raw_marker_guards_and_marks_ric_year_directories() {
         let t = tempfile::tempdir().unwrap();
-        let mk = |raw: bool| DeliverConfig {
+        let mk = |raw: bool, allow: bool| DeliverConfig {
             source: Source::Streams(Vec::new()),
             from: 0,
             to: 0,
@@ -1000,6 +1041,7 @@ mod tests {
             dry_run: false,
             max_files: None,
             source_raw: raw,
+            allow_mixed: allow,
         };
         let dn = day_number("2024-01-04").unwrap();
         let work = BTreeMap::from([(dn, vec!["CLF24".to_string(), "ESH24".to_string()])]);
@@ -1007,7 +1049,7 @@ mod tests {
         let day = t.path().join("root/cme/2024/ESH24/20240104");
         fs::create_dir_all(&day).unwrap();
         fs::write(day.join("l2_250ms.parquet"), b"x").unwrap();
-        assert!(guard_and_mark_sources(&mk(true), &work, "l2_250ms.parquet").is_err());
+        assert!(guard_and_mark_sources(&mk(true, false), &work, "l2_250ms.parquet").is_err());
         // Only CLF24 (TAS files but no L2): marked once, idempotent.
         let only_cl = BTreeMap::from([(dn, vec!["CLF24".to_string()])]);
         fs::create_dir_all(t.path().join("root/nymex/2024/CLF24/20240104")).unwrap();
@@ -1018,11 +1060,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            guard_and_mark_sources(&mk(true), &only_cl, "l2_250ms.parquet").unwrap(),
+            guard_and_mark_sources(&mk(true, false), &only_cl, "l2_250ms.parquet").unwrap(),
             1
         );
         assert_eq!(
-            guard_and_mark_sources(&mk(true), &only_cl, "l2_250ms.parquet").unwrap(),
+            guard_and_mark_sources(&mk(true, false), &only_cl, "l2_250ms.parquet").unwrap(),
             0
         );
         let marker = t
@@ -1031,12 +1073,38 @@ mod tests {
             .join(crate::catalog::L2_SOURCE_FILE);
         assert_eq!(fs::read_to_string(&marker).unwrap(), "raw\n");
         // Normalized delivery into a marked directory is refused, into an unmarked one it is fine.
-        assert!(guard_and_mark_sources(&mk(false), &only_cl, "l2_250ms.parquet").is_err());
+        assert!(guard_and_mark_sources(&mk(false, false), &only_cl, "l2_250ms.parquet").is_err());
         let only_es = BTreeMap::from([(dn, vec!["ESH24".to_string()])]);
         assert_eq!(
-            guard_and_mark_sources(&mk(false), &only_es, "l2_250ms.parquet").unwrap(),
+            guard_and_mark_sources(&mk(false, false), &only_es, "l2_250ms.parquet").unwrap(),
             0
         );
+        // ESH24 has Normalized days: refused unless --allow-mixed, then a `mixed` marker lists the Raw days
+        let dn2 = day_number("2024-01-05").unwrap();
+        let two = BTreeMap::from([
+            (dn, vec!["ESH24".to_string()]),
+            (dn2, vec!["ESH24".to_string()]),
+        ]);
+        assert!(guard_and_mark_sources(&mk(true, false), &two, "l2_250ms.parquet").is_err());
+        assert_eq!(
+            guard_and_mark_sources(&mk(true, true), &two, "l2_250ms.parquet").unwrap(),
+            1
+        );
+        let es_marker = t
+            .path()
+            .join("root/cme/2024/ESH24")
+            .join(crate::catalog::L2_SOURCE_FILE);
+        // 20240104 has a Normalized file, only 20240105 comes from Raw
+        assert_eq!(
+            fs::read_to_string(&es_marker).unwrap(),
+            "mixed\nraw_day 20240105\n"
+        );
+        // a pure Raw directory is left alone by a later run
+        assert_eq!(
+            guard_and_mark_sources(&mk(true, true), &only_cl, "l2_250ms.parquet").unwrap(),
+            0
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "raw\n");
     }
 
     #[test]
