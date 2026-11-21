@@ -408,3 +408,7 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 - 另有 `l2_package_inventory`（2010–2026 每个包一行，空包标注；2024 之前 `washed`/`delivered` 为 0）、`l2_year_summary`（每年主包与补充包 GB、RIC 数、L2 品种数、TAS 品种数、没有 L2 的 TAS 品种数；2012–2016 目录里没有 TAS，无从比较）和 `conventions`（方法、阈值、生成时间）。
 - 重建：`scripts/lseg/l2_gaps_build.py --out <本地.sqlite> --reports <runtime/l2_supplement/reports> --packages-json … --inventory-json …`（先在任务空闲时跑 `lseg_catalog l2-sync`；NFS 只做 ≤8 线程的 listdir，约 1.5 分钟、内存 143 MB），再 `--publish <本地.sqlite>` 发布：新文件用硬链接不覆盖；刷新时加 `--replace`，是同目录里写临时文件后原子 rename，读者要么看到旧的完整文件、要么看到新的完整文件。
 - 按品种的覆盖范围另有 `scripts/lseg/l2_coverage.py`（每个品种首末日和没有 L2 的月份）。
+
+## 范围：L2 只做 2020 年起（2026-11-21）
+
+用户决定：2020 年以前只需要 TAS 的 K 线（交付盘上已有的 `kline.parquet`），不洗也不交付 L2。2010–2019 年的 L2 包不处理；`l2_gaps.sqlite` 里这些年份的行记为 `out_of_scope`（`l2_gaps_build.py` 的 `L2_SCOPE_FROM = 2020`）。还要做的是 2020–2023 年。

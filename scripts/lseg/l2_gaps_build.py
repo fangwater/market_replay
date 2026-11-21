@@ -29,6 +29,7 @@ import argparse, collections, concurrent.futures as cf, csv, datetime, glob, gzi
 
 ROOT = "/mnt/nfs/30.100_cta_data/lseg"
 CATALOG = "file:%s/meta/catalog.sqlite?mode=ro&immutable=1" % ROOT
+L2_SCOPE_FROM = 2020  # user decision 2026-11-21: before 2020 only the TAS kline is wanted, no L2
 LAST_L2_DAY = "20261112"
 THRESHOLD = 0.8
 SLACK_DAYS = 7
@@ -355,6 +356,15 @@ for y in sorted(early):
             if v[0] > 0:
                 prod_pkgs[prod_ex.get(ric, ("?",))[0]][n] += 1
     for prod, rs in sorted(early[y].items()):
+        if y < L2_SCOPE_FROM:
+            kind, rs_ = "out_of_scope", "out_of_scope_before_2020"
+            ev = "L2 is not wanted for years before %d (only the TAS kline); %s" % (
+                L2_SCOPE_FROM, "an L2 package holds the product" if prod in prod_pkgs else "no L2 package holds the product")
+            db.execute("insert into l2_unfillable values (NULL,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,?)",
+                       (y, prod, kind, rs_, ev, json.dumps(names), now, len(rs),
+                        "Out of scope: before %d only the TAS kline is delivered, L2 was not washed on purpose (decision 2026-11-21)." % L2_SCOPE_FROM,
+                        "|".join(sorted(prod_layers[prod])) if prod_layers.get(prod) else None))
+            continue
         if prod in prod_pkgs:
             kind, rs_ = "not_washed", "washed_nothing_before_2024"
             ev = "L2 exists in " + "; ".join("%s (%d RICs)" % (n[:60], c) for n, c in sorted(prod_pkgs[prod].items()))
@@ -396,6 +406,7 @@ conv = {
     "l2_source": "catalog.sqlite l2_directories (lseg_catalog l2-sync); last L2 day %s" % LAST_L2_DAY,
     "tas_days": "day directories of the RIC-year up to the last L2 day; for partial candidates only days holding trade.parquet or quote.parquet",
     "partial_threshold": "l2_days < %.1f * tas_days" % THRESHOLD, "window_slack_days": str(SLACK_DAYS),
+    "scope": "L2 wanted from %d on; before that only the TAS kline (kind out_of_scope)" % L2_SCOPE_FROM,
     "reasons": "not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict | in_package_not_delivered",
     "daily_2026_note": "L2 from 2026-06-01 comes from daily files that have no Report here; 2026 reasons only know the package Reports up to 2026-05-30",
     "cause": "plain-language reason per row; purchase_layers = source layers of the RIC/product in the purchase catalog (artifacts/lseg_exchange_groups_20261109/ric_catalog.csv): no normalisedLL2/rawLL2 there means L2 was never ordered",
