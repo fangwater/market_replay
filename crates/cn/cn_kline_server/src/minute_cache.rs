@@ -404,6 +404,7 @@ pub(crate) fn extend(
     mdl: &mut Vec<MinuteBar>,
     cached: Vec<CachedMinute>,
     through_ms: i64,
+    is_open: impl FnOnce(i64) -> bool,
     in_session: impl Fn(i64) -> bool,
 ) -> i64 {
     let Some(anchor) = mdl
@@ -411,6 +412,14 @@ pub(crate) fn extend(
         .rev()
         .find(|b| b.open_time_ms + MINUTE_MS <= through_ms)
     else {
+        // A provisional MDL opening minute cannot anchor the cache. The cache
+        // can still prove coverage independently from the trading day's open.
+        if let Some((end, minutes)) = from_open(cached, is_open, in_session) {
+            if end > through_ms {
+                *mdl = minutes;
+                return end;
+            }
+        }
         return through_ms;
     };
     let Ok(i) = cached.binary_search_by_key(&anchor.open_time_ms, |c| {
@@ -979,7 +988,7 @@ mod tests {
         assert_eq!(compare(&mdl, &cache, 125_000).matched, 2);
         let mut joined = mdl.clone();
         assert_eq!(
-            extend(&mut joined, cache.clone(), 125_000, |_| true),
+            extend(&mut joined, cache.clone(), 125_000, |_| true, |_| true),
             180_000
         );
         assert_eq!(joined.len(), 3);
@@ -989,7 +998,7 @@ mod tests {
         conflict[1].bar.as_mut().unwrap().volume_lots = 20.0;
         assert_eq!(compare(&mdl, &conflict, 125_000).different, 1);
         assert_eq!(
-            extend(&mut mdl.clone(), conflict, 125_000, |_| true),
+            extend(&mut mdl.clone(), conflict, 125_000, |_| true, |_| true),
             125_000
         );
 
@@ -997,13 +1006,54 @@ mod tests {
         missing.remove(2);
         missing[2].generation = 1;
         assert_eq!(
-            extend(&mut mdl.clone(), missing.clone(), 125_000, |_| true),
+            extend(
+                &mut mdl.clone(),
+                missing.clone(),
+                125_000,
+                |_| true,
+                |_| true
+            ),
             125_000
         );
         assert_eq!(
-            extend(&mut mdl.clone(), missing, 125_000, |_| false),
+            extend(&mut mdl.clone(), missing, 125_000, |_| true, |_| false),
             240_000
         );
+    }
+
+    #[test]
+    fn provisional_mdl_open_does_not_block_contiguous_cache_from_the_session_open() {
+        let day = 20261120;
+        let mdl = vec![bar(0, day, 1.0)];
+        let cache = vec![
+            cached(0, day, 2.0, 1),
+            cached(60_000, day, 3.0, 1),
+            cached(180_000, day, 4.0, 1),
+        ];
+        let mut joined = mdl.clone();
+        let is_open = |minute| minute == 0;
+        assert_eq!(
+            extend(&mut joined, cache.clone(), 9_000, is_open, |_| true),
+            120_000
+        );
+        assert_eq!(
+            joined.iter().map(|b| b.volume_lots).collect::<Vec<_>>(),
+            vec![2.0, 3.0]
+        );
+
+        let mut missing_open = mdl;
+        assert_eq!(
+            extend(
+                &mut missing_open,
+                cache.into_iter().skip(1).collect(),
+                9_000,
+                is_open,
+                |_| true
+            ),
+            9_000
+        );
+        assert_eq!(missing_open.len(), 1);
+        assert_eq!(missing_open[0].volume_lots, 1.0);
     }
 
     #[test]

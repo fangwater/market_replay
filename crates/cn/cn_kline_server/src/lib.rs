@@ -567,6 +567,9 @@ impl Service {
                                         &mut live_bars,
                                         cached,
                                         lb.through_ms,
+                                        |ms| {
+                                            live.first_session_minute(dir_name, &product, ms / 1000)
+                                        },
                                         |ms| live.in_session(dir_name, &product, ms / 1000),
                                     );
                                 }
