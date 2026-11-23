@@ -896,6 +896,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cn_hfq_bars"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "bytes",
+ "chrono",
+ "clap",
+ "parquet",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "cn_kline_server"
 version = "0.1.0"
 dependencies = [

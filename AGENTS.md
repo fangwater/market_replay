@@ -58,6 +58,10 @@
 - **生产二进制：** 只从 `/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin` 运行，由 `scripts/deploy-release.sh <commit>` 从干净的 checkout 构建。不得让生产配置指向 `target/release`，因为 worktree 和开发构建共用这个目录。
 - 切换前的 PM2 进程列表保存在 `/mnt/nvme-raid0-28t/fanghaizhou/pm2_jlist_before_unify_20261116.json`（权限 600，内含环境变量）。各项目自己的 `ecosystem*.cjs` 和 `pm2-start.sh` 已删除，以免重复启动。
 
+## 国内 HFQ 粗频底表（2026-11-23 起）
+
+`baseline_data_{5min,15min,1h,1day}_hfq` 由 Rust 二进制 `cn-hfq-bars`（`crates/cn/cn_hfq_bars`）每日增量维护，服务器任务 `cn-hfq-bars-daily`（上海 18:00，排在 `cn-hfq-daily` 之后）；因子、`ylabel_*_hfq`、`backtest_1s` 按用户决定不再更新，停在 2026-08-26。切 bar 规则不变（连续段首起每 N 分钟，休市或缺分钟收成短 bar，周期不固定），换月导致旧 1min 文件变化时该品种整体重建。说明见 [docs/cn_hfq_bars.md](docs/cn_hfq_bars.md)。实盘 `cta-cn-futures`（mkt_signal）的 1h 切法与此相同，在每个连续段的 10:15、11:30、14:30、15:00 等 bar 结束点更新仓位。
+
 ## 已定范围（2026-11-14，用户确认）
 
 - 回放只支持 msg 层（2023-12-07 起）。**不做** `comm_l2` 历史日包支持。

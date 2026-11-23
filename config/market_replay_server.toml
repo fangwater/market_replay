@@ -92,6 +92,15 @@ schedule = { tz = "Asia/Shanghai", at = ["17:00"] }
 timeout_minutes = 180
 
 [[job]]
+name = "cn-hfq-bars-daily"
+description = "国内 HFQ 5min/15min/1h/1day 底表：从 1min HFQ 增量聚合，换月重建受影响品种"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/mnt/nvme-raid0-28t/fanghaizhou/market_replay_deploy/current/bin/cn-hfq-bars"
+args = ["--config", "config/cn_daily.toml", "--universe", "config/cn_hfq_universe_75.json"]
+schedule = { tz = "Asia/Shanghai", at = ["18:00"] }
+timeout_minutes = 120
+
+[[job]]
 name = "ib-kline-daily"
 description = "IB 分钟线：MySQL 增量 -> kline_ib.parquet + catalog（钉钉）"
 cwd = "/home/fanghaizhou/market_replay"
