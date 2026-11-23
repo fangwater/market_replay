@@ -108,3 +108,20 @@ fill_1min_size_buckets --product SN --export-month 202610
 实现只有 `cn_futures_core::baseline_1min::twap_from_prints` 一处，盘后导出、盘中缓存、实时分段和 `patch_1min_twap` 共用。HFQ 以前因为无法平移这种不完整的 TWAP，把每段第一个有成交分钟的 `twap` 置空；新口径下所有价格同加一个价差，TWAP 平移是精确的，`apply_hfq_series` 不再置空。5min/15min/1h/1day HFQ 粗频底表的 `twap` 仍是各分钟 TWAP 的等权平均，以前每段第一根因首分钟为空而为空，现在有值。
 
 CME（`cme_tas_replay`）和美股（`usstock_lseg_raw_export`）各自有一份同样口径的实现，本次未改。
+
+### 历史数据修复（2026-11-23）
+
+按用户要求，用 `161dc00` 的 `patch_1min_twap` 修复了生产 `baseline_data_1min` 与 `baseline_data_1min_hfq` 的全部历史（2019-08 至 20261123）。只改 `twap` 列。
+
+- **规则：** 用同一批 RocksDB 成交，按旧口径重算一遍；只有能复现生产值的行才写入新值。第一次试跑直接用当前 RocksDB 重算全部 TWAP，有 14,752 行由有值变空、497 行变低。原因是部分旧交易日（多见于 2019–2021 和郑商所）的生产文件来自与当前 RocksDB 不同的成交，这一版没有采用。
+- **原始 1 分钟：** 121,658 个文件、约 4.01 亿行，修正 3,311,580 行。另有 59,148 行（约 1.8%）的成交无法复现生产值，原样保留。
+- **HFQ 1 分钟：** 121,539 个文件、约 4,027 万行，原始 TWAP 被修正的各段首分钟补值 383,230 行。
+- **校验：** 逐文件、逐列比对，结果如下：
+  - 除 `twap` 外各列完全一致；
+  - 没有 TWAP 变低，也没有有值变空；
+  - 改动后的 TWAP 都落在当分钟的 `[low, high]` 内；
+  - 抽样日期上，修补工具的 HFQ 输出与 `export_hfq_1min` 基于修复后原始数据的导出逐值一致。
+- **替换方式：** 新文件写入同一文件系统上的 staging（复制生产目录 ACL），在当天 `cn-daily`、`cn-hfq-daily`、`cn-hfq-bars-daily`、`cn-reference-daily` 之后逐文件替换：先把原文件硬链接到备份目录，再原子重命名新文件。共替换原始 121,655 个、HFQ 119,019 个文件；TWAP 没有变化的文件保持原样。
+- **备份：** 原文件在 `/mnt/hdd-raid5-72t/liang_torch/cn_futures_data/_twap_fix_20261123/backup/{raw,hfq}`（约 37 GB，硬链接，目录结构与生产相同）。日志、修补二进制及其 sha256、校验 JSONL 在同目录 `logs/`、`day23/logs/`、`validate/`。
+- **部署：** `deploy-release.sh 161dc00` 后重启了 `market-replay-server`（含 `cn-minute-cache`），以及给 CN Manager 用的 `cn-market-nav-reader.service`（127.0.0.1:28312）。20261124 起的盘中数据按新口径生成。之后用 `cn-hfq-bars` 重建了 75 个品种的 5min/15min/1h/1day HFQ 粗频底表。
+- **未变：** 因子与 ylabel（停在 2026-08-26，用户决定不再维护）仍是旧 TWAP 计算的结果。mkt_signal 依赖的 core rev 未更新：实盘 CTA 只透传 `twap`，因子与仓位不读它。
