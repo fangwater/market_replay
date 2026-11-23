@@ -245,13 +245,20 @@ fn quoted_vwap(amount: f64, volume: f64, multiplier: f64) -> Option<f64> {
     }
 }
 
+/// Time-weighted last price over the covered part of the minute: all of it
+/// when a carried price seeds it, otherwise from the first trade on. Uncovered
+/// time is excluded rather than weighted as a zero price. `trades` are sorted.
 fn exact_twap(trades: &[BaselineTrade], minute: i64, prior_price: Option<f64>) -> Option<f64> {
     let start_ns = u64::try_from(minute).ok()?.checked_mul(1_000_000_000)?;
     let end_ns = u64::try_from(minute + 60)
         .ok()?
         .checked_mul(1_000_000_000)?;
-    let mut previous_ns = start_ns;
     let mut previous_price = valid_price(prior_price);
+    let covered_ns = match previous_price {
+        Some(_) => start_ns,
+        None => trades.first()?.event_ns.clamp(start_ns, end_ns),
+    };
+    let mut previous_ns = covered_ns;
     let mut weighted = 0.0;
     for trade in trades {
         if let Some(price) = previous_price {
@@ -262,7 +269,10 @@ fn exact_twap(trades: &[BaselineTrade], minute: i64, prior_price: Option<f64>) -
     }
     let previous_price = previous_price?;
     weighted += previous_price * end_ns.saturating_sub(previous_ns) as f64;
-    Some(weighted / 60_000_000_000.0)
+    match end_ns.saturating_sub(covered_ns) {
+        0 => Some(previous_price),
+        covered => Some(weighted / covered as f64),
+    }
 }
 
 fn side_sums(trades: &[BaselineTrade], multiplier: f64) -> (f64, f64) {
@@ -661,7 +671,9 @@ mod tests {
         .unwrap();
         assert!((rows[1].twap.unwrap() - 100.325).abs() < 1e-12);
         assert_eq!(rows[2].twap, Some(99.0));
-        assert!((rows[3].twap.unwrap() - 104.0 * 55.0 / 60.0).abs() < 1e-12);
+        // The second segment is unseeded: its first trade at :05 covers the
+        // remaining 55 seconds and the uncovered start is excluded.
+        assert_eq!(rows[3].twap, Some(104.0));
     }
 
     #[test]

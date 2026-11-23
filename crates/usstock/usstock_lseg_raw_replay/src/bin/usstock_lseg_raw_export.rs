@@ -532,7 +532,13 @@ fn compute_minute_twap(raw: &RawRows, open_ts: i64, minutes: &mut [Minute]) -> R
                 .then(left.source_order.cmp(&right.source_order))
         });
 
-        let mut cursor = start_ns;
+        // Before the session's first print the minute is uncovered: start the
+        // integral there and exclude that time from the denominator.
+        let covered_ns = match (prior_print, events.first()) {
+            (None, Some(first)) => first.event_ts_ns.clamp(start_ns, end_ns),
+            _ => start_ns,
+        };
+        let mut cursor = covered_ns;
         let mut weighted_price_ns = 0.0;
         for trade in events {
             let event_ns = trade.event_ts_ns.clamp(start_ns, end_ns);
@@ -544,7 +550,10 @@ fn compute_minute_twap(raw: &RawRows, open_ts: i64, minutes: &mut [Minute]) -> R
         }
         if let Some(price) = prior_print {
             weighted_price_ns += price * (end_ns.saturating_sub(cursor) as f64);
-            minute.twap = weighted_price_ns / MINUTE_NS as f64;
+            minute.twap = match end_ns.saturating_sub(covered_ns) {
+                0 => price,
+                covered => weighted_price_ns / covered as f64,
+            };
         }
     }
     Ok(())
@@ -1199,7 +1208,7 @@ fn derived_fields_manifest() -> serde_json::Value {
         "avg_amount": "amount / count, zero when count is zero",
         "buy_vwap": "buy_amount / buy_volume, carried across empty buy minutes",
         "sell_vwap": "sell_amount / sell_volume, carried across empty sell minutes",
-        "twap": "RAW last-print price step function integrated over the full 60-second minute",
+        "twap": "RAW last-print price step function integrated over the covered part of the minute; time before the session's first print is excluded",
         "mid_price": "alias of the RAW composite L1 midp",
         "net_buy_amount": "buy_amount - sell_amount",
         "net_buy_volume": "buy_volume - sell_volume",
@@ -2130,7 +2139,7 @@ fn main() -> Result<()> {
             "avg_amount": "amount / count, zero when count is zero",
             "buy_vwap": "buy_amount / buy_volume, carried across empty buy minutes",
             "sell_vwap": "sell_amount / sell_volume, carried across empty sell minutes",
-            "twap": "RAW last-print price step function integrated over the full 60-second minute",
+            "twap": "RAW last-print price step function integrated over the covered part of the minute; time before the session's first print is excluded",
             "mid_price": "alias of the RAW composite L1 midp",
             "net_buy_amount": "buy_amount - sell_amount",
             "net_buy_volume": "buy_volume - sell_volume",
@@ -2460,7 +2469,8 @@ mod tests {
 
         compute_minute_twap(&raw, open_ts, &mut minutes).unwrap();
 
-        assert!((minutes[0].twap - (100.0 * 30.0 + 110.0 * 20.0) / 60.0).abs() < 1e-12);
+        // The session's first print arrives 10 s in; only the 50 covered seconds count.
+        assert!((minutes[0].twap - (100.0 * 30.0 + 110.0 * 20.0) / 50.0).abs() < 1e-12);
         assert_eq!(minutes[1].twap, 110.0);
     }
 
