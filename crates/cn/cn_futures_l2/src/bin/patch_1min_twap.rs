@@ -1,12 +1,18 @@
 //! Patch only the TWAP column of published CN 1-minute baseline parquet.
 //!
-//! Raw rows keep their existing grid and all non-TWAP values. HFQ rows take
-//! the patched dominant raw TWAP plus the already-published additive gap.
+//! Raw rows keep their existing grid and all non-TWAP values. A raw TWAP is
+//! rewritten only when the RocksDB prints reproduce its published value under
+//! the previous definition (uncovered segment-open time weighted as zero);
+//! rows whose source prints differ are left untouched and counted. HFQ rows
+//! take the patched dominant raw TWAP plus the already-published additive gap,
+//! only where that raw TWAP was rewritten.
 
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
-use cn_futures_l2::baseline_1min::{twap_for_existing_grid, PrintTrade, TwapGridState};
+use cn_futures_l2::baseline_1min::{
+    exact_twap_one_bucket, minute_left_sec, PrintTrade, TwapGridState,
+};
 use cn_futures_l2::codec::{decode_key, decode_trade, encode_key, KIND_TRADE};
 use cn_futures_l2::db::{open_rocksdb_read_only, L2Db, DEFAULT_ROCKSDB_DIR};
 use cn_futures_l2::export_1min::{read_day_parquet, write_day_parquet};
@@ -195,6 +201,81 @@ fn scan_trades(
     Ok(trades)
 }
 
+/// TWAP of one grid minute under the current definition and under the
+/// previous one, which divided an unseeded minute by the full bucket.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GridTwap {
+    current: Option<f64>,
+    previous: Option<f64>,
+}
+
+/// Same grid walk and carry as `twap_for_existing_grid`, returning both
+/// definitions from the same prints.
+fn grid_twaps(
+    minutes: &[i64],
+    trades: &[PrintTrade],
+    state: &mut TwapGridState,
+) -> Result<Vec<GridTwap>> {
+    let mut by_minute: BTreeMap<i64, (Vec<i64>, Vec<f64>)> = BTreeMap::new();
+    for trade in trades {
+        let entry = by_minute
+            .entry(minute_left_sec(trade.ts_utc_ns))
+            .or_default();
+        entry.0.push((trade.ts_utc_ns / 1_000) as i64);
+        entry.1.push(trade.price);
+    }
+    let mut out = Vec::with_capacity(minutes.len());
+    for &ts in minutes {
+        if ts.rem_euclid(60) != 0 {
+            bail!("TWAP grid minute {ts} is not minute aligned");
+        }
+        if let Some(previous) = state.last_minute {
+            if ts <= previous {
+                bail!("TWAP grid is not strictly increasing: {previous} then {ts}");
+            }
+            if ts != previous + 60 {
+                state.last_price = None;
+            }
+        }
+        let start_us = ts * 1_000_000;
+        let end_us = (ts + 60) * 1_000_000;
+        let (timestamps_us, prices) = by_minute
+            .get(&ts)
+            .map(|(t, p)| (t.as_slice(), p.as_slice()))
+            .unwrap_or((&[], &[]));
+        let current =
+            exact_twap_one_bucket(timestamps_us, prices, start_us, end_us, state.last_price)?;
+        let mut valid = timestamps_us
+            .iter()
+            .zip(prices)
+            .filter(|(t, p)| (start_us..end_us).contains(*t) && p.is_finite() && **p > 0.0)
+            .map(|(t, p)| (*t, *p))
+            .collect::<Vec<_>>();
+        valid.sort_by_key(|(t, _)| *t);
+        let previous = match (current, state.last_price, valid.first()) {
+            (Some(value), None, Some(&(first_us, _))) => {
+                Some(value * (end_us - first_us) as f64 / (end_us - start_us) as f64)
+            }
+            _ => current,
+        };
+        if let Some(&(_, price)) = valid.last() {
+            state.last_price = Some(price);
+        }
+        state.last_minute = Some(ts);
+        out.push(GridTwap { current, previous });
+    }
+    Ok(out)
+}
+
+/// The published value was produced from these same prints.
+fn reproduced(published: Option<f64>, previous: Option<f64>) -> bool {
+    match (published, previous) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * b.abs().max(1.0),
+        _ => false,
+    }
+}
+
 fn patch_raw(
     args: &Args,
     db: &L2Db,
@@ -220,21 +301,20 @@ fn patch_raw(
                     .push((index, row.ts));
             }
             let mut file_changed = 0u64;
+            let mut file_kept = 0u64;
             for (contract_id, mut grid) in grids {
                 grid.sort_by_key(|(_, ts)| *ts);
                 let minutes = grid.iter().map(|(_, ts)| *ts).collect::<Vec<_>>();
                 let first = *minutes.first().context("empty TWAP grid")?;
                 let last = *minutes.last().context("empty TWAP grid")?;
                 let trades = scan_trades(db, cf_names, &product, &contract_id, first, last + 60)?;
-                let values = twap_for_existing_grid(
-                    &minutes,
-                    &trades,
-                    states.entry(contract_id).or_default(),
-                )?;
+                let values = grid_twaps(&minutes, &trades, states.entry(contract_id).or_default())?;
                 for ((index, _), value) in grid.into_iter().zip(values) {
-                    if rows[index].twap != value {
+                    if !reproduced(rows[index].twap, value.previous) {
+                        file_kept += 1;
+                    } else if rows[index].twap != value.current {
                         file_changed += 1;
-                        rows[index].twap = value;
+                        rows[index].twap = value.current;
                     }
                 }
             }
@@ -250,7 +330,7 @@ fn patch_raw(
                 files += 1;
                 changed += file_changed;
                 eprintln!(
-                    "raw_twap {} {} {} rows={} changed={file_changed}",
+                    "raw_twap {} {} {} rows={} changed={file_changed} kept_unreproduced={file_kept}",
                     exchange,
                     product,
                     file.day,
@@ -303,16 +383,34 @@ fn patch_hfq(
                 .join(&exchange)
                 .join(&product)
                 .join(file.path.file_name().context("HFQ path has no file name")?);
-            let raw = read_day_parquet(&raw_path)
-                .with_context(|| format!("read patched raw {}", raw_path.display()))?;
-            let mut raw = raw
-                .into_iter()
-                .filter(|row| {
-                    instrument_match_key(&row.contract_id, file.day)
-                        == instrument_match_key(dominant, file.day)
-                })
-                .collect::<Vec<_>>();
-            raw.sort_by_key(|row| row.ts);
+            let dominant_rows = |path: &Path| -> Result<Vec<_>> {
+                let mut rows = read_day_parquet(path)
+                    .with_context(|| format!("read raw {}", path.display()))?
+                    .into_iter()
+                    .filter(|row| {
+                        instrument_match_key(&row.contract_id, file.day)
+                            == instrument_match_key(dominant, file.day)
+                    })
+                    .collect::<Vec<_>>();
+                rows.sort_by_key(|row| row.ts);
+                Ok(rows)
+            };
+            let published: BTreeMap<_, _> = dominant_rows(
+                &args
+                    .raw_input_root
+                    .join(&exchange)
+                    .join(&product)
+                    .join(file.path.file_name().context("HFQ path has no file name")?),
+            )?
+            .into_iter()
+            .map(|row| (row.ts, row.twap))
+            .collect();
+            let raw = dominant_rows(&raw_path)?;
+            // Only a rewritten raw TWAP replaces the published HFQ value.
+            let rewritten: BTreeMap<_, _> = raw
+                .iter()
+                .map(|row| (row.ts, published.get(&row.ts) != Some(&row.twap)))
+                .collect();
             let raw_by_ts = apply_hfq_series(raw, gap)
                 .into_iter()
                 .map(|row| (row.ts, row.twap))
@@ -326,7 +424,7 @@ fn patch_hfq(
                         exchange, product, row.ts
                     )
                 })?;
-                if row.twap != *value {
+                if rewritten.get(&row.ts) == Some(&true) && row.twap != *value {
                     file_changed += 1;
                     row.twap = *value;
                 }
@@ -359,4 +457,48 @@ fn patch_hfq(
         }
     }
     Ok((files, changed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn print(second: u64, nanos: u64, price: f64) -> PrintTrade {
+        PrintTrade {
+            ts_utc_ns: second * 1_000_000_000 + nanos,
+            price,
+            volume: 1.0,
+            amount: price,
+            aggressor: 1,
+        }
+    }
+
+    #[test]
+    fn previous_definition_is_reproduced_only_for_unseeded_minutes() {
+        // Segment open at 0 with the first print 0.5 s in, then a seeded minute.
+        let trades = [print(0, 500_000_000, 100.0), print(70, 0, 101.0)];
+        let mut state = TwapGridState::default();
+        let values = grid_twaps(&[0, 60], &trades, &mut state).unwrap();
+        assert_eq!(values[0].current, Some(100.0));
+        assert!((values[0].previous.unwrap() - 100.0 * 59.5 / 60.0).abs() < 1e-9);
+        assert_eq!(values[1].current, values[1].previous);
+        assert!((values[1].current.unwrap() - (100.0 * 10.0 + 101.0 * 50.0) / 60.0).abs() < 1e-9);
+        assert_eq!(state.last_price, Some(101.0));
+        // A grid gap resets the carry: the minute after it is unseeded again.
+        let values = grid_twaps(&[180], &[print(190, 0, 102.0)], &mut state).unwrap();
+        assert_eq!(values[0].current, Some(102.0));
+        assert!((values[0].previous.unwrap() - 102.0 * 50.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn only_reproduced_published_values_are_rewritten() {
+        assert!(reproduced(None, None));
+        assert!(reproduced(
+            Some(99.166_666_666_7),
+            Some(99.166_666_666_666_67)
+        ));
+        assert!(!reproduced(Some(99.0), None));
+        assert!(!reproduced(None, Some(99.0)));
+        assert!(!reproduced(Some(98.0), Some(99.0)));
+    }
 }
