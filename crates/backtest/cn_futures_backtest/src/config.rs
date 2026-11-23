@@ -19,6 +19,22 @@ pub enum Execution {
     Taker,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MakerFillModel {
+    #[default]
+    FullOnThrough,
+    IntervalVolume,
+}
+impl MakerFillModel {
+    pub fn model(self) -> &'static str {
+        match self {
+            Self::FullOnThrough => "cn_limit_depth_then_trade_through/v2",
+            Self::IntervalVolume => "cn_limit_depth_then_interval_volume/v3",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RollAlgorithm {
@@ -79,6 +95,7 @@ pub struct Config {
     pub end: String,
     pub products: Vec<String>,
     pub execution: Execution,
+    pub maker_fill_model: MakerFillModel,
     pub market_grpc: String,
     pub contract_selection: ContractSelection,
     pub reference_api: String,
@@ -117,6 +134,7 @@ impl Default for Config {
             end: "2026-11-13".into(),
             products: vec!["RB".into(), "SN".into()],
             execution: Execution::Maker,
+            maker_fill_model: MakerFillModel::default(),
             market_grpc: "http://127.0.0.1:18312".into(),
             contract_selection: ContractSelection::default(),
             reference_api: "http://127.0.0.1:8765/api/v1".into(),

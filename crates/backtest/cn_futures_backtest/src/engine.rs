@@ -2,7 +2,7 @@
 mod maker_taker;
 
 use crate::{
-    config::{Config, Execution, RollAlgorithm, Task},
+    config::{Config, Execution, MakerFillModel, RollAlgorithm, Task},
     input::InputRow,
     metadata::{cny, money, Metadata, Spec},
     output::{Row, Sink},
@@ -11,7 +11,7 @@ use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, VecDeque},
 };
 
 #[derive(Clone, Debug)]
@@ -118,7 +118,7 @@ struct Order {
     execution: Execution,
     created: i64,
     cursor: u64,
-    live: bool,
+    live_since: Option<i64>,
     cancel_sent: bool,
     reference: f64,
     reason: String,
@@ -192,6 +192,9 @@ struct RollState {
     begin: i64,
     deadline: i64,
     completed: bool,
+    succeeded: bool,
+    taker_old: VecDeque<(i64, f64, u64)>,
+    taker_new: VecDeque<(i64, f64, u64)>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Summary {
@@ -241,6 +244,11 @@ pub struct Engine<S: Sink> {
     markets: BTreeMap<String, Quote>,
     visible: BTreeMap<String, Quote>,
     orders: BTreeMap<u64, Order>,
+    // One child per contract, reserved until its private terminal report.
+    order_by_contract: BTreeMap<String, u64>,
+    // An immediate IOC remainder or rejection cannot retry the identical action
+    // indefinitely while both virtual time and the visible book are unchanged.
+    failed_immediate: BTreeMap<String, (i64, u64, i64, Execution)>,
     positions: BTreeMap<String, Position>,
     known: BTreeMap<String, i64>,
     targets: BTreeMap<String, Target>,
@@ -264,7 +272,8 @@ impl<S: Sink> Engine<S> {
     pub fn new(cfg: Config, metadata: Metadata, sink: S) -> Result<Self> {
         cfg.validate()?;
         let model = format!(
-            "cn_limit_depth_then_trade_through/v2;{}",
+            "{};{}",
+            cfg.maker_fill_model.model(),
             cfg.roll_algorithm().model()
         );
         let mut e = Self {
@@ -285,6 +294,8 @@ impl<S: Sink> Engine<S> {
             markets: BTreeMap::new(),
             visible: BTreeMap::new(),
             orders: BTreeMap::new(),
+            order_by_contract: BTreeMap::new(),
+            failed_immediate: BTreeMap::new(),
             positions: BTreeMap::new(),
             known: BTreeMap::new(),
             targets: BTreeMap::new(),
@@ -358,6 +369,9 @@ impl<S: Sink> Engine<S> {
                     begin,
                     deadline,
                     completed: false,
+                    succeeded: false,
+                    taker_old: VecDeque::new(),
+                    taker_new: VecDeque::new(),
                 },
             );
         }
@@ -448,6 +462,9 @@ impl<S: Sink> Engine<S> {
                             begin: 0,
                             deadline: i64::MAX,
                             completed: false,
+                            succeeded: false,
+                            taker_old: VecDeque::new(),
+                            taker_new: VecDeque::new(),
                         },
                     );
                 }
@@ -468,25 +485,13 @@ impl<S: Sink> Engine<S> {
         ensure!(q.ts >= self.now, "source clock went backwards");
         self.now = q.ts;
         self.summary.frames += 1;
-        let s = self.metadata.spec(&q.contract)?;
-        let delta = self
-            .markets
-            .get(&q.contract)
-            .and_then(|prev| {
-                if prev.day != q.day
-                    || prev.end != q.end
-                    || q.ts - prev.ts > self.cfg.quote_age_ms as i64 * 1000
-                {
-                    return None;
-                }
-                q.volume?.checked_sub(prev.volume?)
-            })
-            .unwrap_or(0);
+        let s = self.metadata.spec_ref(&q.contract)?;
+        let maker_fill = self.trade_through(&q, s);
         if let Some(r) = self.rolls.get_mut(&s.product) {
             if r.standalone && !r.seeded && r.old == q.contract && q.ts >= r.begin {
-                if let Some(mid) = q.mid(&s) {
+                if let Some(mid) = q.mid(s) {
                     let mut p = Position::default();
-                    p.apply(r.initial, mid, q.day.saturating_sub(1), &s);
+                    p.apply(r.initial, mid, q.day.saturating_sub(1), s);
                     self.positions.insert(q.contract.clone(), p.clone());
                     self.theory.insert(q.contract.clone(), p);
                     self.known.insert(q.contract.clone(), r.initial);
@@ -494,6 +499,10 @@ impl<S: Sink> Engine<S> {
                 }
             }
         }
+        let pending_product = self
+            .pending
+            .contains_key(&s.product)
+            .then(|| s.product.clone());
         self.markets.insert(q.contract.clone(), q.clone());
         if let Some(end) = q.end.filter(|end| *end > q.ts) {
             if self.segment_ends.get(&q.contract) != Some(&end) {
@@ -501,30 +510,12 @@ impl<S: Sink> Engine<S> {
                 self.push(end, 0, Event::EndSession(q.contract.clone(), end))?;
             }
         }
-        if q.ts < self.cutoff
-            && q.end.is_some_and(|end| q.ts < end)
-            && s.segment_end(q.exchange_ts).is_some()
-            && delta > 0
-        {
-            let ids: Vec<_> = self
-                .orders
-                .values()
-                .filter(|o| {
-                    o.live
-                        && o.execution == Execution::Maker
-                        && o.contract == q.contract
-                        && q.cursor > o.cursor
-                        && q.last
-                            .is_some_and(|p| if o.side > 0 { p < o.limit } else { p > o.limit })
-                })
-                .map(|o| o.id)
-                .collect();
-            for id in ids {
-                let n = self.orders[&id].remaining;
-                self.fill(id, n, q.cursor)?;
-            }
+        if let Some((id, n)) = maker_fill {
+            self.fill(id, n, q.cursor)?;
         }
-        self.resolve(&s.product)?;
+        if let Some(product) = pending_product {
+            self.resolve(&product)?;
+        }
         self.push(
             q.ts + self.cfg.md_delay_ms as i64 * 1000,
             3,
@@ -532,6 +523,49 @@ impl<S: Sink> Engine<S> {
         )?;
         self.trace(false)?;
         Ok(())
+    }
+    fn trade_through(&self, q: &Quote, spec: &Spec) -> Option<(u64, i64)> {
+        let o = self.contract_order(&q.contract)?;
+        let live_since = o.live_since?;
+        let last = q.last?;
+        let crossed = if o.side > 0 {
+            last < o.limit
+        } else {
+            last > o.limit
+        };
+        if q.cursor <= o.cursor || !crossed {
+            return None;
+        }
+        let prev = self.markets.get(&q.contract)?;
+        let exchange_end = spec.segment_end(q.exchange_ts)?;
+        if q.ts >= self.cutoff
+            || q.ts >= q.end?
+            || prev.day != q.day
+            || prev.end != q.end
+            || q.ts - prev.ts > self.cfg.quote_age_ms as i64 * 1000
+        {
+            return None;
+        }
+        let delta = q.volume?.checked_sub(prev.volume?)?;
+        if delta == 0 {
+            return None;
+        }
+        let lots = match self.cfg.maker_fill_model {
+            MakerFillModel::FullOnThrough => o.remaining,
+            MakerFillModel::IntervalVolume => {
+                // The last print may come from anywhere inside the capture interval.
+                if live_since > prev.ts
+                    || q.ts == prev.ts
+                    || q.exchange_ts < prev.exchange_ts
+                    || spec.segment_end(prev.exchange_ts) != Some(exchange_end)
+                    || spec.segment_end(q.ts) != Some(exchange_end)
+                {
+                    return None;
+                }
+                delta.min(o.remaining as u64) as i64
+            }
+        };
+        Some((o.id, lots))
     }
     pub fn advance(&mut self, ts: i64, inclusive: bool) -> Result<()> {
         while self
@@ -573,7 +607,18 @@ impl<S: Sink> Engine<S> {
                             }
                         }
                         Report::Done { id, reason } => {
-                            if let Some(o) = self.orders.remove(&id) {
+                            if let Some(o) = self.remove_order(id) {
+                                if self.now == o.created
+                                    && matches!(
+                                        reason.as_str(),
+                                        "ioc_cancelled" | "reject_stale_book"
+                                    )
+                                {
+                                    self.failed_immediate.insert(
+                                        o.contract.clone(),
+                                        (self.now, o.cursor, o.side, o.execution),
+                                    );
+                                }
                                 self.emit(
                                     "orders",
                                     Row {
@@ -593,16 +638,11 @@ impl<S: Sink> Engine<S> {
                     self.control()?;
                 }
                 Event::EndSession(c, end) => {
-                    let ids: Vec<_> = self
-                        .orders
-                        .values()
-                        .filter(|o| {
-                            o.contract == c && o.live && self.segment_ends.get(&c) == Some(&end)
-                        })
-                        .map(|o| o.id)
-                        .collect();
-                    for id in ids {
-                        self.done(id, "session_expired")?;
+                    if self.segment_ends.get(&c) == Some(&end) {
+                        if let Some(o) = self.contract_order(&c).filter(|o| o.live_since.is_some())
+                        {
+                            self.done(o.id, "session_expired")?;
+                        }
                     }
                 }
             }
@@ -721,20 +761,25 @@ impl<S: Sink> Engine<S> {
         reference: f64,
         reason: &str,
     ) -> Result<Option<u64>> {
-        if delta == 0 || self.disabled || self.now >= self.cutoff {
+        if delta == 0 || self.disabled || self.now >= self.cutoff || self.working(c) {
             return Ok(None);
         }
-        let Some(q) = self.fresh(c, &self.visible).cloned() else {
+        let Some(q) = self.fresh(c, &self.visible) else {
             return Ok(None);
         };
-        let s = self.metadata.spec(c)?;
         let (side, n) = (delta.signum(), delta.abs().min(self.cfg.max_child_lots));
+        let cursor = q.cursor;
+        if self.failed_immediate.get(c) == Some(&(self.now, cursor, side, mode)) {
+            return Ok(None);
+        }
         let Some(limit) = q.limit(side, mode, &self.cfg) else {
             return Ok(None);
         };
         ensure!(limit > 0, "non-positive limit");
+        let s = self.metadata.spec_ref(c)?;
         self.next_id += 1;
         let id = self.next_id;
+        self.order_by_contract.insert(c.into(), id);
         self.orders.insert(
             id,
             Order {
@@ -746,8 +791,8 @@ impl<S: Sink> Engine<S> {
                 limit,
                 execution: mode,
                 created: self.now,
-                cursor: q.cursor,
-                live: false,
+                cursor,
+                live_since: None,
                 cancel_sent: false,
                 reference,
                 reason: reason.into(),
@@ -778,13 +823,11 @@ impl<S: Sink> Engine<S> {
         Ok(Some(id))
     }
     fn cancel_contract(&mut self, c: &str) -> Result<()> {
-        let ids: Vec<_> = self
-            .orders
-            .values()
-            .filter(|o| o.contract == c && !o.cancel_sent)
+        if let Some(id) = self
+            .contract_order(c)
+            .filter(|o| !o.cancel_sent)
             .map(|o| o.id)
-            .collect();
-        for id in ids {
+        {
             self.orders.get_mut(&id).unwrap().cancel_sent = true;
             self.emit(
                 "orders",
@@ -812,7 +855,7 @@ impl<S: Sink> Engine<S> {
             return Ok(());
         }
         let c = o.contract.clone();
-        o.live = false;
+        o.live_since = None;
         o.remaining = 0;
         if reason.contains("reject") {
             self.summary.rejected_orders += 1;
@@ -845,7 +888,7 @@ impl<S: Sink> Engine<S> {
         if self.now >= self.cutoff {
             return self.done(id, "deadline_expired");
         }
-        let Some(q) = self.fresh(&o.contract, &self.markets).cloned() else {
+        let Some(cursor) = self.fresh(&o.contract, &self.markets).map(|q| q.cursor) else {
             return self.done(id, "reject_stale_book");
         };
         // Both order intents are ordinary limit orders on arrival. The IOC
@@ -868,7 +911,7 @@ impl<S: Sink> Engine<S> {
             let take = n.min(*qty);
             *qty -= take;
             if take > 0 {
-                self.fill_at(id, take, p, q.cursor, Execution::Taker)?;
+                self.fill_at(id, take, p, cursor, Execution::Taker)?;
             }
         }
         if self.orders[&id].remaining == 0 {
@@ -878,8 +921,8 @@ impl<S: Sink> Engine<S> {
             return self.done(id, "ioc_cancelled");
         }
         let x = self.orders.get_mut(&id).unwrap();
-        x.live = true;
-        x.cursor = x.cursor.max(q.cursor);
+        x.live_since = Some(self.now);
+        x.cursor = x.cursor.max(cursor);
         let remaining = x.remaining;
         self.emit(
             "orders",
@@ -888,7 +931,7 @@ impl<S: Sink> Engine<S> {
                 contract: o.contract,
                 lots: Some(remaining),
                 order_id: Some(id),
-                source_cursor: Some(q.cursor),
+                source_cursor: Some(cursor),
                 ..Default::default()
             },
         )?;
@@ -897,6 +940,74 @@ impl<S: Sink> Engine<S> {
     fn fill(&mut self, id: u64, n: i64, cursor: u64) -> Result<()> {
         let p = self.orders[&id].limit;
         self.fill_at(id, n, p, cursor, Execution::Maker)
+    }
+    fn record_taker_roll_fill(
+        &mut self,
+        order: &Order,
+        price: f64,
+        lots: i64,
+        spec: &Spec,
+    ) -> Result<()> {
+        if self.cfg.roll.algorithm != Some(RollAlgorithm::TakerTaker)
+            || order.reason != "calendar_roll"
+        {
+            return Ok(());
+        }
+        let Some(roll) = self.rolls.get_mut(&spec.product) else {
+            return Ok(());
+        };
+        let sign = roll.initial.signum();
+        let queue = if order.contract == roll.old && order.side == -sign {
+            &mut roll.taker_old
+        } else if order.contract == roll.new && order.side == sign {
+            &mut roll.taker_new
+        } else {
+            return Ok(());
+        };
+        queue.push_back((lots, price, order.id));
+        let Some((old_ref, new_ref)) = roll.arrival else {
+            return Ok(());
+        };
+        let mut pairs = Vec::new();
+        while let (Some(old), Some(new)) = (roll.taker_old.front_mut(), roll.taker_new.front_mut())
+        {
+            let matched = old.0.min(new.0);
+            pairs.push((matched, old.1, new.1, old.2, new.2));
+            old.0 -= matched;
+            new.0 -= matched;
+            if old.0 == 0 {
+                roll.taker_old.pop_front();
+            }
+            if new.0 == 0 {
+                roll.taker_new.pop_front();
+            }
+        }
+        for (matched, old_price, new_price, old_id, new_id) in pairs {
+            let spread = new_price - old_price;
+            let reference = new_ref - old_ref;
+            let cost = cny(money(
+                (spread - reference) * sign as f64 * matched as f64 * spec.multiplier,
+            ));
+            self.summary.roll_paired_lots += matched as u64;
+            *self.summary.roll_spread_cost_cny.get_or_insert(0.0) += cost;
+            self.emit(
+                "roll_batches",
+                Row {
+                    kind: "paired_taker_fill".into(),
+                    product: spec.product.clone(),
+                    contract: self.rolls[&spec.product].new.clone(),
+                    order_id: Some(new_id),
+                    lots: Some(matched),
+                    price: Some(new_price),
+                    value: Some(spread),
+                    reference_price: Some(reference),
+                    shortfall_cny: Some(cost),
+                    reason: format!("old_order_id={old_id};old_price={old_price}"),
+                    ..Default::default()
+                },
+            )?;
+        }
+        Ok(())
     }
     fn fill_at(
         &mut self,
@@ -917,6 +1028,7 @@ impl<S: Sink> Engine<S> {
                 .or_default()
                 .apply(o.side * n, price, day, &s);
         self.record_roll_fill(&o, price, n, liquidity, &s)?;
+        self.record_taker_roll_fill(&o, price, n, &s)?;
         self.pnl += pnl;
         if let Some(f) = fee {
             self.fees += f;
@@ -932,7 +1044,7 @@ impl<S: Sink> Engine<S> {
         x.remaining -= n;
         let terminal = x.remaining == 0;
         if terminal {
-            x.live = false;
+            x.live_since = None;
         }
         self.emit(
             "fills",
@@ -978,7 +1090,15 @@ impl<S: Sink> Engine<S> {
         Ok(())
     }
     fn working(&self, c: &str) -> bool {
-        self.orders.values().any(|o| o.contract == c)
+        self.order_by_contract.contains_key(c)
+    }
+    fn contract_order(&self, c: &str) -> Option<&Order> {
+        self.order_by_contract.get(c).map(|id| &self.orders[id])
+    }
+    fn remove_order(&mut self, id: u64) -> Option<Order> {
+        let order = self.orders.remove(&id)?;
+        self.order_by_contract.remove(&order.contract);
+        Some(order)
     }
     fn control(&mut self) -> Result<()> {
         if self.disabled || self.cfg.task == Task::Convert || self.now >= self.cutoff {
@@ -1033,9 +1153,8 @@ impl<S: Sink> Engine<S> {
     }
     fn reprice(&mut self, c: &str, ms: u64) -> Result<()> {
         if self
-            .orders
-            .values()
-            .any(|o| o.contract == c && !o.cancel_sent && self.now - o.created >= ms as i64 * 1000)
+            .contract_order(c)
+            .is_some_and(|o| !o.cancel_sent && self.now - o.created >= ms as i64 * 1000)
         {
             self.cancel_contract(c)?;
         }
@@ -1043,6 +1162,9 @@ impl<S: Sink> Engine<S> {
     }
     fn risk_interval(&self, r: &RollState) -> Option<(f64, f64)> {
         let notional = |c: &str| {
+            if self.known.get(c).copied().unwrap_or(0) == 0 && !self.working(c) {
+                return Some(0.0);
+            }
             let s = self.metadata.spec(c).ok()?;
             Some(self.fresh(c, &self.visible)?.mid(&s)? * s.multiplier)
         };
@@ -1054,7 +1176,7 @@ impl<S: Sink> Engine<S> {
         let mut hi = 0.0;
         for (c, unit) in [(&r.old, old_unit), (&r.new, new_unit)] {
             e += *self.known.get(c).unwrap_or(&0) as f64 * unit;
-            for o in self.orders.values().filter(|o| &o.contract == c) {
+            if let Some(o) = self.contract_order(c) {
                 let d = o.side as f64 * o.local_remaining as f64 * unit;
                 lo += d.min(0.0);
                 hi += d.max(0.0);
@@ -1147,6 +1269,7 @@ impl<S: Sink> Engine<S> {
         let kb = *self.known.get(&r.new).unwrap_or(&0);
         if ka == 0 && kb == r.goal && !self.working(&r.old) && !self.working(&r.new) {
             r.completed = true;
+            r.succeeded = true;
             self.emit(
                 "roll_events",
                 Row {
@@ -1165,9 +1288,6 @@ impl<S: Sink> Engine<S> {
             RollAlgorithm::MakerMaker => Execution::Maker,
             RollAlgorithm::TakerTaker => Execution::Taker,
         };
-        let (Some((a, b)), Some((pa, pb))) = (books, mids) else {
-            return Ok(());
-        };
         let (arrival_old, arrival_new) = r.arrival.unwrap();
         let reference_spread = arrival_new - arrival_old;
         if r.goal != 0 && r.goal.signum() != r.initial.signum() {
@@ -1176,6 +1296,32 @@ impl<S: Sink> Engine<S> {
             r.completed = true;
             return Ok(());
         }
+        let (Some((a, b)), Some((pa, pb))) = (books, mids) else {
+            // When only one leg remains, a fresh book on that leg suffices.
+            // Keep the other leg's in-flight orders reserved until terminal.
+            let (target_old, target_new) = r.batch.as_ref().map_or((0, r.goal), |b| (b.a, b.b));
+            let (contract, delta, reference) =
+                if ka != target_old && kb == target_new && !self.working(&r.new) {
+                    (&r.old, target_old - ka, arrival_old)
+                } else if ka == target_old && kb != target_new && !self.working(&r.old) {
+                    (&r.new, target_new - kb, arrival_new)
+                } else {
+                    return Ok(());
+                };
+            if self.working(contract) {
+                self.reprice(contract, self.cfg.reprice_ms)?;
+            } else {
+                let qty = delta.signum()
+                    * delta
+                        .abs()
+                        .min(self.cfg.max_child_lots)
+                        .min(self.cfg.roll.batch_lots);
+                if self.risk_allows(r, contract, qty) {
+                    self.submit(contract, qty, mode, reference, "calendar_roll")?;
+                }
+            }
+            return Ok(());
+        };
         if let Some(batch) = &r.batch {
             if ka == batch.a && kb == batch.b && !self.working(&r.old) && !self.working(&r.new) {
                 self.emit(
@@ -1199,18 +1345,6 @@ impl<S: Sink> Engine<S> {
                 return Ok(());
             }
             let sign = r.initial.signum();
-            let quote_spread = if sign > 0 {
-                sb.price(b.bid[0].unwrap()) - sa.price(a.ask[0].unwrap())
-            } else {
-                sb.price(b.ask[0].unwrap()) - sa.price(a.bid[0].unwrap())
-            };
-            let improvement = self.cfg.roll.spread_improvement_ticks * sa.tick;
-            if mode == Execution::Maker
-                && self.cfg.roll.use_spread_gate
-                && (quote_spread - reference_spread) * sign as f64 > -improvement + 1e-9
-            {
-                return Ok(());
-            }
             let new_delta = r.goal - r.initial_new;
             let denom = r.initial.abs().max(new_delta.abs()).max(1) as f64;
             let new_progress = if new_delta == 0 {
@@ -1224,6 +1358,32 @@ impl<S: Sink> Engine<S> {
             let next = (progress + self.cfg.roll.batch_lots as f64 / denom).min(1.0);
             let next_a = sign * (r.initial.abs() as f64 * (1.0 - next)).round() as i64;
             let next_b = r.initial_new + (new_delta as f64 * next).round() as i64;
+            let paired = (next_a - ka) * sign < 0 && (next_b - kb) * sign > 0;
+            let explicit_taker = self.cfg.roll.algorithm == Some(RollAlgorithm::TakerTaker);
+            let (old_price, new_price, old_qty, new_qty) =
+                if mode == Execution::Taker && explicit_taker {
+                    if sign > 0 {
+                        (a.bid[0], b.ask[0], a.bid_qty[0], b.ask_qty[0])
+                    } else {
+                        (a.ask[0], b.bid[0], a.ask_qty[0], b.bid_qty[0])
+                    }
+                } else if sign > 0 {
+                    (a.ask[0], b.bid[0], a.ask_qty[0], b.bid_qty[0])
+                } else {
+                    (a.bid[0], b.ask[0], a.bid_qty[0], b.ask_qty[0])
+                };
+            let quote_spread = sb.price(new_price.unwrap()) - sa.price(old_price.unwrap());
+            let gate = mode == Execution::Maker || (explicit_taker && paired);
+            let improvement = self.cfg.roll.spread_improvement_ticks * sa.tick;
+            if gate
+                && self.cfg.roll.use_spread_gate
+                && (quote_spread - reference_spread) * sign as f64 > -improvement + 1e-9
+            {
+                return Ok(());
+            }
+            if explicit_taker && paired && (old_qty <= 0 || new_qty <= 0) {
+                return Ok(());
+            }
             r.batch = Some(Batch {
                 a: next_a,
                 b: next_b,
@@ -1389,7 +1549,7 @@ impl<S: Sink> Engine<S> {
                         }
                     }
                     Report::Done { id, .. } => {
-                        self.orders.remove(&id);
+                        self.remove_order(id);
                     }
                 }
             }
@@ -1424,9 +1584,11 @@ impl<S: Sink> Engine<S> {
             .map(|(c, t)| (t.lots - self.positions.get(c).map_or(0, Position::lots)).unsigned_abs())
             .sum();
         self.summary.roll_complete = self.rolls.values().all(|r| {
-            self.positions.get(&r.old).map_or(0, Position::lots) == 0
-                && self.positions.get(&r.new).map_or(0, Position::lots) == r.goal
-                && r.arrival.is_some()
+            r.succeeded
+                || (self.positions.get(&r.old).map_or(0, Position::lots) == 0
+                    && self.positions.get(&r.new).map_or(0, Position::lots) == r.goal
+                    && r.arrival.is_some()
+                    && !r.completed)
         });
         self.summary.known_fees_cny = cny(self.fees);
         self.summary.fee_unknown_fills = self.unknown_fees;
@@ -1637,6 +1799,60 @@ mod tests {
         assert_eq!(e.finish(start() + 200000).unwrap().fills, 0);
     }
     #[test]
+    fn interval_volume_requires_a_full_live_interval_and_caps_partial_fills() {
+        for side in [-1, 1] {
+            let mut e = engine(Config {
+                maker_fill_model: MakerFillModel::IntervalVolume,
+                order_delay_ms: 10,
+                report_delay_ms: 50,
+                ..config()
+            });
+            let through = 100 - side * 2;
+            input(&mut e, 0, 4000.0 * side as f64);
+            feed(&mut e, 0, 1, 100, 100);
+            feed(&mut e, 50, 2, through, 200); // Arrived 10 ms into this interval.
+            feed(&mut e, 50, 3, through, 201); // Another frame at the same capture time.
+            feed(&mut e, 70, 4, 100 - side, 205); // Touch only.
+            assert_eq!(e.summary.filled_lots, 0);
+            feed(&mut e, 80, 5, through, 207);
+            assert_eq!(e.contract_order("rb2701").unwrap().remaining, 2);
+            assert_eq!(e.known.get("rb2701"), None);
+            feed(&mut e, 90, 6, through, 6); // Cumulative counter reset.
+            feed(&mut e, 100, 7, through, 7);
+            feed(&mut e, 110, 8, through, 40);
+            assert_eq!(e.summary.filled_lots, 4);
+            assert!(e.working("rb2701")); // Private terminal report still in flight.
+            e.advance(start() + 170_000, true).unwrap();
+            assert_eq!(e.known["rb2701"], side * 4);
+            assert!(!e.working("rb2701"));
+            let fills: Vec<_> = e
+                .sink
+                .0
+                .iter()
+                .filter(|(t, _)| t == "fills")
+                .map(|(_, r)| (r.source_cursor.unwrap(), r.lots.unwrap()))
+                .collect();
+            assert_eq!(fills, [(5, 2), (7, 1), (8, 1)]);
+        }
+    }
+    #[test]
+    fn zero_latency_ioc_waits_for_new_liquidity_after_partial_fill() {
+        let mut e = engine(Config {
+            execution: Execution::Taker,
+            ..config()
+        });
+        input(&mut e, 0, 3000.0);
+        let mut q = quote(0, 1, "rb2701", 99, 101, 100, 10);
+        q.ask_qty[0] = 1;
+        e.quote(q).unwrap();
+        e.advance(start(), true).unwrap();
+        assert_eq!(e.next_id, 1);
+        assert_eq!(e.known["rb2701"], 1);
+        feed(&mut e, 100, 2, 100, 10);
+        assert_eq!(e.known["rb2701"], 3);
+        assert_eq!(e.next_id, 2);
+    }
+    #[test]
     fn source_frame_that_creates_order_cannot_fill_it() {
         let mut e = engine(config());
         input(&mut e, 0, 1000.0);
@@ -1694,7 +1910,7 @@ mod tests {
         e.quote(q).unwrap();
         e.advance(start() + 200_000, true).unwrap();
         let o = e.orders.values().next().unwrap();
-        assert!(o.live);
+        assert!(o.live_since.is_some());
         assert_eq!((o.limit, o.remaining), (99, 2));
         feed(&mut e, 250, 3, 99, 102);
         feed(&mut e, 300, 4, 98, 103);
@@ -1883,6 +2099,137 @@ mod tests {
         assert!(!e.finish(start() + 100000).unwrap().roll_complete);
     }
 
+    #[test]
+    fn explicit_taker_roll_uses_directional_executable_spread_gate() {
+        for short in [false, true] {
+            let mut cfg = roll_engine(short, 20_000.0, 0).cfg;
+            cfg.roll.algorithm = Some(RollAlgorithm::TakerTaker);
+            cfg.execution = Execution::Taker;
+            cfg.roll.use_spread_gate = true;
+            cfg.roll.spread_improvement_ticks = 1.0;
+            let mut e = engine(cfg);
+            roll_start(&mut e);
+            assert_eq!(e.summary.fills, 0);
+            assert!(!e.working("rb2701"));
+            let (bid, ask) = if short { (104, 106) } else { (98, 100) };
+            e.quote(quote(100, 3, "rb2705", bid, ask, 102, 100))
+                .unwrap();
+            e.advance(start() + 100_000, true).unwrap();
+            let batch = e
+                .sink
+                .0
+                .iter()
+                .find(|(table, row)| table == "roll_batches" && row.kind == "batch_started")
+                .unwrap();
+            assert_eq!(batch.1.reference_price, Some(2.0));
+            assert_eq!(batch.1.value, Some(if short { 3.0 } else { 1.0 }));
+            assert!(e.summary.filled_lots > 0);
+        }
+    }
+
+    #[test]
+    fn taker_gate_needs_both_depths_and_skips_unpaired_liquidation() {
+        let mut cfg = roll_engine(false, 20_000.0, 0).cfg;
+        cfg.roll.algorithm = Some(RollAlgorithm::TakerTaker);
+        cfg.execution = Execution::Taker;
+        let mut e = engine(cfg.clone());
+        e.quote(quote(0, 1, "rb2701", 99, 101, 100, 100)).unwrap();
+        let mut next = quote(0, 2, "rb2705", 101, 103, 102, 100);
+        next.ask_qty[0] = 0;
+        e.quote(next).unwrap();
+        e.advance(start(), true).unwrap();
+        let mut favorable = quote(100, 3, "rb2705", 99, 101, 100, 100);
+        favorable.ask_qty[0] = 0;
+        e.quote(favorable).unwrap();
+        e.advance(start() + 100_000, true).unwrap();
+        assert_eq!(e.summary.fills, 0);
+        let mut old = quote(200, 4, "rb2701", 99, 101, 100, 100);
+        old.bid_qty[0] = 0;
+        e.quote(old).unwrap();
+        e.advance(start() + 200_000, true).unwrap();
+        assert_eq!(e.summary.fills, 0);
+        e.quote(quote(250, 5, "rb2705", 99, 101, 100, 100)).unwrap();
+        e.advance(start() + 250_000, true).unwrap();
+        assert_eq!(e.summary.fills, 0);
+        e.quote(quote(300, 6, "rb2701", 99, 101, 100, 100)).unwrap();
+        e.advance(start() + 300_000, true).unwrap();
+        assert!(e.summary.fills > 0);
+
+        cfg.roll.target_lots = Some(0);
+        let mut e = engine(cfg);
+        roll_start(&mut e);
+        assert!(e.summary.fills > 0);
+    }
+
+    #[test]
+    fn explicit_taker_gate_can_be_disabled_and_implicit_taker_stays_compatible() {
+        for algorithm in [None, Some(RollAlgorithm::TakerTaker)] {
+            let mut cfg = roll_engine(false, 20_000.0, 0).cfg;
+            cfg.roll.algorithm = algorithm;
+            cfg.execution = Execution::Taker;
+            cfg.roll.use_spread_gate = algorithm.is_none();
+            let mut e = engine(cfg);
+            roll_start(&mut e);
+            assert!(e.summary.fills > 0);
+        }
+    }
+
+    #[test]
+    fn taker_unpaired_liquidation_only_requires_held_contract_quote() {
+        let mut cfg = roll_engine(false, 20_000.0, 0).cfg;
+        cfg.roll.algorithm = Some(RollAlgorithm::TakerTaker);
+        cfg.execution = Execution::Taker;
+        let mut e = engine(cfg);
+        roll_start(&mut e);
+        assert_eq!(e.summary.fills, 0);
+        e.rolls.get_mut("RB").unwrap().goal = 0;
+        e.visible.remove("rb2705");
+        e.control().unwrap();
+        e.advance(start(), true).unwrap();
+        assert_eq!(e.positions["rb2701"].lots(), 0);
+        assert!(!e.positions.contains_key("rb2705"));
+    }
+
+    #[test]
+    fn taker_roll_pairs_real_fills_and_keeps_completion_after_target_change() {
+        for short in [false, true] {
+            let mut cfg = roll_engine(short, 20_000.0, 0).cfg;
+            cfg.roll.algorithm = Some(RollAlgorithm::TakerTaker);
+            cfg.roll.use_spread_gate = false;
+            cfg.execution = Execution::Taker;
+            let mut e = engine(cfg);
+            roll_start(&mut e);
+            assert_eq!(e.summary.roll_paired_lots, 2);
+            assert_eq!(e.summary.roll_spread_cost_cny, Some(40.0));
+            assert!(e.rolls["RB"].succeeded);
+            let roll = e.rolls.get_mut("RB").unwrap();
+            roll.standalone = false;
+            roll.goal = 0;
+            e.targets.get_mut("rb2705").unwrap().lots = 0;
+            let summary = e.finish(start() + 1).unwrap();
+            assert!(summary.roll_complete);
+            assert_eq!(summary.unfilled_lots, 2);
+            assert_eq!(summary.positions["rb2705"].abs(), 2);
+            let pairs: Vec<_> = e
+                .sink
+                .0
+                .iter()
+                .filter(|(t, r)| t == "roll_batches" && r.kind == "paired_taker_fill")
+                .collect();
+            assert_eq!(pairs.len(), 2);
+            for (_, pair) in pairs {
+                let (_, fill) = e
+                    .sink
+                    .0
+                    .iter()
+                    .find(|(table, row)| table == "fills" && row.order_id == pair.order_id)
+                    .unwrap();
+                assert_eq!(pair.contract, "rb2705");
+                assert_eq!((&pair.contract, pair.price), (&fill.contract, fill.price));
+            }
+        }
+    }
+
     fn spread_engine(
         short: bool,
         leg: crate::config::MakerLeg,
@@ -1982,6 +2329,23 @@ mod tests {
                 .collect();
             assert_eq!(observed, ["waiting", "eligible", "waiting"]);
         }
+    }
+    #[test]
+    fn capped_roll_hedges_each_reported_partial_fill() {
+        let mut cfg = spread_engine(false, crate::config::MakerLeg::Old, 3, 0, 50).cfg;
+        cfg.maker_fill_model = MakerFillModel::IntervalVolume;
+        let mut e = engine(cfg);
+        roll_start(&mut e);
+        feed(&mut e, 100, 3, 102, 101);
+        e.advance(start() + 149_999, true).unwrap();
+        assert_eq!(e.summary.roll_paired_lots, 0);
+        e.advance(start() + 150_000, true).unwrap();
+        assert_eq!(e.summary.roll_paired_lots, 1);
+        assert_eq!(e.contract_order("rb2701").unwrap().remaining, 2);
+        feed(&mut e, 210, 4, 102, 103);
+        let s = e.finish(start() + 400_000).unwrap();
+        assert!(s.roll_complete);
+        assert_eq!((s.roll_paired_lots, s.filled_lots), (3, 6));
     }
     #[test]
     fn adverse_spread_and_partial_ioc_retry_only_the_unhedged_lots() {

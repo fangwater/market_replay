@@ -5,7 +5,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -21,10 +21,11 @@ pub struct Status {
 }
 pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut f = File::create(&tmp)?;
+    let mut f = BufWriter::new(File::create(&tmp)?);
     serde_json::to_writer_pretty(&mut f, value)?;
     f.write_all(b"\n")?;
-    f.sync_all()?;
+    f.flush()?;
+    f.get_ref().sync_all()?;
     std::fs::rename(&tmp, path)?;
     File::open(path.parent().unwrap())?.sync_all()?;
     Ok(())
@@ -70,9 +71,9 @@ impl Store {
         Ok(status)
     }
     pub fn status(&self, id: &str) -> Result<Status> {
-        Ok(serde_json::from_reader(File::open(
+        Ok(serde_json::from_reader(BufReader::new(File::open(
             self.path(id)?.join("status.json"),
-        )?)?)
+        )?))?)
     }
     pub fn list(&self, limit: usize) -> Result<Vec<Status>> {
         let mut paths: Vec<_> = std::fs::read_dir(self.root.join("runs"))?
@@ -84,7 +85,7 @@ impl Store {
         let mut out = Vec::new();
         for p in paths.into_iter().take(limit.min(1000)) {
             if let Ok(f) = File::open(p.join("status.json")) {
-                if let Ok(s) = serde_json::from_reader(f) {
+                if let Ok(s) = serde_json::from_reader(BufReader::new(f)) {
                     out.push(s);
                 }
             }
@@ -136,16 +137,18 @@ impl Store {
             return Ok(None);
         };
         let dir = self.path(&s.id)?;
-        if dir.join("cancel").exists() {
+        let cancel_path = dir.join("cancel");
+        if cancel_path.exists() {
             s.state = "cancelled".into();
             atomic_json(&dir.join("status.json"), &s)?;
             return Ok(Some(s));
         }
-        let cfg: Config = serde_json::from_reader(File::open(dir.join("config.json"))?)?;
+        let cfg: Config =
+            serde_json::from_reader(BufReader::new(File::open(dir.join("config.json"))?))?;
         s.state = "running".into();
         s.updated_at = chrono::Utc::now().to_rfc3339();
         atomic_json(&dir.join("status.json"), &s)?;
-        let result = crate::runner::run(&cfg, &dir, || dir.join("cancel").exists());
+        let result = crate::runner::run(&cfg, &dir, || cancel_path.exists());
         s.updated_at = chrono::Utc::now().to_rfc3339();
         match result {
             Ok(summary) => {

@@ -63,7 +63,16 @@ impl<S: Sink> Engine<S> {
             .and_then(|r| r.maker_taker.pair.as_mut())
             .filter(|p| p.maker_id == id)
         {
-            pair.confirmed_prices.push((delta.abs(), price));
+            // Passive partial fills share their limit; retain FIFO prices by run.
+            if let Some((lots, _)) = pair
+                .confirmed_prices
+                .last_mut()
+                .filter(|(_, px)| *px == price)
+            {
+                *lots += delta.abs();
+            } else {
+                pair.confirmed_prices.push((delta.abs(), price));
+            }
         }
     }
 

@@ -108,7 +108,7 @@ impl Replay {
                     )
                 })?;
                 let c = mdl_replay::line::canonical_contract(p.symbol, p.trading_day)?;
-                let spec = metadata.spec(&c)?;
+                let spec = metadata.spec_ref(&c)?;
                 let mut bid = [None; 5];
                 let mut ask = [None; 5];
                 let mut bid_qty = [0; 5];

@@ -115,7 +115,8 @@ fn clock(s: &str) -> Result<u32> {
 impl Metadata {
     pub fn load(cfg: &Config) -> Result<Self> {
         if let Some(path) = &cfg.metadata_file {
-            let m: Self = serde_json::from_reader(std::fs::File::open(path)?)?;
+            let m: Self =
+                serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))?;
             m.validate()?;
             if cfg.fee_policy == "account_snapshot" {
                 ensure!(
@@ -370,11 +371,16 @@ impl Metadata {
         Ok(())
     }
     pub fn spec(&self, c: &str) -> Result<Spec> {
-        let spec = self
-            .contracts
-            .get(&c.to_ascii_lowercase())
+        self.spec_ref(c).cloned()
+    }
+    pub fn spec_ref(&self, c: &str) -> Result<&Spec> {
+        let contract = if c.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.contracts.get(&c.to_ascii_lowercase())
+        } else {
+            self.contracts.get(c)
+        };
+        let spec = contract
             .or_else(|| self.products.get(&crate::product(c)))
-            .cloned()
             .with_context(|| format!("missing verified multiplier/tick/session for {c}"))?;
         ensure!(!spec.fee_source.starts_with("account_snapshot:") || spec.fees.is_some(), "missing account-specific fee observation for {c}; choose an observed contract or another explicit fee policy");
         Ok(spec)
