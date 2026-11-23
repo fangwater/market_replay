@@ -120,6 +120,8 @@
 3. `trim_cn_futures_continuous_sessions --dataset baseline1min --session-as-of <快照日>`：按 `http://127.0.0.1:8765/api/v1/trading-sessions` 的时段裁剪。这个工具不允许输入和输出是同一个目录，所以先导出到 staging，再裁剪进生产目录。生产 `baseline_data_1min` 本身就是裁剪的输出目录，溯源记录在 `_provenance/continuous_sessions.json`；快照身份不同时，工具会拒绝执行。2026-11-15 快照从 2026-09-08 升级到 as_of 2026-11-14（共 327 段，请求日期 `session_as_of = 2026-11-15`）：新增的只有郑商所 `SO`（葵花籽油，2026-11-12 上市）的 4 个交易时段，其余完全不变。用两份快照裁剪同一份输入，5/5 个文件一致，所以已经裁剪过的历史文件无需重做。旧记录保存为 `continuous_sessions.20260908.json`，升级说明在 `snapshot_upgrade_20261115.json`。以后再出现新品种时，照这个流程处理：先确认新快照只是增加时段，再升级；如果已有品种的时段发生变化，就不能直接升级
 4. `fill_1min_size_buckets --start <本次第一天> --end <本次最后一天>`：大小单分桶，只读打开 RocksDB，只改写范围内日文件的 12 个分桶列。**2024 年起，正式归档中有上月主力阈值的日分区采用这一口径（和实时 gRPC bar 共用同一套阈值文件）：**阈值 = 上一个完整上海自然月里主力合约逐交易日合并（换月前旧主力、换月后新主力）的区间成交额线性 P50/P90，一笔成交取它自己所在月的上月阈值；文件在 `/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/size_thresholds/dominant_by_day/<YYYYMM>/<品种>.json`，由每月 1 日的任务 `size-thresholds-monthly`（`scripts/export_size_thresholds.sh`）生成，缺文件时工具自己算并写入。必须显式给 `--start/--end`（没有全历史模式）；`cn-daily` 传的是本次处理的第一天到最后一天，不再是月初。某品种上月没有阈值（新上市如 SO，或没有主力成交）时该品种当天文件保持原样、输出 `MISSING-THRESHOLDS`，绝不编造。2026-11-19 已将 2024、2025 两年及 2026 年 1–10 月的大小单回补到原生分钟和 HFQ 归档。2023 年及以前的文件使用旧规则（同一自然月、品种全部合约合并）。旧的 `--export-thresholds` 已删除，换成 `--export-month YYYYMM --product P`
 
+TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快照之后的时间加权，不再把开头没有价格的时间按 0 计入；HFQ 不再置空首分钟 TWAP。详见 [docs/cn_futures_l2.md](docs/cn_futures_l2.md#1-分钟-twap-口径2026-11-23)。
+
 迁移验证（2026-11-14）：用新二进制在临时目录按以上四步重跑 2026-08-26 的上期所和广期所，共 24 个文件、105,785 行，与生产 parquet 的 schema 和全部值完全一致；抽出 core 之后再验证广期所，5/5 个文件一致。
 
 ### 迁自 mkt_signal 的规则（cn_futures_l2）

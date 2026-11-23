@@ -184,33 +184,11 @@ pub fn apply_hfq(row: &BaselineMinute, gap: f64) -> BaselineMinute {
 
 /// Apply one additive gap to a sorted contract-day series.
 ///
-/// Raw TWAP divides by the full minute even when the first print of a trading
-/// segment arrives after the minute opens. Without the uncovered duration, an
-/// additive shift cannot reconstruct that partial TWAP. Blank the first
-/// trade-bearing TWAP in each contiguous minute segment; after that print has
-/// seeded the segment, adding the full gap is exact.
+/// Every price, including the TWAP, shifts by the same gap. An unseeded TWAP
+/// covers only the time from its segment's first print on, so it is a price
+/// average like the others and the additive shift is exact.
 pub fn apply_hfq_series(rows: Vec<BaselineMinute>, gap: f64) -> Vec<BaselineMinute> {
-    let mut out = Vec::with_capacity(rows.len());
-    let mut previous_ts = None;
-    let mut has_prior_trade = false;
-    for row in rows {
-        if previous_ts.is_none_or(|ts| row.ts != ts + 60) {
-            has_prior_trade = false;
-        }
-        let has_trade = row.volume.is_finite() && row.volume > 0.0;
-        let partial_twap = has_trade && !has_prior_trade;
-        let ts = row.ts;
-        let mut adjusted = apply_hfq(&row, gap);
-        if partial_twap {
-            adjusted.twap = None;
-        }
-        if has_trade {
-            has_prior_trade = true;
-        }
-        previous_ts = Some(ts);
-        out.push(adjusted);
-    }
-    out
+    rows.iter().map(|row| apply_hfq(row, gap)).collect()
 }
 
 pub fn index_dominants(days: &[DominantDay], product: &str) -> HashMap<NaiveDate, String> {
@@ -354,19 +332,20 @@ mod tests {
     }
 
     #[test]
-    fn segmented_hfq_blanks_only_unseeded_partial_twap() {
+    fn segmented_hfq_shifts_every_twap_including_segment_opens() {
         let mut first = minute(100.0, 99.0, 101.0);
-        first.twap = Some(1.0);
+        first.twap = Some(100.5);
         let mut seeded = minute(101.0, 100.0, 102.0);
         seeded.ts = 60;
         let mut after_gap = minute(102.0, 101.0, 103.0);
         after_gap.ts = 180;
+        after_gap.twap = Some(102.5);
 
         let rows = apply_hfq_series(vec![first, seeded, after_gap], 10.0);
 
-        assert_eq!(rows[0].twap, None);
+        assert_eq!(rows[0].twap, Some(110.5));
         assert_eq!(rows[1].twap, Some(111.0));
-        assert_eq!(rows[2].twap, None);
+        assert_eq!(rows[2].twap, Some(112.5));
         assert_eq!(rows[0].close, Some(110.0));
         assert_eq!(rows[2].close, Some(112.0));
     }

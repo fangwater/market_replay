@@ -228,14 +228,22 @@ fn normalized_twap_prints(
     unique
 }
 
+/// Time-weighted last price over the part of `[start_us, end_us)` that has a
+/// price: the whole bucket when `prior_price` seeds it, otherwise from the
+/// first print on. Uncovered time is excluded from the denominator rather than
+/// weighted as a zero price, so the result stays within the prices observed.
 fn twap_from_prints(
     prints: &[(i64, f64)],
     start_us: i64,
     end_us: i64,
     prior_price: Option<f64>,
 ) -> Option<f64> {
-    let mut previous_time = start_us;
     let mut previous_price = prior_price.filter(|price| price.is_finite() && *price > 0.0);
+    let covered_from = match previous_price {
+        Some(_) => start_us,
+        None => prints.first()?.0,
+    };
+    let mut previous_time = covered_from;
     let mut weighted = 0.0;
     for &(ts_us, price) in prints {
         if let Some(previous_price) = previous_price {
@@ -246,13 +254,14 @@ fn twap_from_prints(
     }
     let previous_price = previous_price?;
     weighted += previous_price * (end_us - previous_time) as f64;
-    Some(weighted / (end_us - start_us) as f64)
+    Some(weighted / (end_us - covered_from) as f64)
 }
 
-/// Last-print step function over `[start_us, end_us)`, divided by the full bucket.
+/// Last-print step function over the covered part of `[start_us, end_us)`.
 ///
 /// `prior_price` is the last valid print in the same continuous trading segment.
-/// When it is absent, time before this bucket's first print remains uncovered.
+/// When it is absent, the time before this bucket's first print is uncovered and
+/// excluded from both the weighted sum and the duration.
 pub fn exact_twap_one_bucket(
     timestamps_us: &[i64],
     prices: &[f64],
@@ -928,9 +937,30 @@ mod tests {
                 .unwrap();
         assert!((rows[1].twap.unwrap() - 100.325).abs() < 1e-9);
         assert_eq!(rows[2].twap, Some(99.0));
-        // The second segment starts unseeded, so its first print at :05 only
-        // contributes the remaining 55 seconds of the minute.
-        assert!((rows[3].twap.unwrap() - 104.0 * 55.0 / 60.0).abs() < 1e-9);
+        // The second segment starts unseeded: its first print at :05 covers the
+        // remaining 55 seconds, and the uncovered five seconds are excluded.
+        assert_eq!(rows[3].twap, Some(104.0));
+    }
+
+    #[test]
+    fn unseeded_twap_stays_within_the_observed_prints() {
+        // A session open: the first print arrives 0.5 s into the minute.
+        let prints = [(500_000, 13_620.0), (30_000_000, 13_610.0)];
+        let twap = twap_from_prints(&prints, 0, 60_000_000, None).unwrap();
+        let expected = (13_620.0 * 29.5 + 13_610.0 * 30.0) / 59.5;
+        assert!((twap - expected).abs() < 1e-9, "{twap}");
+        assert!((13_610.0..=13_620.0).contains(&twap));
+        // A seeded minute still covers the full bucket from the prior price.
+        let seeded = twap_from_prints(&prints, 0, 60_000_000, Some(13_600.0)).unwrap();
+        let expected = (13_600.0 * 0.5 + 13_620.0 * 29.5 + 13_610.0 * 30.0) / 60.0;
+        assert!((seeded - expected).abs() < 1e-9);
+        // No print and no seed stays unknown; a print exactly at the bucket
+        // start needs no seed.
+        assert_eq!(twap_from_prints(&[], 0, 60_000_000, None), None);
+        assert_eq!(
+            twap_from_prints(&[(0, 5.0)], 0, 60_000_000, None),
+            Some(5.0)
+        );
     }
 
     #[test]
@@ -953,9 +983,9 @@ mod tests {
         ];
         let mut state = TwapGridState::default();
         let values = twap_for_existing_grid(&[0, 60, 180], &trades, &mut state).unwrap();
-        assert_eq!(values[0], Some(100.0 / 60.0));
+        assert_eq!(values[0], Some(100.0));
         assert_eq!(values[1], Some(100.0));
-        assert_eq!(values[2], Some(104.0 * 55.0 / 60.0));
+        assert_eq!(values[2], Some(104.0));
         assert_eq!(state.last_price, Some(104.0));
     }
 
