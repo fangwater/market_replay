@@ -194,6 +194,14 @@ impl TsParser {
 
 /// One book field of a row: `k` is the slot (0..BOOK_FIELDS), price slots are
 /// `k % 3 == 0`, the others are sizes / order counts (u32, no sign, no point).
+/// Number of negative size / order counts read as empty (see `parse_book_field`).
+pub static NEGATIVE_COUNTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of negative size / order counts read as empty so far in this process.
+pub fn negative_counts() -> u64 {
+    NEGATIVE_COUNTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn parse_book_field(k: usize, f: &[u8]) -> Result<f64> {
     Ok(if f.is_empty() {
         f64::NAN
@@ -206,6 +214,11 @@ fn parse_book_field(k: usize, f: &[u8]) -> Result<f64> {
             .with_context(|| format!("bad price {:?}", String::from_utf8_lossy(f)))?;
         ensure!(x.is_finite(), "non-finite price");
         x
+    } else if f.len() > 1 && f[0] == b'-' && f[1..].iter().all(u8::is_ascii_digit) {
+        // A negative size / order count (seen in 2021 VXM1: BuyNo/SellNo = -1) is no quantity: kept as an
+        // empty value instead of failing the whole package; every one is counted (`negative_counts`).
+        NEGATIVE_COUNTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        f64::NAN
     } else {
         let mut x = 0u64;
         for &c in f {
@@ -1514,5 +1527,16 @@ mod tests {
                 .exists());
         }
         assert_eq!(digests[0], digests[1], "byte-identical re-run");
+    }
+
+    #[test]
+    fn a_negative_count_is_read_as_empty_and_counted() {
+        let before = negative_counts();
+        assert!(parse_book_field(2, b"-1").unwrap().is_nan()); // order count
+        assert!(parse_book_field(1, b"-7").unwrap().is_nan()); // size
+        assert_eq!(negative_counts() - before, 2);
+        assert_eq!(parse_book_field(0, b"-3.5").unwrap(), -3.5); // a negative price stays a price
+        assert!(parse_book_field(2, b"1x").is_err());
+        assert!(parse_book_field(2, b"-").is_err());
     }
 }

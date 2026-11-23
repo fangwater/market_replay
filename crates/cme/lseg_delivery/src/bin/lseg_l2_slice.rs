@@ -862,7 +862,8 @@ fn main() -> Result<()> {
                        "washed": count("washed"), "kept_existing": count("kept_existing"),
                        "failed_units": count("failed"), "missing_source": count("missing_source"),
                        "failed": rep.failed.is_some(), "seconds": started.elapsed().as_secs(),
-                       "cpu_seconds": cpu_total(), "peak_rss_mib": peak_rss_mib()})
+                       "cpu_seconds": cpu_total(), "peak_rss_mib": peak_rss_mib(),
+                       "negative_counts_read_as_empty": lseg_delivery::l2_slice::negative_counts()})
             );
             if let Some(e) = rep.failed {
                 eprintln!("FAILED: {e}");
