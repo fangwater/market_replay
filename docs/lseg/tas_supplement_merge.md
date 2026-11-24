@@ -24,6 +24,8 @@
 
 写入前通过 RocksDB Checkpoint 建立原库回退快照，路径为 `/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_tas_before_supplement_20261103`。快照与原库位于同一文件系统，SST 使用硬链接，避免复制整库；保留用于回退。
 
+2026-11-24 用户要求不再保留这类回退快照：合并早已验收，快照的 60,242 个数据文件和主库是同一份硬链接，只有 4 个元数据文件（MANIFEST、CURRENT、日志、OPTIONS）是它独有的，已删除快照目录，主库未受影响、也没有释放空间。以后合并直接进主库，不再另做回退快照。
+
 插入使用 RocksDB 外部 SST ingest，原始 `period:*` 水位不改动。本次使用单独的 `replay_meta` key `supplement:futures_11:2026-01-01_2026-05-30`，标识本批来源、状态与回执。
 
 验收遍历新列族所有记录，核对新增条数和 key/value SHA256；对 5 个已有列族逐条与写入前快照比较，验证原记录全部保留、value 不变。另核对原水位不变，最后才写入完成回执。
