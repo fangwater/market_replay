@@ -420,3 +420,9 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 - Raw 补缺：仍没有 L2 但 Raw 有数据的 RIC（2020 年 99 个，2021–2023 年各约 330 个，只占 Raw 包消息的约 0.001%），用 `rawll2_segments.py` 只取需要的段，洗进 `_stream/raw2020..raw2023`，交付标 `raw` 来源。
 - 补充包 + Raw 共交付 402,701 个文件，0 个问题。下载的补充包已删，RocksDB 保留。
 - 2010–2019 年按用户决定不做 L2（缺口表里记为 `out_of_scope`）。
+
+## 源包的清理（2026-11-24，用户确认）
+
+- 2020–2026 年的 Normalized LL2 主包（`future/normalisedLL2` 里 2020…2026 的 `merged-Data*`，共约 4.4 TB）已洗进 RocksDB，本地的数据文件已删除；每个包目录里只保留 `merged-Report.csv.gz` 和 notes（缺口表和 `l2_fill_wanted.py` 要读 Report）。要重新洗只能从远端 `10.61.20.12` 重新下载。2010–2019 年的包按“不做 L2”的决定没有洗，也没有删。
+- 2020–2023 年的补充包和 Raw 段在补缺交付后已删除；`future/rawLL2`、`future_daily/normalisedLL2`、`future_supplement`（2024–2026）仍在 HDD 上。
+- 旧的 Raw LL2 15 秒库 `lseg_data/cme_raw_ll2_15s_rocksdb_all_products`（0.44 TB，2026-01..05 的 15 秒 / 1 分钟最后值，曾用于 TU/FV/TY/TN/US/AUL/FF 的分钟 L2 补列）已删除；需要时可从 `l2_db` 重新算 15 秒值，或从远端 Raw 包重洗（`config/cme_raw_ll2_2026_15s.toml`）。
