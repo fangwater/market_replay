@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Final report of the L2 backfill (period packages + daily files washed into RocksDB).
 
-usage: l2_backfill_report.py --root <runtime/l2_backfill> --db-root <runtime/l2_db> [--out-dir <dir>]
+usage: l2_backfill_report.py --root <runtime/l2_backfill> --db-root </mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db> [--out-dir <dir>]
 
 Reads what the run itself wrote (backfill.log = one JSON line per washed unit, progress.json,
 source_gaps.json) plus the independent checks (spotcheck.jsonl, boundary_*.jsonl) and writes

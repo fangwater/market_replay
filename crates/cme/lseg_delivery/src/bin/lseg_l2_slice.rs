@@ -24,7 +24,7 @@ use std::{
     time::Instant,
 };
 
-const DEFAULT_DB_ROOT: &str = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_db";
+const DEFAULT_DB_ROOT: &str = "/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db";
 const DEFAULT_TARGET_ROOT: &str = "/mnt/nfs/30.100_cta_data/lseg";
 
 #[derive(Parser)]

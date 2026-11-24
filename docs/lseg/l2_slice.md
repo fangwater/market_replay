@@ -74,7 +74,7 @@ footer 校验：行数、每个 row group 的 `ric` 最小 = 最大 = 该 RIC、
 
 1. **分片（shard）**：每个 csv.gz 只解压一次，按 RIC 边界（一个 RIC 不跨分片）写成 zstd(1) 的 csv 分片（默认约 400 万行一片），放 NVMe `runtime/l2_shards/`。
    分片编码用 `cme_tas_replay::shard::ZstdShardWriter`，和 `cme_tas_shard` 共用同一份（字节相同，有测试）。洗完立即删分片；失败的残留下次启动时清理。
-2. **洗（wash）**：把分片逐行解析，写进**每个 UTC 日一个** RocksDB（`runtime/l2_db/<YYYYMMDD>/`），**全部更新**，不带任何频率。
+2. **洗（wash）**：把分片逐行解析，写进**每个 UTC 日一个** RocksDB（`/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db/<YYYYMMDD>/`），**全部更新**，不带任何频率。
    每个 RIC 写成一个 SST 文件再 ingest（无写放大、关自动 compaction）；每个品种日完成后写完成标记 `M|<品种>`（含 RIC 列表和更新数，同步落盘），
    读方只信有标记的品种日；重跑会先 `delete_range` 掉同一 RIC 的残留。用 `--force` 才重洗已有标记的品种日。读取用 `tasdb::SharedCache`（固定上限、后台线程 1 个）。
 3. **提取（extract）**：独立步骤，**RIC 为单位并行**（一个 RIC-日 = 一个任务 = 一个 parquet，大的先跑），读 RocksDB 解码后走同一套切片规则。
@@ -291,7 +291,7 @@ lseg_l2_slice extract --out-root /mnt/hdd-raid5-72t/liang_torch/lseg_data/l2_par
 
 把 Normalized LL2 的**全部品种**洗进 RocksDB，之后任意频率都从库里提取，不再重新解压。完成标志是 `runtime/l2_backfill/report.json`（`complete: true`）。
 
-**位置和覆盖**（`/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_db/`，共 923.7 GB，是压缩包 2,306 GB 的 0.40 倍）：
+**位置和覆盖**（`/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db/`，共 923.7 GB，是压缩包 2,306 GB 的 0.40 倍）：
 
 | 库 | 来源 | 源行数 | RIC | 时间 | 压缩包 → 库 |
 | --- | --- | --- | --- | --- | --- |
@@ -323,7 +323,7 @@ nice -n 10 <bin>/lseg_l2_slice backfill --workers 8 --producers 4 --segment-mib 
 - 衔接处没有重叠：2025/2026 年交界、周期包与 2026-06-01 日包交界。
 - **没有做的**：从库里把全部更新条数读回来逐一核对（没有这样的读取接口）；2025 原始包和补充包之间相同行的重复个数没有记录（两者在不同的库里，运行中没有冲突报错）。
 
-**报告**：`scripts/lseg/l2_backfill_report.py --root <runtime/l2_backfill> --db-root <runtime/l2_db>`，只有真的完成才写 `report.json`，否则写 `report.incomplete.json`。
+**报告**：`scripts/lseg/l2_backfill_report.py --root <runtime/l2_backfill> --db-root </mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db>`，只有真的完成才写 `report.json`，否则写 `report.incomplete.json`。
 
 **怎么用这些库提取切片**：`lseg_l2_slice extract-rics --db-dirs <库1,库2,…>`（按时间顺序给出，周期包和日库可以混用）`--rics <RIC,…> --days <日期,…>`，频率用 `--freq-ms`（默认 250），输出到 `--out-root`。
 
@@ -428,3 +428,7 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 - 旧的 Raw LL2 15 秒库 `lseg_data/cme_raw_ll2_15s_rocksdb_all_products`（0.44 TB，2026-01..05 的 15 秒 / 1 分钟最后值，曾用于 TU/FV/TY/TN/US/AUL/FF 的分钟 L2 补列）已删除；需要时可从 `l2_db` 重新算 15 秒值，或从远端 Raw 包重洗（`config/cme_raw_ll2_2026_15s.toml`）。
 - 2026-11-24 用户确认：`future_daily/normalisedLL2`（2026-06-01 起的 L2 日包，971 GB）和 `future_supplement/normalisedLL2`（2024–2026 补充包，247 GB）也已删除（补充包目录只留 Report / notes；`future_supplement/normalised` 是 TAS 补充，没动）。
   已洗过哪些记在 `lseg/meta/l2_sources.sqlite`（`scripts/lseg/l2_washed_sources.py` 从洗库日志生成，不覆盖已有文件）：`washed_units`（每个洗过的单元：日文件 / 主包 / 补充包 / Raw 段，含 RIC 数、更新条数、时间范围、对应的库和远端原始文件地址）、`washed_daily`（19,261 个品种日文件）。删除前核对过，磁盘上的日文件全部有洗库记录。
+
+## RocksDB 搬到 HDD（2026-11-24，用户确认）
+
+L2 的全部 RocksDB（日库 `<YYYYMMDD>/` 和 `_stream/*`，3.22 TB、600,455 个文件）从 NVMe 搬到 `/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db`。搬完核对：文件数和总字节与原件完全相同，rsync 干跑没有差异；在新位置读 3 个库（`p2026h1`、`p2022`、`raw2025a`）提取的 RIC-日和 NFS 上已交付的 parquet 逐表相同。NVMe 上的原件在核对后删除，不留软链接。`lseg_l2_slice` 的 `--db-root` 默认值已改为新路径；`l2_sources.sqlite` 里的 `database` 列也已改成新路径。

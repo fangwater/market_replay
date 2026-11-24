@@ -18,7 +18,7 @@ Raw 是名次槽的增量赋值（一条消息 = 头行 + `Number of FIDs` 行 F
 
 ```
 lseg_l2_slice backfill --no-daily --stream raw2024=<part0>,<part1>,… --raw-ll2-rics <RIC 列表> \
-    --db-root <runtime/l2_db> --progress … --gaps …
+    --db-root </mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db> --progress … --gaps …
 ```
 
 `scripts/lseg/l2_raw_wanted.py` 生成 RIC 列表：Raw 有数据、TAS 有、Normalized L2 缺失（或天数少于 TAS）的 RIC。Normalized 完整覆盖的 RIC 不从 Raw 洗。
