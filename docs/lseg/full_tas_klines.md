@@ -69,3 +69,7 @@ HRD先以源内真实成交所处时间核对同一生命周期，多套到期�
 当前真实问题位于`lseg/meta/problems/native_kline/`，旧问题保留在`full_tas_klines/`：未知状态区间、参考冲突、
 未关联控制事件、归属与协议未核定、执行失败。正常成功不生成NAS audit或回执。
 原油调查独立见[CL原油差异](cl_difference_20261112.md)，不以诊断删除迟报或大宗成交。
+
+## 提取缓存已删除（2026-11-24）
+
+`lseg_data/lseg_full_rocksdb_20261112/extract`（2.2 TB，每个源作业的稀疏分钟表、改撤和状态）经用户同意已删除；成品 `kline.parquet` 在交付盘上，不依赖它。`lseg_kline` / `lseg-daily` 在缓存不存在时直接读源 TAS RocksDB（`minute_source` 里 `state.json` 和 `minutes.parquet` 都存在才复用），所以每日任务不受影响，只是以后重算旧品种年会慢。`config/lseg_daily.toml` 的 `kline_cache` 路径保留，目录不存在即可。`artifacts/lseg_full_rocksdb_20261112/plan.json`（源身份）仍在，不能动。
