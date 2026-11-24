@@ -412,3 +412,11 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 ## 范围：L2 只做 2020 年起（2026-11-21）
 
 用户决定：2020 年以前只需要 TAS 的 K 线（交付盘上已有的 `kline.parquet`），不洗也不交付 L2。2010–2019 年的 L2 包不处理；`l2_gaps.sqlite` 里这些年份的行记为 `out_of_scope`（`l2_gaps_build.py` 的 `L2_SCOPE_FROM = 2020`）。还要做的是 2020–2023 年。
+
+## 2020–2023 年的 L2（2026-11-22 ~ 24）
+
+- 主包（`p2020`–`p2023`，2.69 TB gz）洗进 `_stream/p2020..p2023`，交付 1,364,811 个文件，0 个问题。2021 年包里 VXM1 有一行订单数为 `-1`：洗库把负的数量和订单数读成空值并计数（`l2_slice::negative_counts`，共 21 次），不再让整年失败。
+- 补充包（`comex_globex`、`futures_11`，8 个共 418 GB）洗进 `_stream/sg2020..sf2023`，只交付主包没有的 RIC（`scripts/lseg/l2_fill_wanted.py` 生成清单，主包优先）。
+- Raw 补缺：仍没有 L2 但 Raw 有数据的 RIC（2020 年 99 个，2021–2023 年各约 330 个，只占 Raw 包消息的约 0.001%），用 `rawll2_segments.py` 只取需要的段，洗进 `_stream/raw2020..raw2023`，交付标 `raw` 来源。
+- 补充包 + Raw 共交付 402,701 个文件，0 个问题。下载的补充包已删，RocksDB 保留。
+- 2010–2019 年按用户决定不做 L2（缺口表里记为 `out_of_scope`）。
