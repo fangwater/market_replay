@@ -724,7 +724,7 @@ fn main() -> Result<()> {
         bail!("source period start must belong to --year and precede its end");
     }
     if a.workers == 0
-        || a.workers > 2
+        || a.workers > lseg_delivery::limits::TAS_EXPORT_WORKERS
         || a.batch_rows == 0
         || a.file_rows < a.batch_rows
         || a.sample_rows_per_kind == Some(0)

@@ -15,7 +15,7 @@ for y in "$@"; do
   out=$STAGE/$y
   if [ ! -f $out/_SUCCESS.json ]; then
     rm -rf $out
-    nice -n 10 $BIN/lseg_tas_parquet --year $y --period-end $((y+1))-01-01 --output $out --workers 2 --layout ric-day \
+    nice -n 10 $BIN/lseg_tas_parquet --year $y --period-end $((y+1))-01-01 --output $out --workers 8 --layout ric-day \
       --exchange-map $RT/map_$y.json --readback sampled > $RT/export_$y.log 2>&1 || { log "year $y export FAILED"; exit 1; }
   fi
   log "year $y exported: $(python3 -I -c "import json;s=json.load(open('$out/_SUCCESS.json'));print(s['files'],'files',s['bytes'],'bytes',s['trade_rows'],'trade rows',s['quote_rows'],'quote rows')")"

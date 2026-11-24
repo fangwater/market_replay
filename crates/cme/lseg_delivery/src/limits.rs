@@ -19,3 +19,10 @@ pub const IO_THREADS: usize = 8;
 /// independent. The default stays `AGGREGATION_WORKERS`; the daily path must not
 /// use more. Never scale this with the machine.
 pub const L2_SLICE_WORKERS: usize = 8;
+
+/// Workers of `lseg_tas_parquet` (one product column family each) for ONE-OFF HISTORICAL BACKFILLS only.
+///
+/// Exception to `AGGREGATION_WORKERS` approved by the user for that tool alone (2026-11-24, the 2020-2025
+/// trade / quote export). The default stays `AGGREGATION_WORKERS`; daily runs (`lseg-daily`) must not use more.
+/// Never scale this with the machine.
+pub const TAS_EXPORT_WORKERS: usize = 8;
