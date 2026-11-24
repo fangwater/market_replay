@@ -426,3 +426,5 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 - 2020–2026 年的 Normalized LL2 主包（`future/normalisedLL2` 里 2020…2026 的 `merged-Data*`，共约 4.4 TB）已洗进 RocksDB，本地的数据文件已删除；每个包目录里只保留 `merged-Report.csv.gz` 和 notes（缺口表和 `l2_fill_wanted.py` 要读 Report）。要重新洗只能从远端 `10.61.20.12` 重新下载。2010–2019 年的包按“不做 L2”的决定没有洗，也没有删。
 - 2020–2023 年的补充包和 Raw 段在补缺交付后已删除；`future/rawLL2`、`future_daily/normalisedLL2`、`future_supplement`（2024–2026）仍在 HDD 上。
 - 旧的 Raw LL2 15 秒库 `lseg_data/cme_raw_ll2_15s_rocksdb_all_products`（0.44 TB，2026-01..05 的 15 秒 / 1 分钟最后值，曾用于 TU/FV/TY/TN/US/AUL/FF 的分钟 L2 补列）已删除；需要时可从 `l2_db` 重新算 15 秒值，或从远端 Raw 包重洗（`config/cme_raw_ll2_2026_15s.toml`）。
+- 2026-11-24 用户确认：`future_daily/normalisedLL2`（2026-06-01 起的 L2 日包，971 GB）和 `future_supplement/normalisedLL2`（2024–2026 补充包，247 GB）也已删除（补充包目录只留 Report / notes；`future_supplement/normalised` 是 TAS 补充，没动）。
+  已洗过哪些记在 `lseg/meta/l2_sources.sqlite`（`scripts/lseg/l2_washed_sources.py` 从洗库日志生成，不覆盖已有文件）：`washed_units`（每个洗过的单元：日文件 / 主包 / 补充包 / Raw 段，含 RIC 数、更新条数、时间范围、对应的库和远端原始文件地址）、`washed_daily`（19,261 个品种日文件）。删除前核对过，磁盘上的日文件全部有洗库记录。
