@@ -15,24 +15,29 @@ The source files themselves may be deleted afterwards (`source_deleted`): the da
 import argparse, glob, json, os, re, sqlite3, sys, datetime
 
 RT = "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime"
+DBROOT = "/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db"  # moved from NVMe on 2026-11-24
 REMOTE = "http://10.61.20.12/public/users/u158/public/lseg_data"
 LOGS = (glob.glob(RT + "/l2_backfill/backfill*.log") + glob.glob(RT + "/l2_supplement/backfill_*.log")
         + glob.glob(RT + "/l2_old/backfill*.log") + glob.glob(RT + "/l2_old/fill/wash_*.log")
-        + glob.glob(RT + "/l2_raw/backfill_*.log"))
+        + glob.glob(RT + "/l2_raw/backfill_*.log") + glob.glob(RT + "/l2_2010_2019/backfill.log"))
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--out")
 ap.add_argument("--check-dir")
 ap.add_argument("--publish")
+ap.add_argument("--replace", action="store_true", help="with --publish: replace the existing file by an atomic rename")
 a = ap.parse_args()
 ROOT = "/mnt/nfs/30.100_cta_data/lseg/meta"
 if a.publish:
     dst = ROOT + "/l2_sources.sqlite"
-    assert not os.path.exists(dst), "l2_sources.sqlite exists already (never overwritten); remove it first on purpose"
     tmp = "%s.%d.tmp" % (dst, os.getpid())
     open(tmp, "wb").write(open(a.publish, "rb").read())
-    os.link(tmp, dst)
-    os.unlink(tmp)
+    if a.replace:
+        os.replace(tmp, dst)  # atomic: readers see the old or the new complete file
+    else:
+        assert not os.path.exists(dst), "l2_sources.sqlite exists already; use --replace"
+        os.link(tmp, dst)
+        os.unlink(tmp)
     print("published", dst)
     sys.exit(0)
 assert a.out
@@ -85,7 +90,7 @@ CREATE TABLE conventions (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 iso = lambda ns: datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ns else None
 for unit, r in sorted(units.items()):
     kind, product, day = classify(unit)
-    database = (RT + "/l2_db/%s" % day.replace("-", "")) if kind == "daily" else (RT + "/l2_db/_stream/%s" % unit)
+    database = (DBROOT + "/%s" % day.replace("-", "")) if kind == "daily" else (DBROOT + "/_stream/%s" % unit)
     db.execute("insert into washed_units values (?,?,?,?,?,?,?,?,?,?,?,?)",
                (unit, kind, product, day, r.get("rics"), r.get("updates"), r.get("input_gz_bytes"), iso(r.get("first_ts")),
                 iso(r.get("last_ts")), database, remote_of(unit, kind, product, day), r["log"]))
@@ -100,7 +105,7 @@ db.executemany("insert into conventions values (?,?)", {
     "supplement": "kind=supplement: comex_globex (sg), futures_11 (sf), comex (sc) supplement package of a year",
     "raw_segments": "kind=raw_segments: only the Raw LL2 members that hold RICs Normalized lacks (see docs/lseg/l2_raw.md); the rest of those Raw packages was NOT washed",
     "refetch": "remote_source is the URL of the original file; supplements and daily files are single files, main packages are fetched with scripts/lseg/fetch_normalised_ll2.sh, Raw members with scripts/lseg/rawll2_segments.py",
-    "not_washed": "2010-2019 (L2 out of scope, user decision 2026-11-21); in 2020-2026 the Normalized main packages are fully washed",
+    "not_washed": "all Normalized main packages 2010-2026 are washed (2010-2019 on 2026-11-24 at the user's request); supplements and Raw only for the RICs listed as washed",
 }.items())
 db.commit()
 n = {k: c for k, c in db.execute("select kind, count(*) from washed_units group by 1")}
