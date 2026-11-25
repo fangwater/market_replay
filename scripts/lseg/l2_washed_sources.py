@@ -19,7 +19,7 @@ DBROOT = "/mnt/hdd-raid5-72t/fanghaizhou/lseg_data/l2_db"  # moved from NVMe on 
 REMOTE = "http://10.61.20.12/public/users/u158/public/lseg_data"
 LOGS = (glob.glob(RT + "/l2_backfill/backfill*.log") + glob.glob(RT + "/l2_supplement/backfill_*.log")
         + glob.glob(RT + "/l2_old/backfill*.log") + glob.glob(RT + "/l2_old/fill/wash_*.log")
-        + glob.glob(RT + "/l2_raw/backfill_*.log") + glob.glob(RT + "/l2_2010_2019/backfill.log"))
+        + glob.glob(RT + "/l2_raw/backfill_*.log") + glob.glob(RT + "/l2_2010_2019/backfill.log") + glob.glob(RT + "/l2_old/fill10/wash_*.log"))
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--out")

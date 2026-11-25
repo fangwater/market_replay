@@ -8,8 +8,10 @@ Per year (written to <out>/):
   supp_globex_<y>.txt, supp_f11_<y>.txt : RICs of the supplement package with Count>0 that the main package does not hold
                                           (Count>0 in the main Report) - the main package wins; a RIC goes to the first package
                                           that has it (comex_globex, then futures_11). No TAS condition (as for 2024-2026).
-  raw_<y>.txt                           : Raw-active RICs (Count>0) that have TAS directories in the year (catalog `directories`)
-                                          and no L2 yet: not delivered (catalog l2_directories) and not in a supplement list above.
+  supp_comex_<y>.txt                    : same for the comex_futures supplement
+  raw_<y>.txt                           : Raw-active RICs (Count>0) that have TAS directories in the year (catalog `directories`; no TAS
+                                          condition with --any-tas) and no L2 yet: not delivered (catalog l2_directories), not in the main
+                                          package and not in a supplement list above.
 Prints the counts. Everything is read-only (catalog opened immutable).
 """
 import argparse, csv, glob, gzip, os, sqlite3
@@ -37,7 +39,7 @@ for y in a.years.split(","):
     for p in glob.glob(a.main_glob % y):
         main |= active(p)
     taken = set()
-    for tag, prefix in (("globex", "comex_globex_futures"), ("f11", "futures_11")):
+    for tag, prefix in (("globex", "comex_globex_futures"), ("f11", "futures_11"), ("comex", "comex_futures")):
         found = glob.glob(os.path.join(a.reports, "%s_market_depth_ric_list_0_ll2_%s-01-01_*.Report.csv.gz" % (prefix, y)))
         rics = set()
         for p in found:
