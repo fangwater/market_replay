@@ -7,8 +7,10 @@
 //!    DB), `tas_db_audit`, `lseg_tas_parquet --layout ric-day`, check and
 //!    publish trade/quote, `tas_status_parquet`;
 //! 4. kline: `lseg_kline run` per affected (year, product) group;
-//! 5. catalog: `lseg_catalog build` (only after a clean run);
-//! 6. DingTalk summary; problems only go to `<delivery>/meta/problems/lseg_daily`.
+//! 5. open interest: `tas_open_interest sync` of the downloaded daily gzips into
+//!    PostgreSQL `lseg_open_interest` (optional `[open_interest]`; only new files);
+//! 6. catalog: `lseg_catalog build` (only after a clean run);
+//! 7. DingTalk summary; problems only go to `<delivery>/meta/problems/lseg_daily`.
 //!
 //! State is a local JSON; every stage is resumable and a failed product does
 //! not block the others. See docs/lseg/lseg_daily.md.
@@ -134,6 +136,18 @@ struct Config {
     dashboard_url: Option<String>,
     dingtalk_webhook_env: String,
     dingtalk_secret_env: String,
+    /// Open interest of the daily gzips into PostgreSQL (step skipped when absent).
+    #[serde(default)]
+    open_interest: Option<OpenInterest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenInterest {
+    /// `market_metadata` over the local socket (peer auth; no secret in the URL).
+    database_url: String,
+    #[serde(default = "one")]
+    workers: usize,
 }
 fn d_settle() -> i64 {
     60
@@ -209,7 +223,7 @@ enum Cmd {
         /// Do not discover new files; only resume open batches.
         #[arg(long)]
         no_new: bool,
-        /// Skip steps: kline, catalog (comma separated).
+        /// Skip steps: kline, open_interest, catalog (comma separated).
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
         #[arg(long)]
@@ -1438,6 +1452,28 @@ fn append_replaced(cfg: &Config, rows: &[Vec<String>]) -> Result<()> {
     Ok(())
 }
 
+/// Loads the open interest of every finished daily gzip under `raw_root` that is not in
+/// PostgreSQL yet (normally just this run's downloads; a failed day is retried next run).
+fn run_open_interest(ctx: &mut Ctx) -> Result<()> {
+    let cfg = ctx.cfg;
+    let oi = cfg.open_interest.as_ref().context("open_interest config")?;
+    let work = cfg.work_root.join("open_interest").join(&ctx.run_id);
+    let args = vec![
+        "sync".into(),
+        "--daily-root".into(),
+        cfg.raw_root.display().to_string(),
+        "--database-url".into(),
+        oi.database_url.clone(),
+        "--work-dir".into(),
+        work.join("staging").display().to_string(),
+        "--workers".into(),
+        oi.workers.to_string(),
+    ];
+    let r = ctx.run("持仓", "tas_open_interest", &args, &work.join("sync.log"));
+    let _ = fs::remove_dir(work.join("staging"));
+    r
+}
+
 fn run_catalog(ctx: &mut Ctx, st: &State) -> Result<()> {
     let cfg = ctx.cfg;
     let plan_path = cfg
@@ -1568,6 +1604,7 @@ struct Summary {
     quote_rows: u64,
     dates: BTreeSet<String>,
     kline: KlineReport,
+    open_interest: Option<Result<(), String>>,
     catalog: Option<Result<(), String>>,
 }
 
@@ -1609,6 +1646,7 @@ fn run(cfg: &Config, opts: &Opts, notify_on: bool) -> Result<()> {
     let ok = result.is_ok()
         && sum.products_failed.is_empty()
         && sum.kline.groups_failed.is_empty()
+        && !matches!(sum.open_interest, Some(Err(_)))
         && !matches!(sum.catalog, Some(Err(_)));
     let body = summarize(
         &sum,
@@ -1770,6 +1808,18 @@ fn lseg(ctx: &mut Ctx, st: &mut State, opts: &Opts, sum: &mut Summary) -> Result
     if !opts.skip.iter().any(|s| s == "kline") {
         sum.kline = run_kline(ctx, st)?;
     }
+    if cfg.open_interest.is_some() && !opts.skip.iter().any(|s| s == "open_interest") {
+        let r = run_open_interest(ctx).map_err(|e| format!("{e:#}"));
+        match &r {
+            Ok(()) => clear_problem(cfg, "open_interest.json"),
+            Err(e) => record_problem(
+                cfg,
+                "open_interest.json",
+                &json!({"run": ctx.run_id, "error": e, "at": Utc::now().to_rfc3339()}),
+            ),
+        }
+        sum.open_interest = Some(r);
+    }
     let clean = sum.products_failed.is_empty() && sum.kline.groups_failed.is_empty();
     if cfg.catalog && !opts.skip.iter().any(|s| s == "catalog") && st.catalog_dirty && clean {
         let r = run_catalog(ctx, st).map_err(|e| format!("{e:#}"));
@@ -1837,6 +1887,9 @@ fn summarize(
             s.push_str(&format!("\n  {g}: {}", first_line(e)));
         }
     }
+    if let Some(Err(e)) = &sum.open_interest {
+        s.push_str(&format!("\n⚠ 持仓量入库失败：{}", first_line(e)));
+    }
     match &sum.catalog {
         Some(Ok(())) => s.push_str("\n目录 catalog.sqlite 已重建"),
         Some(Err(e)) => s.push_str(&format!("\n⚠ 目录重建失败：{}", first_line(e))),
@@ -1891,6 +1944,9 @@ fn problems_brief(
             names(sum.kline.groups_failed.iter().map(|(g, _)| g.as_str())),
             short(&sum.kline.groups_failed[0].1)
         ));
+    }
+    if let Some(Err(e)) = &sum.open_interest {
+        s.push(format!("持仓量入库失败：{}", short(e)));
     }
     match &sum.catalog {
         Some(Err(e)) => s.push(format!("目录重建失败：{}", short(e))),
@@ -1983,7 +2039,7 @@ fn main() -> Result<()> {
             let cfg = load_config(&config)?;
             for s in &skip {
                 ensure!(
-                    ["kline", "catalog"].contains(&s.as_str()),
+                    ["kline", "open_interest", "catalog"].contains(&s.as_str()),
                     "unknown --skip {s}"
                 );
             }
@@ -2070,7 +2126,11 @@ mod tests {
     }
 
     pub(crate) fn cfg(root: &Path) -> Config {
-        toml::from_str(&format!(
+        toml::from_str(&cfg_text(root)).unwrap()
+    }
+
+    fn cfg_text(root: &Path) -> String {
+        format!(
             r#"remote_root = "http://x/"
 raw_root = "{r}/raw"
 work_root = "{r}/work"
@@ -2097,8 +2157,25 @@ status = 1
 kline = 1
 "#,
             r = root.display()
-        ))
-        .unwrap()
+        )
+    }
+
+    #[test]
+    fn open_interest_section_is_optional() {
+        let root = Path::new("/x");
+        assert!(cfg(root).open_interest.is_none());
+        let text = format!(
+            "{}\n[open_interest]\ndatabase_url = \"postgresql:///m\"\n",
+            cfg_text(root)
+        );
+        let oi = toml::from_str::<Config>(&text)
+            .unwrap()
+            .open_interest
+            .unwrap();
+        assert_eq!(
+            (oi.database_url.as_str(), oi.workers),
+            ("postgresql:///m", 1)
+        );
     }
 
     #[test]

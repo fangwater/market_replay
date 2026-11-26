@@ -22,13 +22,14 @@ csv-core = "0.1"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
 log = "0.4"
 memchr = "2"
+libdeflate-sys = "1.26"
 crc32fast = "1"
 libc = "0.2"
 env_logger = "0.10"
 mimalloc = "0.1"
 toml = "0.8"
 zstd = "0.13"
-sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "sqlite-bundled"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "mysql", "postgres", "chrono", "sqlite-bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 regex = "1"

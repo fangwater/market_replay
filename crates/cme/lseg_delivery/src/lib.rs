@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod gz_members;
 pub mod l2_backfill;
 pub mod l2_batch;
 pub mod l2_db;
@@ -12,5 +13,6 @@ pub mod l2_stream;
 pub mod limits;
 pub mod merge;
 pub mod native_kline;
+pub mod open_interest;
 pub mod publish;
 pub mod tasdb;

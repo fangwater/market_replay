@@ -23,8 +23,9 @@
 4. **K 线**：计划 = 基础计划（原样）+ 每个已交付 CF 一个 `daily` 作业（带 `coverage_days`、`exchange_map`）。先 `lseg_kline check-plan`，再对每个新批次／品种跑 `lseg_kline witness-append`（日包改撤见证追加到 `kline_witnesses`，见 [成交改撤](tas_trade_revisions.md)），再对受影响的每个 (年份, 品种) 组跑 `lseg_kline run --year --product --backup-root ... --replaced-log ...`。
    - 某组第一次跑时比对当年每一天，一次性补全以前被截短的尾日；以后只比对从（本批最早日期与上次已交付末日中较早者）前一天开始的日期。
    - 替换记录写到 `meta/problems/lseg_daily/replaced.csv`，原因分 `late_day` / `tail_completion` / `correction` / `other`。旧文件备份在 `runtime/lseg_daily/backups/<运行时刻>/`，与原文件逐字节比对过。
-5. **目录**：本次没有任何失败时 `lseg_catalog build`（生产会导入 IB 清单）。`catalog_prune_expired_status` 默认关闭。
-6. **钉钉**：每次运行一条消息。
+5. **持仓量**（配置里有 `[open_interest]` 才跑）：`tas_open_interest sync --daily-root <raw_root>`，把还没入库的已下载日包的 `Open Interest` 写进 PostgreSQL `market_metadata.lseg_open_interest`（见 [持仓量](open_interest.md)）。只处理新文件，失败记 `meta/problems/lseg_daily/open_interest.json`，下次运行自动重试；不影响前后步骤。
+6. **目录**：本次没有任何失败时 `lseg_catalog build`（生产会导入 IB 清单）。`catalog_prune_expired_status` 默认关闭。
+7. **钉钉**：每次运行一条消息。
 
 交付盘上只写数据文件和问题记录：`meta/problems/lseg_daily/` 下的 `<批次>/<品种>.json`（成功后删除）、`pipeline.json`、`source_gaps.csv`、`replaced.csv`。
 
@@ -48,7 +49,7 @@ $R/lseg-daily run --config config/lseg_daily.toml --dry-run   # 只盘点和列�
 $R/lseg-daily run --config config/lseg_daily.toml
 $R/lseg-daily status --config config/lseg_daily.toml
 $R/lseg-daily test-notify --config config/lseg_daily.toml
-# 选项：--products A,B  --dates YYYY-MM-DD,...  --no-new  --skip kline,catalog  --no-notify
+# 选项：--products A,B  --dates YYYY-MM-DD,...  --no-new  --skip kline,open_interest,catalog  --no-notify
 ```
 
 状态文件在 `runtime/lseg_daily/state.json`。第一次运行时从 `bootstrap_runs` 读取 20261109 批次已交付的日期和 RIC 归属。

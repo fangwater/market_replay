@@ -205,6 +205,7 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
     - Parquet 发布 8 个（`limits::IO_THREADS`，实测 16 个不比 8 个快）；
     - **例外（用户 2026-11-17 批准，仅限一次性回补）：** `lseg_l2_slice`（固定频率 L2 下采样，见 `docs/lseg/l2_slice.md`）的 `--workers` 可到 8（`limits::L2_SLICE_WORKERS`，默认仍是 2）。理由：每个 worker 内存只有约 70 MiB，纯 CPU 型，各源文件独立。每日任务和其他工具不得借用这个上限；
     - **例外（用户 2026-11-24 批准，仅限一次性历史回补）：** `lseg_tas_parquet`（TAS 逐笔 trade / quote 导出）的 `--workers` 可到 8（`limits::TAS_EXPORT_WORKERS`，默认仍是 2）。每日任务 `lseg-daily` 不得借用这个上限；
+    - **例外（用户 2026-11-25 批准，仅限一次性回补）：** `tas_open_interest sync --backfill`（OI 入库）的 `--workers` 可到 8（`limits::OI_BACKFILL_WORKERS`，默认仍是 2）。`lseg-daily` 不得借用这个上限；
     - RocksDB 一律用 `tasdb::open_read_only` 打开：后台线程 1 个，打开文件线程 1 个，block cache 共享且有上限。
   - 不得按机器的 CPU 或内存自动扩张，也不得出现没有预算的多进程乘多线程。Python 里 DuckDB、Arrow、BLAS 的线程数显式设为 1。
   - 读取、解析、聚合、写入都必须流式、有界。不得把整段状态或控制消息先收集进 Vec、list 或 JSON 数组再处理。
@@ -230,3 +231,9 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 - **L2 索引与每日任务：** `lseg-daily` 每次重建 `catalog.sqlite`；旧版会删掉 `l2_directories`，新版（`build` 带 carry-over 和单写者锁）保留它。`lseg_catalog l2-sync` 按交付盘重新生成（约 1 小时，只在没有任务时跑）。
 - **L2 缺口原因：** `l2_gaps.sqlite` 每行有 `cause`（人话原因）和 `purchase_layers`。没有 L2 的 RIC 多数是采购目录里只有 `tas`/`summarised` 层（L2 从没订购，要补需向 LSEG 新申请）；采购目录的 L2 层按 RIC 名记、不分年份，同代码的旧合约会重名（如 CGBM7 的 L2 属于 2017 年合约）。
 - **IB：** 来源是 MySQL `ib_data.minute_data`，只做纯导出，用于对比："有多少切多少"，不补、不改、不对齐。
+- **持仓量 OI（2026-11-25）：** CME 并非没有 OI。TAS 源文件的 `Open Interest` 列有值，但 RocksDB 和 parquet 都没收。现在由 `tas_open_interest`（`crates/cme/lseg_delivery`）从原始 gzip 提取，写进 PostgreSQL `market_metadata.lseg_open_interest`，只写这个 schema。
+  - 每个交易日发两次：预估值约 20:15 CT，终值次日约 09:05 CT。`Date` 是所属交易日，早年为空时存 NULL，不推算。
+  - 使用时必须按发布时间取"当时已知"的值。
+  - 已入库：2020-01 起的全部历史包和 2026-06-01 起的日包，发布时间到 2026-11-23，共 2,668 万条观测，0 条 reject。2020 年以前的包没有入库。
+  - `lseg-daily` 配置有 `[open_interest]` 段时，每天增量入库。这个配置段要等新二进制部署之后才能加，因为旧二进制的配置解析带 `deny_unknown_fields`，遇到它会报错。
+  - 详见 [docs/lseg/open_interest.md](docs/lseg/open_interest.md)。
