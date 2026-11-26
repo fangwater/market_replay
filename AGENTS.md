@@ -174,6 +174,8 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 1. **乘数：** 只能写入 PostgreSQL 的 `domestic_future_product_multipliers`，必须同时有交易所公告和通联成交额恒等式两项证据，并另外写一个增量 SQL 放在 `preprocess/database/`（SO 的是 `domestic_future_product_multipliers_20261115_so.sql`）。不得只凭 OpenCTP 的值写入。
 2. **交易所映射：** 在 `cn_futures_core::segments::exchange_of` 里补上品种。core 的改动只有 mkt_signal 升级 rev 后才会进入实盘。
 3. **时段快照：** 按上面的方法确认新快照只是增加时段，然后升级归档的溯源记录，并修改 `config/cn_daily.toml` 和 `config/cn_kline_server.toml` 里的 `session_as_of`。
+4. **OpenCTP 还没收录时段的新品种（2026-11-26 的 GFEX `LI`，氢氧化锂）：** 在 `crates/ref/cn_reference/src/sessions.rs` 的 `LISTING_ALIASES` 里登记“新品种 ← 参照品种”，同步时才会把参照品种的时段复制为新品种的行（`raw_json` 带 `AliasOf`/`AliasReason`）。必须有证据表明时段相同（如通联当天数据的交易窗口）；OpenCTP 一收录就用它自己的行。登记后重部署并重启服务器，`POST /api/v1/trading-sessions/sync`，再按第 3 步升级 `_provenance`（`continuous_sessions.20261115.json` / `snapshot_upgrade_20261126.json` 是 LI 的记录）。LI 的乘数证据是成交额恒等式和 OpenCTP 合约乘数，交易所公告页当时抓不到，之后要对一下公告。
+5. **没接好也不阻塞：** `cn-daily` 的“导出”或“时段裁剪”报某品种缺已验证乘数 / 缺时段时，只对已在归档里的品种重试这一步，跳过新品种并钉钉“新品种未就绪”（带补齐步骤）；接好后用 `cn-daily run --start D --end D --overwrite` 补跑那一天。不得因此默认乘数。
 
 ## CME 换月（2026-11-26 起统一）
 

@@ -428,6 +428,59 @@ fn run_step(bin: &Path, step: &Step, log: &Path) -> Result<f64> {
     Ok(t.elapsed().as_secs_f64())
 }
 
+/// Products a failed 导出 / 时段裁剪 step names as not onboarded yet (no verified multiplier, or no
+/// continuous sessions in the snapshot), read from this step's log text.
+fn unready_products(log_text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let word = |t: &str| -> String {
+        t.chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_uppercase()
+    };
+    for line in log_text.lines() {
+        if let Some(rest) = line
+            .split("missing verified volume_multiple for product=")
+            .nth(1)
+        {
+            let p = word(rest);
+            if !p.is_empty() {
+                out.insert(p);
+            }
+        }
+        if let Some(rest) = line.split("has no active rows for ").nth(1) {
+            if let Some((_, prod)) = rest.split_once('.') {
+                let p = word(prod);
+                if !p.is_empty() {
+                    out.insert(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Products already in the production archive (the ones that are onboarded).
+fn archived_products(baseline_root: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for ex in fs::read_dir(baseline_root).into_iter().flatten().flatten() {
+        if ex.file_name().to_string_lossy().starts_with('_') {
+            continue;
+        }
+        for p in fs::read_dir(ex.path()).into_iter().flatten().flatten() {
+            out.insert(p.file_name().to_string_lossy().to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+fn onboarding_text(day: NaiveDate, products: &BTreeSet<String>) -> String {
+    format!(
+        "{day} 新品种未就绪，已跳过（其余品种照常归档）：{}\n补齐：1) 乘数写入 PostgreSQL（交易所公告 + 成交额恒等式，增量 SQL 放 preprocess/database/）；2) cn_futures_core::segments::exchange_of 加映射；3) 参考数据里有该品种时段（OpenCTP 没有时用 LISTING_ALIASES 并带证据），升级 _provenance 和 session_as_of。补齐后用 cn-daily run --start {day} --end {day} --overwrite 补跑这一天。",
+        products.iter().cloned().collect::<Vec<_>>().join(" ")
+    )
+}
+
 fn tail(path: &Path, n: usize) -> String {
     let Ok(f) = File::open(path) else {
         return String::new();
@@ -727,11 +780,39 @@ fn run(
         if let Some(root) = &cfg.roll_root {
             fs::create_dir_all(roll::staging_file(root, day, "x").parent().expect("parent"))?;
         }
-        for step in steps(cfg, day, overwrite) {
-            match run_step(&bins, &step, &log) {
+        let mut skipped: BTreeSet<String> = BTreeSet::new();
+        for mut step in steps(cfg, day, overwrite) {
+            let mark = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            let mut result = run_step(&bins, &step, &log);
+            // A product that is not onboarded yet must not stop the whole archive: retry this step for the
+            // products already in the archive, and report the skipped ones (never a default multiplier).
+            if result.is_err() && matches!(step.name, "导出" | "时段裁剪") {
+                let text = fs::read(&log)
+                    .map(|b| {
+                        String::from_utf8_lossy(&b[(mark as usize).min(b.len())..]).into_owned()
+                    })
+                    .unwrap_or_default();
+                let unready = unready_products(&text);
+                let known: Vec<String> = archived_products(&cfg.baseline_root)
+                    .difference(&unready)
+                    .cloned()
+                    .collect();
+                if !unready.is_empty() && !known.is_empty() {
+                    skipped.extend(unready);
+                    step.args.push("--product".into());
+                    step.args.push(known.join(","));
+                    result = run_step(&bins, &step, &log);
+                }
+            }
+            match result {
                 Ok(secs) => timings.push((step.name, secs)),
                 Err(e) => return fail(&mut state, day, &step, e, &log),
             }
+        }
+        if !skipped.is_empty() {
+            let text = onboarding_text(day, &skipped);
+            eprintln!("cn-daily: {text}");
+            notify(cfg, notify_on, "新品种未就绪", &text);
         }
         let prev = all_days.iter().rev().copied().find(|d| *d < day);
         let a = audit(cfg, day, prev, &catalog)?;
@@ -943,6 +1024,14 @@ mod tests {
             text,
             "2026-11-17 回放 失败：exit status 1\n日志 /x/cn_daily.log"
         );
+    }
+
+    #[test]
+    fn names_products_that_are_not_onboarded() {
+        let log = "Error: missing verified volume_multiple for product=LI\nError: continuous-session snapshot 2026-11-14 has no active rows for GFEX.XY\nother";
+        let got: Vec<_> = unready_products(log).into_iter().collect();
+        assert_eq!(got, vec!["LI".to_string(), "XY".to_string()]);
+        assert!(unready_products("all fine").is_empty());
     }
 
     #[test]
