@@ -20,6 +20,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
     Connection, Row, SqliteConnection,
 };
+use std::collections::BTreeSet;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -967,6 +968,10 @@ pub struct L2Sync {
     pub file_name: String,
     #[arg(long, default_value = WORK)]
     pub work: PathBuf,
+    /// Incremental: only these (RIC, UTC year) pairs (lines `RIC<TAB>YYYY`, as written by
+    /// `lseg_l2_slice deliver --ric-years-out`) are looked at and replaced; every other row stays.
+    #[arg(long)]
+    pub ric_years: Option<PathBuf>,
 }
 
 /// Added after the first release of the table (older catalogs lack it).
@@ -1045,7 +1050,48 @@ struct L2Dir {
     raw_days: Vec<String>,
 }
 
-fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
+fn l2_scan_ric_dir(
+    dir: PathBuf,
+    ric_dir: &str,
+    y: i32,
+    file_name: &str,
+    names: &dyn Fn(&Path) -> Result<Vec<String>>,
+) -> Result<Option<L2Dir>> {
+    let mut first = String::new();
+    let mut last = String::new();
+    let mut days = 0i64;
+    for day in names(&dir)? {
+        if day.len() == 8 && dir.join(&day).join(file_name).is_file() {
+            if first.is_empty() {
+                first = day.clone();
+            }
+            last = day;
+            days += 1;
+        }
+    }
+    if days == 0 {
+        return Ok(None);
+    }
+    let (source, raw_days) = l2_source_of(&dir)?;
+    Ok(Some(L2Dir {
+        ric: tasdb::unescape_component(ric_dir),
+        year: y,
+        dir,
+        first,
+        last,
+        days,
+        source,
+        raw_days,
+    }))
+}
+
+/// `only`: look at these (RIC, year) pairs only (their directories are found by name, no listing of the
+/// RIC directories of a year).
+fn l2_walk(
+    root: &Path,
+    file_name: &str,
+    only: Option<&BTreeSet<(String, i32)>>,
+) -> Result<Vec<L2Dir>> {
     let names = |p: &Path| -> Result<Vec<String>> {
         let mut v = Vec::new();
         for e in fs::read_dir(p)? {
@@ -1066,37 +1112,43 @@ fn l2_walk(root: &Path, file_name: &str) -> Result<Vec<L2Dir>> {
         for year in names(&ex_dir)? {
             let Ok(y) = year.parse::<i32>() else { continue };
             let year_dir = ex_dir.join(&year);
-            for ric_dir in names(&year_dir)? {
-                let dir = year_dir.join(&ric_dir);
-                let mut first = String::new();
-                let mut last = String::new();
-                let mut days = 0i64;
-                for day in names(&dir)? {
-                    if day.len() == 8 && dir.join(&day).join(file_name).is_file() {
-                        if first.is_empty() {
-                            first = day.clone();
-                        }
-                        last = day;
-                        days += 1;
+            match only {
+                None => {
+                    for ric_dir in names(&year_dir)? {
+                        let dir = year_dir.join(&ric_dir);
+                        out.extend(l2_scan_ric_dir(dir, &ric_dir, y, file_name, &names)?);
                     }
                 }
-                if days > 0 {
-                    let (source, raw_days) = l2_source_of(&dir)?;
-                    out.push(L2Dir {
-                        ric: tasdb::unescape_component(&ric_dir),
-                        year: y,
-                        dir,
-                        first,
-                        last,
-                        days,
-                        source,
-                        raw_days,
-                    });
+                Some(set) => {
+                    for (ric, _) in set.iter().filter(|(_, sy)| *sy == y) {
+                        let ric_dir = tasdb::component(ric);
+                        let dir = year_dir.join(&ric_dir);
+                        if dir.is_dir() {
+                            out.extend(l2_scan_ric_dir(dir, &ric_dir, y, file_name, &names)?);
+                        }
+                    }
                 }
             }
         }
     }
     Ok(out)
+}
+
+fn read_ric_years(path: &Path) -> Result<BTreeSet<(String, i32)>> {
+    let mut set = BTreeSet::new();
+    for line in fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .lines()
+    {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (ric, year) = line
+            .split_once('\t')
+            .with_context(|| format!("bad line {line:?}"))?;
+        set.insert((ric.to_string(), year.trim().parse::<i32>()?));
+    }
+    Ok(set)
 }
 
 pub async fn l2_sync(a: L2Sync) -> Result<()> {
@@ -1105,7 +1157,8 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
         .clone()
         .unwrap_or_else(|| a.root.join("meta/catalog.sqlite"));
     let _lock = lock_catalog(Path::new(LOCK_DIR), &output)?;
-    let found = l2_walk(&a.root, &a.file_name)?;
+    let only = a.ric_years.as_deref().map(read_ric_years).transpose()?;
+    let found = l2_walk(&a.root, &a.file_name, only.as_ref())?;
     fs::create_dir_all(&a.work)?;
     let local = a.work.join("catalog_l2_sync.sqlite.partial");
     fs::copy(&output, &local).with_context(|| format!("copy {}", output.display()))?;
@@ -1119,12 +1172,32 @@ pub async fn l2_sync(a: L2Sync) -> Result<()> {
     sqlx::raw_sql(L2_SCHEMA).execute(&mut conn).await?;
     ensure_l2_source_column(&mut conn).await?;
     sqlx::query("BEGIN").execute(&mut conn).await?;
-    sqlx::query("DELETE FROM l2_directories")
-        .execute(&mut conn)
-        .await?;
-    sqlx::query("DELETE FROM l2_raw_days")
-        .execute(&mut conn)
-        .await?;
+    match &only {
+        None => {
+            sqlx::query("DELETE FROM l2_directories")
+                .execute(&mut conn)
+                .await?;
+            sqlx::query("DELETE FROM l2_raw_days")
+                .execute(&mut conn)
+                .await?;
+        }
+        Some(set) => {
+            for (ric, year) in set {
+                for table in ["l2_directories", "l2_raw_days"] {
+                    let sql = if table == "l2_directories" {
+                        "DELETE FROM l2_directories WHERE ric=? AND utc_year=?"
+                    } else {
+                        "DELETE FROM l2_raw_days WHERE ric=? AND utc_year=?"
+                    };
+                    sqlx::query(sql)
+                        .bind(ric)
+                        .bind(year)
+                        .execute(&mut conn)
+                        .await?;
+                }
+            }
+        }
+    }
     for d in &found {
         for day in &d.raw_days {
             sqlx::query("INSERT INTO l2_raw_days(ric,utc_year,utc_day) VALUES (?,?,?)")
@@ -1483,5 +1556,44 @@ mod tests {
         assert!(l2_source_of(&d).is_err());
         fs::write(d.join(L2_SOURCE_FILE), "other\n").unwrap();
         assert!(l2_source_of(&d).is_err());
+    }
+
+    #[test]
+    fn a_filtered_l2_walk_looks_only_at_the_given_ric_years() {
+        let t = tempfile::tempdir().unwrap();
+        for (ex, year, ric, days) in [
+            ("cme", "2026", "ESZ26", vec!["20261112", "20261113"]),
+            ("cme", "2026", "CLF27", vec!["20261113"]),
+            ("cme", "2025", "ESZ26", vec!["20250102"]),
+            ("ice_us", "2026", "A%2FB", vec!["20261113"]),
+        ] {
+            for day in days {
+                let d = t.path().join(ex).join(year).join(ric).join(day);
+                fs::create_dir_all(&d).unwrap();
+                fs::write(d.join("l2_250ms.parquet"), b"x").unwrap();
+            }
+        }
+        let all = l2_walk(t.path(), "l2_250ms.parquet", None).unwrap();
+        assert_eq!(all.len(), 4);
+        let only: BTreeSet<(String, i32)> = [
+            ("ESZ26".to_string(), 2026),
+            ("A/B".to_string(), 2026),
+            ("NOPE".to_string(), 2026),
+        ]
+        .into_iter()
+        .collect();
+        let got = l2_walk(t.path(), "l2_250ms.parquet", Some(&only)).unwrap();
+        let mut keys: Vec<(String, i32, i64)> = got
+            .iter()
+            .map(|d| (d.ric.clone(), d.year, d.days))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![("A/B".to_string(), 2026, 1), ("ESZ26".to_string(), 2026, 2)]
+        );
+        let file = t.path().join("pairs.tsv");
+        fs::write(&file, "ESZ26\t2026\n\nCLF27\t2026\n").unwrap();
+        assert_eq!(read_ric_years(&file).unwrap().len(), 2);
     }
 }

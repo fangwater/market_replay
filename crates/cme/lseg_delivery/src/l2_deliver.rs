@@ -482,6 +482,9 @@ pub struct DeliverConfig {
     /// With `source_raw`: a RIC-year that already holds Normalized L2 days may get its missing days from Raw;
     /// the marker file then says `mixed` and lists the Raw days.
     pub allow_mixed: bool,
+    /// Write the (RIC, UTC year) pairs of every RIC-day of this run here (lines `RIC<TAB>YYYY`), for an
+    /// incremental `lseg_catalog l2-sync --ric-years`.
+    pub ric_years_out: Option<PathBuf>,
 }
 
 /// Source guard and marker: a RIC-year directory holds L2 of exactly one source. Raw delivery
@@ -718,6 +721,17 @@ pub fn run_deliver(cfg: DeliverConfig) -> Result<Value> {
     }
     let total: u64 = work.values().map(|v| v.len() as u64).sum();
     counters.jobs_total.store(total, Ordering::Relaxed);
+    if let Some(path) = cfg.ric_years_out.as_ref().filter(|_| !cfg.dry_run) {
+        let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
+        for (dn, rics) in &work {
+            let year = day_string(*dn)[..4].to_string();
+            for ric in rics {
+                pairs.insert((ric.clone(), year.clone()));
+            }
+        }
+        let text: String = pairs.iter().map(|(r, y)| format!("{r}\t{y}\n")).collect();
+        fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
+    }
     let sources_marked = if cfg.dry_run {
         0
     } else {
@@ -1042,6 +1056,7 @@ mod tests {
             max_files: None,
             source_raw: raw,
             allow_mixed: allow,
+            ric_years_out: None,
         };
         let dn = day_number("2024-01-04").unwrap();
         let work = BTreeMap::from([(dn, vec!["CLF24".to_string(), "ESH24".to_string()])]);

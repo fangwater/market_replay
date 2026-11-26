@@ -291,6 +291,9 @@ enum Command {
         /// Raw; the marker says `mixed` and lists the Raw days (catalog: `l2_directories.source = 'mixed'`).
         #[arg(long)]
         allow_mixed: bool,
+        /// Write the (RIC, UTC year) pairs of this run (lines `RIC<TAB>YYYY`) for `lseg_catalog l2-sync --ric-years`.
+        #[arg(long)]
+        ric_years_out: Option<PathBuf>,
         #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
         target_root: PathBuf,
         /// Local staging directory (NVMe); removed at the end.
@@ -634,6 +637,7 @@ fn main() -> Result<()> {
             exchange_conflicts,
             l2_source,
             allow_mixed,
+            ric_years_out,
             exchanges,
             only_rics,
             target_root,
@@ -687,6 +691,7 @@ fn main() -> Result<()> {
                 max_files,
                 source_raw: l2_source == "raw",
                 allow_mixed,
+                ric_years_out,
             };
             let summary = l2_deliver::run_deliver(cfg)?;
             println!("{summary}");

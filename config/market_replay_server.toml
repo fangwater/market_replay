@@ -101,6 +101,14 @@ schedule = { tz = "Asia/Shanghai", at = ["18:00"] }
 timeout_minutes = 120
 
 [[job]]
+name = "l2-daily"
+description = "L2 250ms：新的 Normalized LL2 日包 -> 洗库 -> 交付 parquet -> 增量目录索引（只在失败时推钉钉）"
+cwd = "/home/fanghaizhou/market_replay"
+command = "/home/fanghaizhou/market_replay/scripts/lseg/run_l2_daily.sh"
+schedule = { tz = "Asia/Shanghai", at = ["13:30"] }
+timeout_minutes = 360
+
+[[job]]
 name = "ib-kline-daily"
 description = "IB 分钟线：MySQL 增量 -> kline_ib.parquet + catalog（钉钉）"
 cwd = "/home/fanghaizhou/market_replay"

@@ -1265,7 +1265,7 @@ mod tests {
         let mut book: Book = [f64::NAN; BOOK_FIELDS];
         p.parse(line.as_bytes(), &mut book).unwrap();
         let mut bad = good.clone();
-        bad[6] = "-3".into(); // a size that is not a non-negative integer
+        bad[6] = "1.5".into(); // a size that is not an integer (a negative one is read as empty, see negative_counts)
         let bad_line = bad.join(",");
         let e1 = parse_book(bad_line.as_bytes(), &mut book)
             .unwrap_err()
