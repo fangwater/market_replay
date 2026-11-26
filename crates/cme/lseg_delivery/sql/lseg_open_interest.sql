@@ -1,5 +1,6 @@
 -- Open interest from LSEG TAS (`normalised`) source gzips; written only by `tas_open_interest`.
--- See docs/lseg/open_interest.md. Idempotent: safe to apply again.
+-- See docs/lseg/open_interest.md. Idempotent: safe to apply again. Schema version 2; a version 1
+-- schema (rows referenced the source by path) is upgraded once with lseg_open_interest_v2_migration.sql.
 CREATE SCHEMA IF NOT EXISTS lseg_open_interest;
 
 CREATE TABLE IF NOT EXISTS lseg_open_interest.schema_metadata (
@@ -7,12 +8,14 @@ CREATE TABLE IF NOT EXISTS lseg_open_interest.schema_metadata (
     value text NOT NULL
 );
 INSERT INTO lseg_open_interest.schema_metadata (key, value)
-VALUES ('schema_version', '1'), ('rule_version', 'lseg_oi_v1')
+VALUES ('schema_version', '2'), ('rule_version', 'lseg_oi_v1')
 ON CONFLICT (key) DO NOTHING;
 
 -- One row per scanned source gzip. A source is loaded in one transaction together with its rows.
 CREATE TABLE IF NOT EXISTS lseg_open_interest.sources (
     source_path text PRIMARY KEY,
+    -- compact reference used by the data rows
+    source_id integer GENERATED ALWAYS AS IDENTITY CONSTRAINT sources_source_id_key UNIQUE,
     source_kind text NOT NULL CHECK (source_kind IN ('period', 'daily')),
     -- package directory name (period) or product directory (daily)
     package text NOT NULL CHECK (package <> ''),
@@ -46,7 +49,7 @@ CREATE TABLE IF NOT EXISTS lseg_open_interest.observations (
     first_published_ns bigint NOT NULL,
     last_published_ns bigint NOT NULL,
     publication_rows integer NOT NULL CHECK (publication_rows > 0),
-    source_path text NOT NULL REFERENCES lseg_open_interest.sources (source_path) ON DELETE CASCADE,
+    source_id integer NOT NULL REFERENCES lseg_open_interest.sources (source_id) ON DELETE CASCADE,
     CHECK (last_published_ns >= first_published_ns)
 );
 CREATE INDEX IF NOT EXISTS observations_ric_date_idx
@@ -54,7 +57,7 @@ CREATE INDEX IF NOT EXISTS observations_ric_date_idx
 CREATE INDEX IF NOT EXISTS observations_ric_published_idx
     ON lseg_open_interest.observations (ric, first_published_ns);
 CREATE INDEX IF NOT EXISTS observations_source_idx
-    ON lseg_open_interest.observations (source_path);
+    ON lseg_open_interest.observations (source_id);
 
 -- Rows with a non-empty value that could not be taken as-is; raw text kept, never used.
 CREATE TABLE IF NOT EXISTS lseg_open_interest.rejects (
@@ -63,9 +66,9 @@ CREATE TABLE IF NOT EXISTS lseg_open_interest.rejects (
     raw_value text NOT NULL,
     raw_date text NOT NULL,
     reason text NOT NULL,
-    source_path text NOT NULL REFERENCES lseg_open_interest.sources (source_path) ON DELETE CASCADE
+    source_id integer NOT NULL REFERENCES lseg_open_interest.sources (source_id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS rejects_source_idx ON lseg_open_interest.rejects (source_path);
+CREATE INDEX IF NOT EXISTS rejects_source_idx ON lseg_open_interest.rejects (source_id);
 
 -- Per RIC and trade date: the first published figure (preliminary) and the last one (final),
 -- each with its publication time. Rows without a source Date are not in this view.

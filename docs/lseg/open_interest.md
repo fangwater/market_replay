@@ -13,12 +13,12 @@
 
 ## 存储：`market_metadata.lseg_open_interest`
 
-DDL 在 `crates/cme/lseg_delivery/sql/lseg_open_interest.sql`，用 `tas_open_interest init-schema` 应用（幂等）。只写这个 schema，不碰其他表。
+DDL 在 `crates/cme/lseg_delivery/sql/lseg_open_interest.sql`，用 `tas_open_interest init-schema` 应用（幂等）。只写这个 schema，不碰其他表。当前 schema 版本是 2（记在 `schema_metadata.schema_version`），版本不对时 `init-schema` 和 `sync` 都会拒绝执行。
 
 | 表 / 视图 | 内容 |
 | --- | --- |
-| `sources` | 每个源 gzip 一行：路径、类型（`period` / `daily`）、包名或品种、大小与 mtime（源身份）、gzip 成员数、行数统计、发布时间范围、规则版本 `lseg_oi_v1`。和它的数据行在同一个事务里写入 |
-| `observations` | 同一 RIC 连续出现的、(`oi_date`, 值, `Type`) 相同的源行合并成一条，保留第一次和最后一次发布时间、行数。值变了再变回来，算新的一条 |
+| `sources` | 每个源 gzip 一行：路径（主键）、整数 `source_id`（数据行用它引用源）、类型（`period` / `daily`）、包名或品种、大小与 mtime（源身份）、gzip 成员数、行数统计、发布时间范围、规则版本 `lseg_oi_v1`。和它的数据行在同一个事务里写入 |
+| `observations` | 同一 RIC 连续出现的、(`oi_date`, 值, `Type`) 相同的源行合并成一条，保留第一次和最后一次发布时间、行数。值变了再变回来，算新的一条。用 `source_id` 关联 `sources` |
 | `rejects` | 有值但无法原样使用的行（不是非负整数、时间或日期解析不了），保留原文，不进 `observations` |
 | `by_trade_date`（视图） | 按 (RIC, 交易日)：第一次发布的值（预估值）和最后一次发布的值（终值），以及各自的发布时间 |
 
@@ -42,7 +42,7 @@ $B sync --daily-root /mnt/hdd-raid5-72t/liang_torch/lseg_data/future_daily/norma
 - **增量规则：**
   - 已入库、且大小和 mtime 都没变的源，直接跳过。
   - 源变了就报错，除非加 `--replace`。`--replace` 会在同一事务里删掉旧行再重写。
-  - 每个源在一个事务内完成：写 `sources` 行，用 COPY 写入数据行，再核对 COPY 行数等于扫描行数，然后提交。
+  - 每个源在一个事务内完成：先写 `sources` 行并取回 `source_id`；把暂存 CSV 用 COPY 写进事务内的临时表，再带上 `source_id` 插入正式表；核对插入行数等于扫描行数，然后提交。
   - 扫描前后各核对一次源身份（大小和 mtime）。
 - **日包：** 只读下载器写过 `.download.json` 的文件，状态必须是 `download_complete_header_verified`，且字节数一致。源端本来就是 0 字节占位的文件（`source_zero_byte_placeholder_downloaded`，共 1,225 个）单独计数并跳过；其余没就绪的文件留给下次运行。
 - **资源：**
@@ -71,6 +71,21 @@ tas_open_interest sync --daily-root .../future_daily/normalised --period-root ..
 - `oi_date` 从 2019-12-30 到 2026-11-24，发布时间到 2026-11-23（UTC）。
 - 约 15 万条的 `oi_date` 晚于发布时刻的 UTC 日期，这是交易日按当地时间算的市场（亚洲时区）的正常现象。所以判断"当时已知"只看发布时间，不能用 `oi_date` 和 UTC 日期比大小。
 - 2020 年以前的历史包没有入库，需要时用 `--period-from` 再跑一次。
+
+## schema 版本 2（2026-11-26）
+
+版本 1 在每条数据行上都存了源文件路径，平均约 166 字节，整个 schema 占 9.3 GB。版本 2 改成用 `sources.source_id`（整数）引用源文件。
+
+迁移用 `tas_open_interest migrate-v2`，脚本是 `sql/lseg_open_interest_v2_migration.sql`，在一个事务里完成：
+- 按 (ric, 发布时间) 排序复制全部行；
+- 核对行数，必须和 `sources.observation_rows` 的合计一致；
+- 删掉旧表，重建索引和视图。
+
+结果：
+- 迁移用时 4 分 36 秒。
+- 迁移前后各算一次与行顺序无关的校验和，覆盖每行全部字段和源路径（迁移后通过 id 关联回路径），26,677,738 行完全一致。
+- 占用从 9.3 GB 降到 4.16 GB：堆表约 2.1 GB，三个索引约 2 GB。
+- 删掉 TY 2026-11-19 的源记录后用新代码重新入库，得到的 5 条记录和迁移前逐字节一致。
 
 ## 每日任务
 

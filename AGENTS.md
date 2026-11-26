@@ -234,6 +234,7 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 - **持仓量 OI（2026-11-25）：** CME 并非没有 OI。TAS 源文件的 `Open Interest` 列有值，但 RocksDB 和 parquet 都没收。现在由 `tas_open_interest`（`crates/cme/lseg_delivery`）从原始 gzip 提取，写进 PostgreSQL `market_metadata.lseg_open_interest`，只写这个 schema。
   - 每个交易日发两次：预估值约 20:15 CT，终值次日约 09:05 CT。`Date` 是所属交易日，早年为空时存 NULL，不推算。
   - 使用时必须按发布时间取"当时已知"的值。
+  - 存储是 schema 版本 2：数据行用 `sources.source_id` 引用源文件，2026-11-26 从版本 1 迁移过来，占用从 9.3 GB 降到 4.2 GB，迁移前后校验和一致。
   - 已入库：2020-01 起的全部历史包和 2026-06-01 起的日包，发布时间到 2026-11-23，共 2,668 万条观测，0 条 reject。2020 年以前的包没有入库。
   - `lseg-daily` 配置有 `[open_interest]` 段时，每天增量入库。这个配置段要等新二进制部署之后才能加，因为旧二进制的配置解析带 `deny_unknown_fields`，遇到它会报错。
   - 详见 [docs/lseg/open_interest.md](docs/lseg/open_interest.md)。

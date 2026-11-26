@@ -27,6 +27,9 @@ use std::{
 };
 
 const SCHEMA_SQL: &str = include_str!("../../sql/lseg_open_interest.sql");
+const MIGRATION_V2_SQL: &str = include_str!("../../sql/lseg_open_interest_v2_migration.sql");
+/// The schema this binary reads and writes (`schema_metadata.schema_version`).
+const SCHEMA_VERSION: &str = "2";
 const DATABASE_URL_ENV: &str = "LSEG_OI_DATABASE_URL";
 
 #[derive(Parser)]
@@ -50,9 +53,14 @@ enum Cmd {
         #[arg(long)]
         max_compressed_bytes: Option<u64>,
     },
-    /// Create or update the PostgreSQL schema.
+    /// Create or update the PostgreSQL schema (refuses an older schema version).
     InitSchema {
         /// Default: $LSEG_OI_DATABASE_URL.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// One-off upgrade of a version 1 schema (rows referenced the source by path) to version 2.
+    MigrateV2 {
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -121,11 +129,36 @@ fn main() -> Result<()> {
         ),
         Cmd::InitSchema { database_url } => runtime()?.block_on(async {
             let pool = connect(database_url, 1).await?;
+            if let Some(v) = schema_version(&pool).await? {
+                ensure!(
+                    v == SCHEMA_VERSION,
+                    "lseg_open_interest is at schema version {v}; run migrate-v2 first"
+                );
+            }
             sqlx::raw_sql(SCHEMA_SQL)
                 .execute(&pool)
                 .await
                 .context("apply schema")?;
             println!("schema lseg_open_interest applied");
+            Ok(())
+        }),
+        Cmd::MigrateV2 { database_url } => runtime()?.block_on(async {
+            let pool = connect(database_url, 1).await?;
+            let v = schema_version(&pool).await?;
+            ensure!(
+                v.as_deref() == Some("1"),
+                "migrate-v2 needs schema version 1, found {v:?}"
+            );
+            sqlx::raw_sql(MIGRATION_V2_SQL)
+                .execute(&pool)
+                .await
+                .context("migrate to schema version 2")?;
+            sqlx::raw_sql(SCHEMA_SQL)
+                .execute(&pool)
+                .await
+                .context("apply schema")?;
+            ensure!(schema_version(&pool).await?.as_deref() == Some(SCHEMA_VERSION));
+            println!("lseg_open_interest migrated to schema version {SCHEMA_VERSION}");
             Ok(())
         }),
         Cmd::Sync {
@@ -179,6 +212,11 @@ fn main() -> Result<()> {
             }
             let rt = runtime()?;
             let pool = rt.block_on(connect(database_url, workers as u32))?;
+            let version = rt.block_on(schema_version(&pool))?;
+            ensure!(
+                version.as_deref() == Some(SCHEMA_VERSION),
+                "lseg_open_interest schema version is {version:?}, this tool writes {SCHEMA_VERSION}"
+            );
             let loaded = rt.block_on(loaded_sources(&pool))?;
             let mut todo = Vec::new();
             let mut changed = Vec::new();
@@ -263,6 +301,22 @@ async fn connect(url: Option<String>, connections: u32) -> Result<PgPool> {
         .connect(&url)
         .await
         .context("connect to PostgreSQL")
+}
+
+/// `None` when the schema does not exist yet.
+async fn schema_version(pool: &PgPool) -> Result<Option<String>> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('lseg_open_interest.schema_metadata') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT value FROM lseg_open_interest.schema_metadata WHERE key = 'schema_version'",
+    )
+    .fetch_optional(pool)
+    .await?)
 }
 
 async fn loaded_sources(pool: &PgPool) -> Result<HashMap<String, (i64, i64)>> {
@@ -471,7 +525,6 @@ fn run_sync(
 
 fn scan_source(s: &Source, obs_path: &Path, rej_path: &Path) -> Result<Scanned> {
     let header = read_header(&s.header_from)?;
-    let source = s.path.display().to_string();
     let csv_writer = |p: &Path| -> Result<csv::Writer<BufWriter<File>>> {
         Ok(csv::WriterBuilder::new()
             .has_headers(false)
@@ -490,7 +543,6 @@ fn scan_source(s: &Source, obs_path: &Path, rej_path: &Path) -> Result<Scanned> 
                 &o.first_published_ns.to_string(),
                 &o.last_published_ns.to_string(),
                 &o.rows.to_string(),
-                &source,
             ])?,
             Event::Reject(r) => rej.write_record([
                 r.ric.as_str(),
@@ -498,7 +550,6 @@ fn scan_source(s: &Source, obs_path: &Path, rej_path: &Path) -> Result<Scanned> 
                 &r.raw_value,
                 &r.raw_date,
                 r.reason,
-                &source,
             ])?,
         }
         Ok(())
@@ -558,11 +609,12 @@ async fn load(
             .await?;
     }
     let st = &sc.stats;
-    sqlx::query(
+    let source_id: i32 = sqlx::query_scalar(
         "INSERT INTO lseg_open_interest.sources (source_path, source_kind, package, source_bytes,
             source_mtime_ns, gzip_members, data_rows, quoted_rows, oi_rows, observation_rows,
             reject_rows, min_published_ns, max_published_ns, rule_version, tool_version, scan_seconds)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         RETURNING source_id",
     )
     .bind(&path)
     .bind(s.kind)
@@ -580,25 +632,52 @@ async fn load(
     .bind(RULE_VERSION)
     .bind(concat!("tas_open_interest ", env!("CARGO_PKG_VERSION")))
     .bind(sc.seconds)
+    .fetch_one(&mut *tx)
+    .await?;
+    // The staging CSVs carry no source column: COPY into transaction-local tables, then insert
+    // with this source's id.
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE oi_observations_stage (ric text, oi_date date, open_interest bigint,
+            row_type text, first_published_ns bigint, last_published_ns bigint,
+            publication_rows integer) ON COMMIT DROP;
+         CREATE TEMP TABLE oi_rejects_stage (ric text, published_ns bigint, raw_value text,
+            raw_date text, reason text) ON COMMIT DROP;",
+    )
     .execute(&mut *tx)
     .await?;
-    let n_obs = copy_file(
+    copy_file(
         &mut tx,
-        "COPY lseg_open_interest.observations (ric, oi_date, open_interest, row_type,
-            first_published_ns, last_published_ns, publication_rows, source_path)
-         FROM STDIN (FORMAT csv, FORCE_NOT_NULL (row_type))",
+        "COPY oi_observations_stage FROM STDIN (FORMAT csv, FORCE_NOT_NULL (row_type))",
         obs,
     )
     .await
     .context("copy observations")?;
-    let n_rej = copy_file(
+    copy_file(
         &mut tx,
-        "COPY lseg_open_interest.rejects (ric, published_ns, raw_value, raw_date, reason, source_path)
-         FROM STDIN (FORMAT csv, FORCE_NOT_NULL (ric, raw_value, raw_date))",
+        "COPY oi_rejects_stage FROM STDIN (FORMAT csv, FORCE_NOT_NULL (ric, raw_value, raw_date))",
         rej,
     )
     .await
     .context("copy rejects")?;
+    let n_obs = sqlx::query(
+        "INSERT INTO lseg_open_interest.observations (ric, oi_date, open_interest, row_type,
+            first_published_ns, last_published_ns, publication_rows, source_id)
+         SELECT ric, oi_date, open_interest, row_type, first_published_ns, last_published_ns,
+            publication_rows, $1 FROM oi_observations_stage",
+    )
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let n_rej = sqlx::query(
+        "INSERT INTO lseg_open_interest.rejects (ric, published_ns, raw_value, raw_date, reason,
+            source_id)
+         SELECT ric, published_ns, raw_value, raw_date, reason, $1 FROM oi_rejects_stage",
+    )
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     ensure!(
         n_obs == st.observations && n_rej == st.rejects,
         "copied {n_obs} observations / {n_rej} rejects, scanned {} / {}",
