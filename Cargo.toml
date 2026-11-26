@@ -15,6 +15,7 @@ members = [
     "crates/cn/cn_hfq_bars",
     "crates/core/cme_roll_metadata",
     "crates/cme/cme_tas_replay",
+    "crates/cme/cme_roll",
     "crates/cme/lseg_delivery",
     "crates/cme/ib_kline_export",
     "crates/cme/lseg_daily",

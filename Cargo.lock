@@ -751,6 +751,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cme_roll"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz 0.8.6",
+ "clap",
+ "csv",
+ "env_logger 0.10.2",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "cme_roll_metadata"
 version = "0.1.0"
 dependencies = [
