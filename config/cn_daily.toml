@@ -9,7 +9,7 @@ state_file = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_daily_state.jso
 session_api = "http://127.0.0.1:8765/api/v1/trading-sessions"
 # Must equal baseline_root/_provenance/continuous_sessions.json (trim refuses otherwise).
 # Changing it means building a new archive root, not editing this line.
-session_as_of = "2026-11-15"
+session_as_of = "2026-11-26"
 replay_workers = 32
 export_workers = 8
 fill_workers = 8

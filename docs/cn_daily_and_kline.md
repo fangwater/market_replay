@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 回放 | `cn_futures_l2` | 把通联 msg 写入生产 RocksDB；已经是 `done` 的交易日直接跳过 |
 | 导出 | `export_baseline_1min` | RocksDB → staging（未裁剪），staging 在 NVMe 上 |
-| 时段裁剪 | `trim_cn_futures_continuous_sessions` | staging → 生产 `baseline_data_1min`。时段快照固定为 `session_as_of = 2026-09-08`，必须和生产目录 `_provenance` 里的记录一致，否则工具会拒绝执行；生产目录里已有的文件不会覆盖，`--overwrite` 时才覆盖 |
+| 时段裁剪 | `trim_cn_futures_continuous_sessions` | staging → 生产 `baseline_data_1min`。时段快照固定为 `session_as_of = 2026-11-26`，必须和生产目录 `_provenance` 里的记录一致，否则工具会拒绝执行；生产目录里已有的文件不会覆盖，`--overwrite` 时才覆盖 |
 | 大小单分桶 | `fill_1min_size_buckets --start <本次第一天> --end <本次最后一天>` | **2024 年起的正式归档口径**（和实时 gRPC bar 同一套文件）：阈值 = 上一个完整上海自然月里**主力合约逐交易日合并**（换月前用旧主力、换月后用新主力）的区间成交额 P50/P90，按每笔成交所属月份取上月的阈值。只改写 `--start/--end` 范围内的日文件（必须显式给出，没有全历史模式）；某品种上月没有阈值（新上市、没有主力成交）时该品种当天文件保持原样并在输出里打印 `MISSING-THRESHOLDS`，绝不编造。2023 年及以前的文件使用旧的"同月、品种全部合约合并"阈值 |
 | 审计与通知 | 内置 | 统计文件数、行数、有成交分钟数、合约数、各所文件数，VWAP 落在快照高低价外的比例，与上一交易日相比缺少或新增的品种，以及没有已验证乘数的品种。结果写入 `logs/cn_daily/cn_daily_YYYYMMDD_audit.json`，然后发钉钉 |
 
