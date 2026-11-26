@@ -36,6 +36,24 @@
 
 字段级定义以 `/home/fanghaizhou/preprocess/data_format/cn_source_msg_map.md` 和各交易所页面为准。
 
+## 国内商品期权 1 分钟源数据（2026-11-26 实测）
+
+后续规划在本仓库支持国内商品期权（`XDCE`、`XGFE`、`XSGE`、`XSIE`、`XZCE` 五家商品交易所）的数据清洗。两层源数据都来自公司内网通联 HTTP 归档（未挂 NFS，访问时绕开本地代理，`--noproxy '*'`）：
+
+| 层 | 获取路径 | DataMart UID | 覆盖 | 是否更新 |
+| --- | --- | --- | --- | --- |
+| 历史日包 | `http://10.61.20.12/public/data/massive/future-data/tonglian-opt-etf-2009-2025/future_opt_pricemin/future_opt_priceminYYYYMM/future_opt_priceminYYYYMMDD.zip` | `option-tonglian-min-2009-2025` | `2017-03-31` 至 `2026-08-03`（`202608` 仅含 `20260803` 一天） | **不更新**，已冻结 |
+| 每日 MDL 落盘 | `http://10.61.20.11/users/el01/public/tonglian/data/YYYYMMDD/mdl_13_<id>_0.csv` | `tonglian-idc-pj-deploy` | `2026-07-01` 起（实测已到 `2026-11-26`） | **每日更新** |
+
+- **重叠窗口与切层建议：** 两层在 `2026-07-01`–`2026-08-03` 重叠，实测 `2026-08-03` `AP610C8000` `09:00` 的 OHLC、成交量、成交额、持仓量完全一致。具体切层日可在清洗设计时按全量重叠比对后确定（例如 `2026-07-31` 或 `2026-08-03`）。
+- **历史日包格式：** 每个 `.zip` 内含单个 UTF-8 TSV `future_opt_priceminYYYYMMDD.txt`，按 `CLEARINGDAY`（交易日）打包，列为 `CLEARINGDAY, TDATE, CONTRACTID, MARKET, Offset, bartime, closeprice, openprice, highprice, lowprice, volume, value, vwap, OPENINTS`（注意 `closeprice` 在 `openprice` 前面）。
+- **每日 MDL 文件与交易所对应（仅商品期权 1 分钟）：**
+  - `mdl_13_40_0.csv`（郑商所 `XZCE`）、`mdl_13_42_0.csv`（大商所 `XDCE`）、`mdl_13_61_0.csv`（上期所 `XSGE`）：纯 1 分钟线，13 列（无 `Unit` 列）；对应的 `_41`、`_43`、`_62` 是 3/5/15 分钟等多周期文件，1 分钟清洗不读。
+  - `mdl_13_94_0.csv`（能源中心 `XSIE`）、`mdl_13_100_0.csv`（广期所 `XGFE`）：14 列（含 `Unit` 列），1 分钟与多周期混在同一文件，**必须过滤 `Unit == 1`**。
+  - `mdl_13_8_0`（上交所 ETF）、`mdl_13_79_0`（深交所 ETF）、`mdl_13_78_0`（中金所股指）不属于商品期权。
+  - **目录日期不是 `TradDay`：** 周六目录（如 `20261121`）包含周五夜盘过零点的 `mdl_13_61_0.csv` 和 `mdl_13_94_0.csv`，归属必须按行内 `TradDay` 与 `ActionDay`/`BarTime` 处理，与期货 `tonglian_msg` 同理。
+- **MySQL 实时表（备查）：** DataMart `options-1minute-data` 对应 `172.16.30.20:3307` `quotes.options_minute`（标注“实时更新”，未提供起始日期与保留策略，且页面对 OpenPrice/ClosePrice 的文字描述反了；清洗历史与盘后增量以上面两份 HTTP 归档为准）。
+
 ## mdl-replay 回放服务（`crates/mdl_replay`）
 
 文档：[docs/mdl_replay.md](docs/mdl_replay.md)。按交易日或自然日、品种或合约、频道，把 `tonglian_msg` 的行情回放成和公司内网实时转发逐字节一致的 ZMQ 帧（`<topic> || <原行>`）。mkt_signal 的 `cn-futures-pbs --zmq` 只改 endpoint 就能直接消费。
@@ -157,6 +175,19 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 2. **交易所映射：** 在 `cn_futures_core::segments::exchange_of` 里补上品种。core 的改动只有 mkt_signal 升级 rev 后才会进入实盘。
 3. **时段快照：** 按上面的方法确认新快照只是增加时段，然后升级归档的溯源记录，并修改 `config/cn_daily.toml` 和 `config/cn_kline_server.toml` 里的 `session_as_of`。
 
+## CME 换月（2026-11-26 起统一）
+
+用户 2026-11-26 明确：**CME 的东西以后都在本仓库维护，不再留在 preprocess**。preprocess 里的 CME 文档（`data_format/lseg/*roll*`、`database/cme_*`）只作历史记录，不再是依据；新的规则、风险日、证据和代码只写在这里。
+
+- **规则：** 见 [docs/cme_roll.md](docs/cme_roll.md)。16 个品种统一按国内 `local_rqdata_rule0` 的方式选主力（持仓超过当前主力 1.1 倍、只往更远月份换、不回切）。
+  - **时序：** CME 的 OI 晚一天，用 T−1 的终值决定 T+1；决策时刻是开盘前 5 分钟（16:55 CT）。
+  - **期限保护：** 风险日前 1 个交易日强制换月。风险日美债取首次意向日，金属取首次持仓日，外汇、股指、CL 取最后交易日。
+- **风险日表：** `config/cme_roll/risk_days.csv`，每行带来源，由 `cme_roll_evidence` 生成。
+  - 营业日 = 周一到周五，去掉美联储假日（周日的顺延到周一，周六的不调休）和耶稣受难日。它不等于 Globex 的交易日：哥伦布日、Juneteenth 等照常交易，但不是营业日。
+  - 按规则推算的日期必须和已审核日期全部一致，才能用来补缺。
+  - 缺风险日的合约不能成为候选，要报出来。
+- **代码：** `crates/cme/cme_roll`，规则引擎是纯函数，只用决策时刻之前已经发布的 OI；证据工具只读不写。换月服务和复权还没做。
+
 ## reference_cme/：CME 参考数据服务（2026-11-15 并入）
 
 原 `/home/fanghaizhou/cme_exchange_info_summary` 用 `mv` 整体搬入。2026-11-16 经用户同意，原路径的软链接已删除，各处引用（reference_cme 状态文件、preprocess 文档和证据、LSEG artifacts）都已改成新路径。
@@ -231,6 +262,21 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 - **L2 索引与每日任务：** `lseg-daily` 每次重建 `catalog.sqlite`；旧版会删掉 `l2_directories`，新版（`build` 带 carry-over 和单写者锁）保留它。`lseg_catalog l2-sync` 按交付盘重新生成（约 1 小时，只在没有任务时跑）。
 - **L2 缺口原因：** `l2_gaps.sqlite` 每行有 `cause`（人话原因）和 `purchase_layers`。没有 L2 的 RIC 多数是采购目录里只有 `tas`/`summarised` 层（L2 从没订购，要补需向 LSEG 新申请）；采购目录的 L2 层按 RIC 名记、不分年份，同代码的旧合约会重名（如 CGBM7 的 L2 属于 2017 年合约）。
 - **IB：** 来源是 MySQL `ib_data.minute_data`，只做纯导出，用于对比："有多少切多少"，不补、不改、不对齐。
+- **`review/` 交易所目录（2026-11-26）：** 两个原因。
+  - 一位数年份的 RIC 撞名：比如 `TNH2` 在 HRD 里同时对应 2012 年 NYMEX 的运费合约和 2022 年 CBOT 的美债。
+  - 新挂牌合约在静态 HRD（2026-06-06 提取）里查不到。
+
+  经用户批准，增加两条判定规则，每条结果都记下依据：
+  - `hrd_by_date`：取存续期覆盖数据日期的那个 HRD 版本；
+  - `root_follow`：同前缀的合约在前后 3 年内只出现在一个交易所时，跟随它。
+
+  执行方式：
+  - `lseg-daily venues-plan` 只读给出判定；
+  - `lseg-daily venues-migrate --apply` 用硬链接搬到正确目录，不覆盖已有文件，更新 state 和 K 线引擎的覆盖表 `artifacts/venue_overrides/venue_overrides.csv`；
+  - 迁移后要逐个 RIC 重算 K 线，再跑 catalog `build`、`l2-sync`、`ib-sync`；
+  - 日常运行里，新 RIC 自动套用 `root_follow`，已经在 `review/` 里的不自动改目录。
+
+  判不出来的（HRD 双重挂牌、非单月代码）仍留在 `review/`。详见 [docs/lseg/venue_review.md](docs/lseg/venue_review.md)。
 - **持仓量 OI（2026-11-25）：** CME 并非没有 OI。TAS 源文件的 `Open Interest` 列有值，但 RocksDB 和 parquet 都没收。现在由 `tas_open_interest`（`crates/cme/lseg_delivery`）从原始 gzip 提取，写进 PostgreSQL `market_metadata.lseg_open_interest`，只写这个 schema。
   - 每个交易日发两次：预估值约 20:15 CT，终值次日约 09:05 CT。`Date` 是所属交易日，早年为空时存 NULL，不推算。
   - 使用时必须按发布时间取"当时已知"的值。

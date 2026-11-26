@@ -8,6 +8,8 @@ Lines `RIC<TAB>exchange-directory`. Sources, in this order:
   2. with --plan, the approved exchange plan of lseg-daily (`exchanges`: RIC -> delivery
      directory, e.g. /mnt/nvme-raid0-28t/fanghaizhou/lseg_data/artifacts/tas_status_20261109/plan.json)
      for the RICs that are absent from the catalog (plan-only).
+`review` in the plan or the purchase catalog means "unresolved" (docs/lseg/venue_review.md): it never
+conflicts with a directory the delivery catalog knows; it is only used for a RIC the catalog lacks.
 A RIC that both sources know with DIFFERENT directories is a conflict: it is left out of the map and
 written to --conflicts (`RIC<TAB>detail`), so the deliver tool records it as a problem and does not
 deliver it. A RIC in neither source has no line (the tool then reports it, never guesses).
@@ -53,7 +55,7 @@ if want is None:
         if ric not in seen:
             out[ric] = ex
             plan_only += 1
-        elif seen[ric] != ex:
+        elif seen[ric] != ex and ex.lower() != "review":
             conflicts += 1
             conflict_lines[ric] = f"delivery catalog says {seen[ric]}, approved plan says {ex}"
             out.pop(ric, None)
@@ -70,7 +72,7 @@ if a.ric_catalog and want is None:
             if ric in conflict_lines:
                 continue
             if ric in out:
-                if out[ric] != ex:
+                if out[ric] != ex and ex != "review":
                     conflicts += 1
                     conflict_lines[ric] = f"delivery catalog/plan say {out[ric]}, purchase catalog says {ex}"
                     out.pop(ric, None)

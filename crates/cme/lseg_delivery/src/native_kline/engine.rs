@@ -104,6 +104,17 @@ fn verify_jobs(jobs: &[Job]) -> Result<(usize, usize, BTreeSet<i32>)> {
     Ok((databases.len(), count, years))
 }
 
+/// Resolved venues of RIC-years that were under `review/` (relative to the project root);
+/// written by `lseg-daily venues-migrate`, applied last by `Metadata::load`.
+pub const VENUE_OVERRIDES: &str = "artifacts/venue_overrides/venue_overrides.csv";
+
+#[derive(Deserialize)]
+struct VenueOverride {
+    ric: String,
+    utc_year: i32,
+    venue: String,
+}
+
 /// Compare the complete plan with live CF names, without scanning stored ticks
 /// or writing a normal-success report to the delivery disk.
 pub fn check_plan(path: &Path) -> Result<()> {
@@ -867,6 +878,16 @@ impl Metadata {
             );
         }
         m.load_plan_overlays(cfg, &approved["exchanges"])?;
+        // Resolved `review` RIC-years (`lseg-daily venues-migrate`, docs/lseg/venue_review.md):
+        // applied last, so a moved RIC-year is decoded and written in its new directory.
+        let overrides = cfg.project.join(VENUE_OVERRIDES);
+        if overrides.exists() {
+            for row in csv::Reader::from_path(&overrides)?.deserialize::<VenueOverride>() {
+                let row = row.with_context(|| format!("read {}", overrides.display()))?;
+                m.venues
+                    .insert((row.utc_year, row.ric), BTreeSet::from([row.venue]));
+            }
+        }
         let paths = [
             PathBuf::from(
                 "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/cme_causal_roll_inputs_20261023/hrd.csv",

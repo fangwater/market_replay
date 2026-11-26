@@ -31,6 +31,7 @@ mod publish;
 mod remote;
 mod state;
 mod venue;
+mod venue_fix;
 
 use state::{Batch, PlannedFile, ProductRun, RunRecord, Stage, State};
 
@@ -261,6 +262,33 @@ enum Cmd {
     TestNotify {
         #[arg(long)]
         config: PathBuf,
+    },
+    /// Read-only: resolve every RIC-year under `<delivery>/review/` (rules in venue_fix.rs)
+    /// and write `<out>/venue_plan.csv` plus a summary. Changes nothing.
+    VenuesPlan {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Move the resolved RIC-years of a `venues-plan` from `<delivery>/review/` to their
+    /// directory (hard links, never overwriting; the review copy is removed only after the
+    /// link is verified), then update the driver state and the kline venue overrides.
+    /// Without `--apply` it only checks every file and reports.
+    VenuesMigrate {
+        #[arg(long)]
+        config: PathBuf,
+        /// `venue_plan.csv` from `venues-plan`.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Local directory for the move journal and the state backup.
+        #[arg(long)]
+        journal: PathBuf,
+        /// Only these RICs (default: every resolved row).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -1042,7 +1070,8 @@ fn advance(
             Stage::Replayed => {
                 let rics = stage_audit(ctx, st, product, &dir, &mut pr)?;
                 let approved = ctx.approved()?.clone();
-                let map = venue::assign(&rics, &st.venues, &approved, &ctx.cfg.hrd)?;
+                let mut map = venue::assign(&rics, &st.venues, &approved, &ctx.cfg.hrd)?;
+                follow_roots(ctx.cfg, &pr, &mut map, &st.venues, &approved)?;
                 save_json(&dir.join("exchange_map.json"), &map)?;
                 for (r, v) in &map {
                     if !approved.contains_key(r) {
@@ -1083,6 +1112,57 @@ fn advance(
         st.batches[bi].products.insert(product.to_string(), pr);
         st.save(&ctx.cfg.state_file)?;
     }
+}
+
+/// Rule 2 of venue_fix.rs for RICs never delivered before: an unresolved (`review`) new RIC
+/// takes the single exchange directory of its root within three years. RICs already
+/// delivered under `review` keep it (a RIC never changes directory here); if they are now
+/// resolvable they are listed in `meta/problems/lseg_daily/venues_resolvable.json` for
+/// `venues-migrate`, which moves their files first.
+fn follow_roots(
+    cfg: &Config,
+    pr: &ProductRun,
+    map: &mut BTreeMap<String, String>,
+    known: &BTreeMap<String, String>,
+    approved: &HashMap<String, String>,
+) -> Result<()> {
+    if !map.values().any(|v| v == "review") {
+        return Ok(());
+    }
+    let year: i32 = pr
+        .dates()
+        .first()
+        .and_then(|d| d.get(..4))
+        .context("batch dates")?
+        .parse()?;
+    let years: BTreeSet<i32> = (year - 3..=year + 3).collect();
+    let roots = venue_fix::root_venues(&cfg.delivery_root, &years)?;
+    let first = chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+    let mut resolvable = Vec::new();
+    for (ric, v) in map.iter_mut() {
+        if v != "review" {
+            continue;
+        }
+        let (venue, rule, evidence) = venue_fix::resolve(ric, year, first, None, &roots);
+        if venue == "review" {
+            continue;
+        }
+        if known.contains_key(ric) || approved.contains_key(ric) {
+            resolvable
+                .push(json!({"ric": ric, "venue": venue, "rule": rule, "evidence": evidence}));
+        } else {
+            eprintln!("lseg-daily: {ric} -> {venue} ({rule}: {evidence})");
+            *v = venue;
+        }
+    }
+    if !resolvable.is_empty() {
+        record_problem(
+            cfg,
+            "venues_resolvable.json",
+            &json!({"note": "delivered under review/ but now resolvable; run lseg-daily venues-migrate", "rics": resolvable}),
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- kline / catalog
@@ -2078,6 +2158,21 @@ fn main() -> Result<()> {
             )
         }
         Cmd::Status { config } => status(&load_config(&config)?),
+        Cmd::VenuesPlan { config, out } => venues_plan(&load_config(&config)?, &out),
+        Cmd::VenuesMigrate {
+            config,
+            plan,
+            journal,
+            only,
+            apply,
+        } => venues_migrate(
+            &load_config(&config)?,
+            &plan,
+            &journal,
+            &only,
+            apply,
+            venue_fix::DELIVERY_WRITERS,
+        ),
         Cmd::TestNotify { config } => {
             let cfg = load_config(&config)?;
             let d =
@@ -2091,6 +2186,268 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `venues-plan`: see venue_fix.rs. Reads directory names on the delivery disk and the HRD.
+fn venues_plan(cfg: &Config, out: &Path) -> Result<()> {
+    let dirs = venue_fix::review_dirs(&cfg.delivery_root)?;
+    let years: BTreeSet<i32> = dirs
+        .iter()
+        .flat_map(|(_, y, _, _)| (*y - 3)..=(*y + 3))
+        .collect();
+    let roots = venue_fix::root_venues(&cfg.delivery_root, &years)?;
+    let bares: std::collections::HashSet<String> = dirs
+        .iter()
+        .map(|(r, ..)| venue_fix::bare(r).to_string())
+        .collect();
+    let versions = venue_fix::hrd_versions(&cfg.hrd, &bares)?;
+    fs::create_dir_all(out)?;
+    let mut w = csv::Writer::from_path(out.join("venue_plan.csv"))?;
+    let mut summary: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (ric, year, first, last) in &dirs {
+        let (venue, rule, evidence) = venue_fix::resolve(
+            ric,
+            *year,
+            *first,
+            versions.get(venue_fix::bare(ric)),
+            &roots,
+        );
+        *summary.entry((rule.clone(), venue.clone())).or_default() += 1;
+        w.serialize(venue_fix::Resolution {
+            ric: ric.clone(),
+            utc_year: *year,
+            first_day: first.to_string(),
+            last_day: last.to_string(),
+            venue,
+            rule,
+            evidence,
+        })?;
+    }
+    w.flush()?;
+    let s: Vec<Value> = summary
+        .iter()
+        .map(|((rule, venue), n)| json!({"rule": rule, "venue": venue, "ric_years": n}))
+        .collect();
+    save_json(
+        &out.join("venue_plan_summary.json"),
+        &json!({"review_ric_years": dirs.len(), "by_rule": s}),
+    )?;
+    println!("{} review RIC-years; plan in {}", dirs.len(), out.display());
+    Ok(())
+}
+
+fn remove_empty_dirs(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            remove_empty_dirs(&e.path())?;
+        }
+    }
+    if fs::read_dir(dir)?.next().is_none() {
+        fs::remove_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// `venues-migrate`: see the subcommand doc and docs/lseg/venue_review.md.
+fn venues_migrate(
+    cfg: &Config,
+    plan: &Path,
+    journal: &Path,
+    only: &[String],
+    apply: bool,
+    writers: &[&str],
+) -> Result<()> {
+    use venue_fix::FileStep;
+    fs::create_dir_all(journal)?;
+    let lock = File::create(cfg.work_root.join(".lseg_daily.lock"))?;
+    ensure!(lock.try_lock().is_ok(), "an lseg-daily run holds the lock");
+    let writers = venue_fix::running_writers(writers);
+    if !writers.is_empty() {
+        ensure!(!apply, "delivery writers are running: {writers:?}");
+        eprintln!("lseg-daily: note, delivery writers running (dry run only): {writers:?}");
+    }
+    let mut rows: Vec<venue_fix::PlanRow> = Vec::new();
+    for r in csv::Reader::from_path(plan)?.deserialize::<venue_fix::PlanRow>() {
+        let r = r?;
+        if r.venue != "review" && (only.is_empty() || only.contains(&r.ric)) {
+            rows.push(r);
+        }
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal.join("migrate.jsonl"))?;
+    let (mut files_linked, mut files_same, mut already_moved) = (0u64, 0u64, 0u64);
+    let mut files_kept_target = 0u64;
+    let mut moved: Vec<venue_fix::PlanRow> = Vec::new();
+    let mut conflicts = Vec::new();
+    for row in rows {
+        let comp = lseg_delivery::tasdb::component(&row.ric);
+        let year = row.utc_year.to_string();
+        let src = cfg.delivery_root.join("review").join(&year).join(&comp);
+        let dst = cfg.delivery_root.join(&row.venue).join(&year).join(&comp);
+        if !src.exists() {
+            ensure!(
+                dst.exists(),
+                "{} {}: neither {} nor {} exists",
+                row.ric,
+                year,
+                src.display(),
+                dst.display()
+            );
+            already_moved += 1;
+            moved.push(row);
+            continue;
+        }
+        let mut steps = Vec::new();
+        for f in venue_fix::files_under(&src)? {
+            let step = venue_fix::file_step(&src.join(&f), &dst.join(&f))?;
+            steps.push((f, step));
+        }
+        // A differing derived file (kline / session_status, recomputed after the move) keeps
+        // the target copy; the review copy is backed up locally. Anything else blocks.
+        let bad: Vec<String> = steps
+            .iter()
+            .filter(|(f, s)| *s == FileStep::Conflict && !venue_fix::derived(f))
+            .map(|(f, _)| f.display().to_string())
+            .collect();
+        if !bad.is_empty() {
+            conflicts.push(json!({"ric": row.ric, "utc_year": row.utc_year, "venue": row.venue, "differing_files": bad}));
+            continue;
+        }
+        for (f, step) in &steps {
+            match step {
+                FileStep::Link => files_linked += 1,
+                FileStep::Conflict => files_kept_target += 1,
+                _ => files_same += 1,
+            }
+            if !apply {
+                continue;
+            }
+            let (s, d) = (src.join(f), dst.join(f));
+            if *step == FileStep::Conflict {
+                let b = journal
+                    .join("review_backup")
+                    .join(&year)
+                    .join(&comp)
+                    .join(f);
+                fs::create_dir_all(b.parent().context("parent")?)?;
+                fs::copy(&s, &b)?;
+                ensure!(
+                    lseg_delivery::tasdb::file_sha256(&s)?
+                        == lseg_delivery::tasdb::file_sha256(&b)?,
+                    "backup check {}",
+                    b.display()
+                );
+            }
+            if *step == FileStep::Link {
+                fs::create_dir_all(d.parent().context("parent")?)?;
+                fs::hard_link(&s, &d)
+                    .with_context(|| format!("link {} -> {}", s.display(), d.display()))?;
+                ensure!(
+                    venue_fix::file_step(&s, &d)? == FileStep::AlreadyLinked,
+                    "link check failed for {}",
+                    d.display()
+                );
+            }
+            writeln!(
+                log,
+                "{}",
+                json!({"at": Utc::now().to_rfc3339(), "ric": row.ric, "utc_year": row.utc_year,
+                       "src": s, "dst": d, "step": format!("{step:?}")})
+            )?;
+        }
+        if apply {
+            log.flush()?;
+            log.sync_all()?;
+            for (f, _) in &steps {
+                fs::remove_file(src.join(f))?;
+            }
+            remove_empty_dirs(&src)?;
+            writeln!(
+                log,
+                "{}",
+                json!({"at": Utc::now().to_rfc3339(), "removed": src})
+            )?;
+        }
+        moved.push(row);
+    }
+    let summary = json!({
+        "apply": apply, "ric_years_moved": moved.len(), "already_moved": already_moved,
+        "files_linked": files_linked, "files_identical_at_target": files_same,
+        "derived_files_kept_at_target": files_kept_target,
+        "conflicts": conflicts.len(),
+    });
+    if apply {
+        let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+        fs::copy(
+            &cfg.state_file,
+            journal.join(format!("state.before.{stamp}.json")),
+        )?;
+        let mut st = State::load(&cfg.state_file)?;
+        let approved: HashMap<String, String> =
+            serde_json::from_value(read_json(&cfg.approved_exchanges)?["exchanges"].clone())?;
+        for row in &moved {
+            if st.venues.contains_key(&row.ric) || approved.contains_key(&row.ric) {
+                st.venues.insert(row.ric.clone(), row.venue.clone());
+            }
+        }
+        st.catalog_dirty = true;
+        st.save(&cfg.state_file)?;
+        let path = cfg
+            .project
+            .join(lseg_delivery::native_kline::engine::VENUE_OVERRIDES);
+        let mut all: BTreeMap<(String, i32), venue_fix::PlanRow> = BTreeMap::new();
+        if path.exists() {
+            for r in csv::Reader::from_path(&path)?.deserialize::<venue_fix::OverrideRow>() {
+                let r = r?;
+                all.insert(
+                    (r.ric.clone(), r.utc_year),
+                    venue_fix::PlanRow {
+                        ric: r.ric,
+                        utc_year: r.utc_year,
+                        venue: r.venue,
+                        rule: r.rule,
+                        evidence: r.evidence,
+                    },
+                );
+            }
+        }
+        for r in &moved {
+            all.insert((r.ric.clone(), r.utc_year), r.clone());
+        }
+        fs::create_dir_all(path.parent().context("overrides dir")?)?;
+        let tmp = path.with_extension("csv.partial");
+        let mut w = csv::Writer::from_path(&tmp)?;
+        for r in all.values() {
+            w.serialize(venue_fix::OverrideRow {
+                ric: r.ric.clone(),
+                utc_year: r.utc_year,
+                venue: r.venue.clone(),
+                rule: r.rule.clone(),
+                evidence: r.evidence.clone(),
+            })?;
+        }
+        w.flush()?;
+        drop(w);
+        fs::rename(&tmp, &path)?;
+        if !conflicts.is_empty() {
+            record_problem(
+                cfg,
+                "venue_migration.json",
+                &json!({"at": Utc::now().to_rfc3339(), "conflicts": conflicts}),
+            );
+        }
+    }
+    println!("{summary}");
+    for c in &conflicts {
+        println!("conflict: {c}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2158,6 +2515,105 @@ kline = 1
 "#,
             r = root.display()
         )
+    }
+
+    #[test]
+    fn venues_migrate_moves_verified_links_and_updates_state() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let c = cfg(root);
+        let del = &c.delivery_root;
+        let put = |rel: &str, body: &[u8]| {
+            let p = del.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        put("review/2022/TNH2/20220110/kline.parquet", b"k");
+        put("review/2022/TNH2/20220110/trade.parquet", b"t");
+        put("review/2022/TNH2/l2_source", b"raw");
+        put("review/2026/TYH27/20261120/kline.parquet", b"y");
+        put("cbot/2026/TYH27/20261120/kline.parquet", b"y"); // identical bytes already there
+        put("review/2023/TNZ3/20230110/trade.parquet", b"a");
+        put("cbot/2023/TNZ3/20230110/trade.parquet", b"b"); // conflict on a source file
+        put(
+            "review/2026/ESU31/20260617/session_status.parquet",
+            b"unknown",
+        );
+        put("review/2026/ESU31/20261120/status.parquet", b"s");
+        put("cme/2026/ESU31/20260617/session_status.parquet", b"decoded"); // derived: target wins
+        fs::create_dir_all(&c.work_root).unwrap();
+        fs::write(
+            &c.approved_exchanges,
+            r#"{"exchanges": {"TYH27": "review"}}"#,
+        )
+        .unwrap();
+        State::default().save(&c.state_file).unwrap();
+        let plan = root.join("plan.csv");
+        fs::write(
+            &plan,
+            "ric,utc_year,first_day,last_day,venue,rule,evidence\n\
+             TNH2,2022,2022-01-10,2022-01-10,cbot,hrd_by_date,e1\n\
+             TYH27,2026,2026-11-20,2026-11-20,cbot,root_follow,e2\n\
+             TNZ3,2023,2023-01-10,2023-01-10,cbot,hrd_by_date,e3\n\
+             ESU31,2026,2026-06-17,2026-11-20,cme,root_follow,e5\n\
+             QQH7,2027,2027-01-01,2027-01-01,review,unresolved,e4\n",
+        )
+        .unwrap();
+        let journal = root.join("journal");
+        // Dry run changes nothing.
+        venues_migrate(&c, &plan, &journal, &[], false, &[]).unwrap();
+        assert!(del.join("review/2022/TNH2/20220110/kline.parquet").exists());
+        assert!(!del.join("cbot/2022/TNH2").exists());
+        venues_migrate(&c, &plan, &journal, &[], true, &[]).unwrap();
+        assert_eq!(
+            fs::read(del.join("cbot/2022/TNH2/20220110/trade.parquet")).unwrap(),
+            b"t"
+        );
+        assert_eq!(
+            fs::read(del.join("cbot/2022/TNH2/l2_source")).unwrap(),
+            b"raw"
+        );
+        assert!(!del.join("review/2022/TNH2").exists());
+        assert!(!del.join("review/2026/TYH27").exists());
+        // The conflicting RIC-year stays where it was.
+        assert_eq!(
+            fs::read(del.join("review/2023/TNZ3/20230110/trade.parquet")).unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            fs::read(del.join("cbot/2023/TNZ3/20230110/trade.parquet")).unwrap(),
+            b"b"
+        );
+        // Derived conflict: the decoded target copy stays, the review copy is backed up.
+        assert_eq!(
+            fs::read(del.join("cme/2026/ESU31/20260617/session_status.parquet")).unwrap(),
+            b"decoded"
+        );
+        assert_eq!(
+            fs::read(del.join("cme/2026/ESU31/20261120/status.parquet")).unwrap(),
+            b"s"
+        );
+        assert!(!del.join("review/2026/ESU31").exists());
+        assert_eq!(
+            fs::read(journal.join("review_backup/2026/ESU31/20260617/session_status.parquet"))
+                .unwrap(),
+            b"unknown"
+        );
+        let st = State::load(&c.state_file).unwrap();
+        assert_eq!(st.venues.get("TYH27").map(String::as_str), Some("cbot"));
+        assert!(st.catalog_dirty);
+        let ov = fs::read_to_string(
+            c.project
+                .join(lseg_delivery::native_kline::engine::VENUE_OVERRIDES),
+        )
+        .unwrap();
+        assert!(ov.contains("TNH2,2022,cbot,hrd_by_date,e1") && ov.contains("TYH27,2026,cbot"));
+        assert!(!ov.contains("TNZ3") && !ov.contains("QQH7"));
+        // A second run is a no-op.
+        venues_migrate(&c, &plan, &journal, &[], true, &[]).unwrap();
+        assert!(fs::read_to_string(journal.join("migrate.jsonl"))
+            .unwrap()
+            .contains("removed"));
     }
 
     #[test]
