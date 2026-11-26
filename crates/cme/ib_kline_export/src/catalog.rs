@@ -15,6 +15,10 @@ pub const REVIEW: &str = "review";
 #[derive(Default)]
 pub struct Catalog {
     pub by_ric: HashMap<String, BTreeSet<String>>,
+    /// Exchanges of the RIC's latest source year. One-digit RIC codes repeat every ten years and
+    /// can be filed under two exchanges in different years (docs/lseg/venue_review.md); IB minute
+    /// data is for the live contract, i.e. the latest one.
+    pub latest: HashMap<String, (i32, BTreeSet<String>)>,
     pub by_product: HashMap<String, BTreeSet<String>>,
     pub observed: Observed,
 }
@@ -52,7 +56,20 @@ impl Catalog {
                     .entry(ric.clone())
                     .or_default()
                     .insert(exchange.clone());
-                c.by_product.entry(product).or_default().insert(exchange);
+                c.by_product
+                    .entry(product)
+                    .or_default()
+                    .insert(exchange.clone());
+                let l = c
+                    .latest
+                    .entry(ric.clone())
+                    .or_insert((year as i32, BTreeSet::new()));
+                if (year as i32) > l.0 {
+                    *l = (year as i32, BTreeSet::new());
+                }
+                if (year as i32) == l.0 {
+                    l.1.insert(exchange.clone());
+                }
                 c.observed.entry(ric).or_default().insert(year as i32);
             }
             conn.close().await?;
@@ -78,6 +95,11 @@ impl Catalog {
             }
         };
         if let Some(set) = self.by_ric.get(&job.ric) {
+            if set.len() > 1 {
+                if let Some((_, latest)) = self.latest.get(&job.ric) {
+                    return unique(latest).map(|e| (e, Basis::Ric));
+                }
+            }
             return unique(set).map(|e| (e, Basis::Ric));
         }
         let aliases: Vec<String> = job
@@ -137,6 +159,32 @@ mod tests {
             extra,
         }
     }
+    #[test]
+    fn a_ric_in_two_exchanges_by_year_takes_the_latest_year() {
+        let mut c = Catalog::default();
+        c.by_ric.insert(
+            "CFI2H7".into(),
+            BTreeSet::from(["ice_europe".into(), "ice_endex".into()]),
+        );
+        c.latest.insert(
+            "CFI2H7".into(),
+            (2026, BTreeSet::from(["ice_endex".into()])),
+        );
+        assert_eq!(
+            c.exchange(&job("CFI2H7", &[], "CFI2")).unwrap(),
+            ("ice_endex".into(), Basis::Ric)
+        );
+        // Two exchanges in the latest year itself stay ambiguous.
+        c.latest.insert(
+            "CFI2H7".into(),
+            (
+                2026,
+                BTreeSet::from(["ice_europe".into(), "ice_endex".into()]),
+            ),
+        );
+        assert!(c.exchange(&job("CFI2H7", &[], "CFI2")).is_err());
+    }
+
     #[test]
     fn exchange_resolution_order() {
         let mut c = Catalog::default();

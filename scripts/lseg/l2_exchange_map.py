@@ -16,6 +16,11 @@ deliver it. A RIC in neither source has no line (the tool then reports it, never
 The plan is keyed by RIC only (its `year` field names the 2026 TAS jobs it was made for, not a
 property of the mapping), so it can resolve RICs of other years too, but it only lists RICs of
 those jobs; RICs that never had TAS data and are not in the plan stay unmapped.
+A RIC can sit in different exchange directories in different UTC years: one-digit RIC codes repeat every
+ten years (e.g. CFI2Z0: ice_europe for the 2020 contract, ice_endex for the 2030 one; see
+docs/lseg/venue_review.md). The map has one directory per RIC, so the directory of the RIC's latest UTC
+year is used (daily runs deliver recent days), or with --year the directory of that UTC year when the
+catalog has it. Two directories in the SAME UTC year is an error.
 Counts of the groups go to stderr.
 """
 import argparse
@@ -31,17 +36,24 @@ ap.add_argument("--plan")
 ap.add_argument("--conflicts")
 ap.add_argument("--ric-catalog")
 ap.add_argument("--third-out")
+ap.add_argument("--year", type=int, help="prefer the catalog directory of this UTC year")
 a = ap.parse_args()
 
 want = None if a.products == "ALL" else set(a.products.split(","))
 con = sqlite3.connect(CATALOG, uri=True)
-seen = {}
-for product, ric, directory in con.execute("select product, ric, directory from directories"):
+by_year = {}
+for product, ric, utc_year, directory in con.execute("select product, ric, utc_year, directory from directories"):
     if want is not None and product not in want:
         continue
     exchange = directory.split("/lseg/")[1].split("/")[0]
-    if seen.setdefault(ric, exchange) != exchange:
-        sys.exit(f"RIC {ric} is listed under two exchange directories in the catalog")
+    if by_year.setdefault(ric, {}).setdefault(utc_year, exchange) != exchange:
+        sys.exit(f"RIC {ric} is listed under two exchange directories in the catalog in {utc_year}")
+seen = {}
+multi_year = 0
+for ric, years in by_year.items():
+    if len(set(years.values())) > 1:
+        multi_year += 1
+    seen[ric] = years[a.year] if a.year in years else years[max(years)]
 
 plan = {}
 if a.plan:
@@ -91,6 +103,6 @@ if a.conflicts:
         for ric in sorted(conflict_lines):
             f.write(f"{ric}\t{conflict_lines[ric]}\n")
 print(
-    f"catalog RICs {len(seen)}, plan-only RICs {plan_only}, purchase-catalog-only RICs {len(third)}, conflicts {conflicts}, map lines {len(out)}",
+    f"catalog RICs {len(seen)} ({multi_year} in several directories by year, latest year used), plan-only RICs {plan_only}, purchase-catalog-only RICs {len(third)}, conflicts {conflicts}, map lines {len(out)}",
     file=sys.stderr,
 )
