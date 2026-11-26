@@ -571,11 +571,12 @@ pub async fn import_continuous_sessions(
     source_date: Option<&str>,
     content_type: &str,
 ) -> Result<SyncOutcome> {
-    let rows = sessions::parse_payload(content, content_type)?;
+    let mut rows = sessions::parse_payload(content, content_type)?;
     let filtered = query_has(source_url, &["markets", "products"]);
     if !filtered {
         sessions::validate_full_snapshot(&rows)?;
     }
+    sessions::apply_listing_aliases(&mut rows);
     let date = match non_empty(source_date) {
         Some(s) => parse_date(s, "source date")?,
         None => (Utc::now() + Duration::hours(8)).date_naive(),

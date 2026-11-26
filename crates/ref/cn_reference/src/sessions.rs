@@ -222,6 +222,65 @@ fn py_pairs(p: &[(&str, &str)]) -> String {
     }
 }
 
+/// New products that OpenCTP's session list does not carry yet: `(venue, new product, model product, why)`.
+/// Until OpenCTP lists the product its rows are copies of the model product's rows (same venue), marked in
+/// `raw_json` (`AliasOf`, `AliasReason`); the moment OpenCTP lists it, its own rows win (the next sync records
+/// them as a new version). An entry is added only with evidence that the hours are the same.
+const LISTING_ALIASES: [(&str, &str, &str, &str); 1] = [(
+    "GFEX",
+    "LI",
+    "LC",
+    "GFEX lithium hydroxide futures listed 2026-11-26; day-only hours like lithium carbonate (the same trading windows in the Tonglian 2026-11-26 data)",
+)];
+
+fn alias_raw(model_raw: &J, new_product: &str, model: &str, why: &str) -> J {
+    let mut map: BTreeMap<String, J> = match model_raw {
+        J::Str(text) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .map(|o| {
+                o.into_iter()
+                    .map(|(k, v)| (k, serde_json::from_value(v).unwrap_or(J::Null)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => BTreeMap::new(),
+    };
+    map.insert("ProductID".into(), J::Str(new_product.to_string()));
+    map.insert("AliasOf".into(), J::Str(model.to_string()));
+    map.insert("AliasReason".into(), J::Str(why.to_string()));
+    J::Str(J::Obj(map.into_iter().collect()).dumps(false))
+}
+
+/// Adds the alias rows for products OpenCTP does not list; returns what was added (`VENUE.PRODUCT`).
+pub fn apply_listing_aliases(records: &mut Vec<SessionRecord>) -> Vec<String> {
+    let mut applied = Vec::new();
+    for (venue, product, model, why) in LISTING_ALIASES {
+        let is =
+            |r: &SessionRecord, p: &str| r.venue == venue && r.product_id.eq_ignore_ascii_case(p);
+        if records.iter().any(|r| is(r, product)) {
+            continue;
+        }
+        let rows: Vec<SessionRecord> = records.iter().filter(|r| is(r, model)).cloned().collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let lower = rows[0].product_id.chars().all(|c| !c.is_uppercase());
+        let id = if lower {
+            product.to_lowercase()
+        } else {
+            product.to_string()
+        };
+        for mut row in rows {
+            row.raw_json = alias_raw(&row.raw_json, &id, model, why);
+            row.product_id = id.clone();
+            records.push(row);
+        }
+        applied.push(format!("{venue}.{product}"));
+    }
+    applied
+}
+
 /// Python truthiness then `str()`: empty/zero/null -> "".
 fn truthy_str(v: &J) -> String {
     match v {
@@ -309,5 +368,33 @@ mod tests {
         let dup = format!("{},{}", row("09:30:00"), row("09:30:00"));
         let e = parse_payload(&payload(&dup), "").unwrap_err().to_string();
         assert!(e.contains("duplicate OpenCTP session row"), "{e}");
+    }
+
+    #[test]
+    fn listing_alias_copies_model_only_when_product_missing() {
+        let row = |p: &str, b: &str, e: &str, n: u8| {
+            format!(
+                r#"{{"ExchangeID":"GFEX","ProductID":"{p}","SegmentNo":{n},"TimeBegin":"{b}","TimeEnd":"{e}","ProductClass":"1","Area":"cn"}}"#
+            )
+        };
+        let rows = format!(
+            "{},{}",
+            row("lc", "09:00:00", "10:15:00", 1),
+            row("lc", "10:30:00", "11:30:00", 2)
+        );
+        let mut r = parse_payload(&payload(&rows), "").unwrap();
+        assert_eq!(apply_listing_aliases(&mut r), vec!["GFEX.LI".to_string()]);
+        let li: Vec<_> = r.iter().filter(|x| x.product_id == "li").collect();
+        assert_eq!(li.len(), 2);
+        assert_eq!(li[1].time_begin, "10:30:00");
+        let J::Str(raw) = &li[0].raw_json else {
+            panic!()
+        };
+        assert!(
+            raw.contains(r#""AliasOf":"LC""#) && raw.contains(r#""ProductID":"li""#),
+            "{raw}"
+        );
+        // already listed by OpenCTP: nothing added
+        assert!(apply_listing_aliases(&mut r).is_empty());
     }
 }

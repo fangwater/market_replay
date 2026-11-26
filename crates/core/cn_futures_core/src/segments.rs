@@ -89,7 +89,7 @@ pub fn exchange_of(product: &str) -> Option<&'static str> {
         "IC" | "IF" | "IH" | "IM" | "T" | "TF" | "TL" | "TS" => "ccfx",
         "A" | "B" | "BB" | "BZ" | "C" | "CS" | "EB" | "EG" | "FB" | "I" | "J" | "JD" | "JM"
         | "L" | "LG" | "LH" | "M" | "P" | "PG" | "PP" | "RR" | "V" | "Y" => "xdce",
-        "LC" | "PD" | "PS" | "PT" | "SI" => "xgfe",
+        "LC" | "LI" | "PD" | "PS" | "PT" | "SI" => "xgfe",
         "AD" | "AG" | "AL" | "AO" | "AU" | "BR" | "BU" | "CU" | "FU" | "HC" | "NI" | "OP"
         | "PB" | "RB" | "RU" | "SN" | "SP" | "SS" | "WR" | "ZN" => "xsge",
         "BC" | "EC" | "LU" | "NR" | "SC" => "xsie",
