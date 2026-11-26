@@ -1071,10 +1071,12 @@ fn advance(
                 let rics = stage_audit(ctx, st, product, &dir, &mut pr)?;
                 let approved = ctx.approved()?.clone();
                 let mut map = venue::assign(&rics, &st.venues, &approved, &ctx.cfg.hrd)?;
-                follow_roots(ctx.cfg, &pr, &mut map, &st.venues, &approved)?;
+                follow_roots(ctx.cfg, &pr, &mut map)?;
                 save_json(&dir.join("exchange_map.json"), &map)?;
                 for (r, v) in &map {
-                    if !approved.contains_key(r) {
+                    // A venue that differs from the approved map (e.g. root_follow over an
+                    // approved `review`) is pinned in the state, which wins from now on.
+                    if approved.get(r) != Some(v) {
                         st.venues.insert(r.clone(), v.clone());
                     }
                     st.owners.insert(r.clone(), product.to_string());
@@ -1114,18 +1116,13 @@ fn advance(
     }
 }
 
-/// Rule 2 of venue_fix.rs for RICs never delivered before: an unresolved (`review`) new RIC
-/// takes the single exchange directory of its root within three years. RICs already
-/// delivered under `review` keep it (a RIC never changes directory here); if they are now
-/// resolvable they are listed in `meta/problems/lseg_daily/venues_resolvable.json` for
-/// `venues-migrate`, which moves their files first.
-fn follow_roots(
-    cfg: &Config,
-    pr: &ProductRun,
-    map: &mut BTreeMap<String, String>,
-    known: &BTreeMap<String, String>,
-    approved: &HashMap<String, String>,
-) -> Result<()> {
+/// Rule 2 of venue_fix.rs for RICs with no file under `<delivery>/review/`: an unresolved
+/// (`review`) RIC takes the single exchange directory of its root within three years.
+/// RICs that already have files under `review/` keep it (a RIC never changes directory
+/// here); if they are now resolvable they are listed in
+/// `meta/problems/lseg_daily/venues_resolvable.json` for `venues-migrate`, which moves
+/// their files first.
+fn follow_roots(cfg: &Config, pr: &ProductRun, map: &mut BTreeMap<String, String>) -> Result<()> {
     if !map.values().any(|v| v == "review") {
         return Ok(());
     }
@@ -1147,7 +1144,10 @@ fn follow_roots(
         if venue == "review" {
             continue;
         }
-        if known.contains_key(ric) || approved.contains_key(ric) {
+        // Already delivered under review/: moving it is venues-migrate's job (files first).
+        // Being listed as `review` in the driver state or the approved map without any
+        // delivered file does not count (721 such approved RICs on 2026-11-26).
+        if venue_fix::under_review(&cfg.delivery_root, ric) {
             resolvable
                 .push(json!({"ric": ric, "venue": venue, "rule": rule, "evidence": evidence}));
         } else {

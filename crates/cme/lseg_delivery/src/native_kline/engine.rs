@@ -977,7 +977,8 @@ impl Metadata {
     }
     /// Plan jobs written by lseg-daily carry their own coverage days and the
     /// exchange map used for their trade/quote/status files. RICs already in
-    /// the approved 2026 map keep that venue; the map only adds new RICs.
+    /// the approved 2026 map keep that venue (unless it is `review`); the map
+    /// only adds new RICs.
     fn load_plan_overlays(&mut self, cfg: &Config, approved: &Value) -> Result<()> {
         let plan = io::read_json(&cfg.plan)?;
         let mut maps = BTreeSet::new();
@@ -1003,7 +1004,14 @@ impl Metadata {
             let map = io::read_json(&path)?;
             for (ric, v) in map.as_object().context("exchange map object")? {
                 let venue = v.as_str().context("exchange map venue")?.to_lowercase();
-                if year == 2026 && approved.get(ric).is_some() {
+                // An approved `review` is unresolved, not a venue: a batch map that
+                // resolved the RIC (lseg-daily root_follow) wins over it.
+                if year == 2026
+                    && approved
+                        .get(ric)
+                        .and_then(Value::as_str)
+                        .is_some_and(|a| a != "review")
+                {
                     continue;
                 }
                 let entry = self.venues.entry((year, ric.clone())).or_default();

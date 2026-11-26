@@ -398,6 +398,14 @@ mod tests {
     }
 }
 
+/// Whether the RIC has a directory under `<delivery>/review/<any UTC year>/`.
+pub fn under_review(delivery: &Path, ric: &str) -> bool {
+    let comp = lseg_delivery::tasdb::component(ric);
+    std::fs::read_dir(delivery.join("review"))
+        .map(|rd| rd.flatten().any(|y| y.path().join(&comp).is_dir()))
+        .unwrap_or(false)
+}
+
 /// Processes that write the delivery disk; `venues-migrate --apply` refuses to run while any
 /// of them is alive.
 pub const DELIVERY_WRITERS: &[&str] = &[
@@ -519,6 +527,15 @@ pub fn file_step(src: &Path, dst: &Path) -> Result<FileStep> {
 #[cfg(test)]
 mod migrate_tests {
     use super::*;
+
+    #[test]
+    fn under_review_looks_at_every_year() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(!under_review(t.path(), "TYH27"));
+        std::fs::create_dir_all(t.path().join("review/2026/TYH27")).unwrap();
+        assert!(under_review(t.path(), "TYH27"));
+        assert!(!under_review(t.path(), "TYM27"));
+    }
 
     #[test]
     fn file_steps() {
