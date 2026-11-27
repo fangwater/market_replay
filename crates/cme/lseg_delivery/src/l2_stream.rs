@@ -839,7 +839,14 @@ fn finalize_marker(rt: &Rt, ui: usize, st: &mut UnitState) -> Result<Value> {
 fn try_finalize(rt: &Rt, ui: usize) -> Result<()> {
     let u = &rt.units[ui];
     let mut st = u.state.lock().expect("unit lock");
-    if st.finished || !st.producer_done || st.jobs_done != st.jobs_created {
+    // A consumer counts its job done and only then (outside the lock) finishes the
+    // RIC, so "every job done" alone can be seen while a RIC is still unfinished:
+    // the marker would miss it. Wait for every RIC too (that consumer calls us again).
+    if st.finished
+        || !st.producer_done
+        || st.jobs_done != st.jobs_created
+        || (st.failed.is_none() && st.rics.iter().any(|a| !a.finished))
+    {
         return Ok(());
     }
     st.finished = true;

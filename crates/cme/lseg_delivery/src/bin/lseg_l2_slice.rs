@@ -238,6 +238,22 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Read-only: in every day database, the RICs that have update keys but are in no
+    /// product marker (a stream-wash race before 2026-11-27 could finalize a unit
+    /// while one RIC was still being finished; extraction and delivery only read the
+    /// markers' RICs). Also the reverse (in a marker, no keys). One JSON line per day.
+    AuditMarkers {
+        #[arg(long, default_value = DEFAULT_DB_ROOT)]
+        db_root: PathBuf,
+        /// First UTC day `YYYY-MM-DD`.
+        #[arg(long, default_value = "2026-06-01")]
+        from: String,
+        /// Last UTC day `YYYY-MM-DD`.
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value_t = 256)]
+        cache_mb: usize,
+    },
     /// Throughput test of the real publish routine (`lseg_delivery::publish`): the
     /// staged L2 files below `--stage-root` are published into a THROWAWAY directory
     /// (same share, outside the delivery tree), disjoint subsets per run.
@@ -592,6 +608,43 @@ fn bench_parse(input: &Path, rows: usize, skip: usize) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
+        Command::AuditMarkers {
+            db_root,
+            from,
+            to,
+            cache_mb,
+        } => {
+            let cache = lseg_delivery::tasdb::SharedCache::new(lseg_delivery::tasdb::Tuning::new(
+                cache_mb, 64,
+            ));
+            let (mut days, mut missing, mut orphan) = (0usize, 0usize, 0usize);
+            for dn in day_number(&from)?..=day_number(&to)? {
+                let day = l2_deliver::day_string(dn);
+                let dir = l2_db::day_dir(&db_root, &day);
+                if !dir.join("CURRENT").exists() {
+                    continue;
+                }
+                let db = l2_db::open_read(&dir, &cache)?;
+                let listed: std::collections::BTreeSet<String> =
+                    l2_deliver::day_marker_rics(&db)?.into_iter().collect();
+                let keyed: std::collections::BTreeSet<String> =
+                    l2_deliver::scan_ric_days(&db)?.into_keys().collect();
+                let not_listed: Vec<&String> = keyed.difference(&listed).collect();
+                let no_keys: Vec<&String> = listed.difference(&keyed).collect();
+                days += 1;
+                missing += not_listed.len();
+                orphan += no_keys.len();
+                println!(
+                    "{}",
+                    json!({"day": day, "rics_with_keys": keyed.len(), "rics_in_markers": listed.len(),
+                           "not_in_marker": not_listed, "in_marker_without_keys": no_keys})
+                );
+            }
+            eprintln!(
+                "audit-markers: {days} day databases, {missing} RIC-days with keys but in no marker, {orphan} listed without keys"
+            );
+            Ok(())
+        }
         Command::PublishBench {
             stage_root,
             target_root,
