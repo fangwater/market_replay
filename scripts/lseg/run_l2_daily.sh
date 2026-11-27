@@ -62,7 +62,7 @@ python3 -I "$REPO/scripts/lseg/l2_exchange_map.py" ALL --plan "$ART/tas_status_2
 nice -n 10 "$BIN/lseg_l2_slice" deliver --db-root "$DBROOT" --exchange-map "$RUN/exchange_map.tsv" \
   --exchange-conflicts "$RUN/exchange_conflicts.tsv" --from "$START" --to "$END" --extract-workers 2 --publish-threads 8 \
   --batch-files 3000 --staging "/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_deliver_stage/daily" \
-  --progress "$RUN/deliver_progress.json" --ric-years-out "$RUN/ric_years.tsv" --no-gate \
+  --progress "$RUN/deliver_progress.json" --ric-years-out "$RUN/ric_years.tsv" --allow-mixed --no-gate \
   > "$RUN/deliver.json" 2> "$RUN/deliver.err" || fail "交付失败：$(tail -n 2 "$RUN/deliver.err" | cut -c1-200)"
 PROBLEMS=$(python3 -I -c "import json,sys;t=open('$RUN/deliver.json').read();print(json.loads(t[t.index('{'):]).get('problems',0))" 2>/dev/null || echo "?")
 log "deliver: problems=$PROBLEMS"

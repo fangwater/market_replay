@@ -515,12 +515,37 @@ fn guard_and_mark_sources(
         let marker = dir.join(crate::catalog::L2_SOURCE_FILE);
         let has_marker = marker.is_file();
         if !cfg.source_raw {
+            if !has_marker {
+                continue;
+            }
             ensure!(
-                !has_marker,
-                "{} holds Raw LL2 (marker {}): not delivering Normalized L2 into it",
+                cfg.allow_mixed,
+                "{} holds Raw LL2 (marker {}): not delivering Normalized L2 into it (--allow-mixed makes it a mixed RIC-year)",
                 dir.display(),
                 marker.display()
             );
+            let old = fs::read_to_string(&marker)?;
+            if old.starts_with("raw") {
+                // The days there so far are Raw: list them, the days delivered now are Normalized.
+                let mut days: BTreeSet<String> = BTreeSet::new();
+                for day in subdirs(dir)? {
+                    if day.join(file_name).is_file() {
+                        days.insert(day.file_name().unwrap().to_string_lossy().into_owned());
+                    }
+                }
+                let mut text = String::from("mixed\n");
+                for d in &days {
+                    text.push_str(&format!("raw_day {d}\n"));
+                }
+                let tmp = dir.join(format!(
+                    ".{}.{}",
+                    crate::catalog::L2_SOURCE_FILE,
+                    std::process::id()
+                ));
+                fs::write(&tmp, text.as_bytes())?;
+                fs::rename(&tmp, &marker)?; // only the marker is replaced
+                marked += 1;
+            }
             continue;
         }
         let old = if has_marker {
@@ -1114,6 +1139,28 @@ mod tests {
             fs::read_to_string(&es_marker).unwrap(),
             "mixed\nraw_day 20240105\n"
         );
+        // Normalized delivery into a Raw directory: refused, or with --allow-mixed the Raw days are listed
+        assert!(guard_and_mark_sources(&mk(false, false), &only_cl, "l2_250ms.parquet").is_err());
+        fs::create_dir_all(t.path().join("root/nymex/2024/CLF24/20240104")).unwrap();
+        fs::write(
+            t.path()
+                .join("root/nymex/2024/CLF24/20240104/l2_250ms.parquet"),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(
+            guard_and_mark_sources(&mk(false, true), &only_cl, "l2_250ms.parquet").unwrap(),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "mixed\nraw_day 20240104\n"
+        );
+        assert_eq!(
+            guard_and_mark_sources(&mk(false, true), &only_cl, "l2_250ms.parquet").unwrap(),
+            0
+        );
+        fs::write(&marker, "raw\n").unwrap();
         // a pure Raw directory is left alone by a later run
         assert_eq!(
             guard_and_mark_sources(&mk(true, true), &only_cl, "l2_250ms.parquet").unwrap(),
