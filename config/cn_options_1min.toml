@@ -1,0 +1,16 @@
+# Domestic commodity options 1-minute baseline cleaner (cn-options-1min).
+# Output layout mirrors futures baseline_data_1min:
+#   <out_root>/{xdce,xgfe,xsge,xsie,xzce}/{PRODUCT}/{YYYYMMDD}.parquet
+# Exact 9 columns:
+#   contract_id, ts, open, high, low, close, volume, amount, open_interest
+out_root = "/mnt/hdd-raid5-72t/liang_torch/cn_futures_option_data/baseline_data_1min"
+hist_base_url = "http://10.61.20.12/public/data/massive/future-data/tonglian-opt-etf-2009-2025/future_opt_pricemin/"
+daily_base_url = "http://10.61.20.11/users/el01/public/tonglian/data/"
+# TradDay <= cutoff_day uses historical zip; TradDay > cutoff_day uses daily MDL CSV.
+cutoff_day = "2026-07-31"
+state_file = "/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_options_1min_state.json"
+ready_after = "16:00"
+host_tag = "market_replay@30.38"
+dingtalk_webhook_env = "CN_FUTURES_DB_DINGTALK_WEBHOOK_URL"
+dingtalk_secret_env = "CN_FUTURES_DB_DINGTALK_SECRET"
+default_workers = 4

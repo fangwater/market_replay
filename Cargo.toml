@@ -13,6 +13,7 @@ members = [
     "crates/cn/cn_futures_trim",
     "crates/cn/cn_futures_roll",
     "crates/cn/cn_hfq_bars",
+    "crates/cn/cn_options_1min",
     "crates/core/cme_roll_metadata",
     "crates/cme/cme_tas_replay",
     "crates/cme/cme_roll",

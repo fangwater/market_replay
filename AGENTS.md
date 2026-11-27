@@ -45,7 +45,11 @@
 | 历史日包 | `http://10.61.20.12/public/data/massive/future-data/tonglian-opt-etf-2009-2025/future_opt_pricemin/future_opt_priceminYYYYMM/future_opt_priceminYYYYMMDD.zip` | `option-tonglian-min-2009-2025` | `2017-03-31` 至 `2026-08-03`（`202608` 仅含 `20260803` 一天） | **不更新**，已冻结 |
 | 每日 MDL 落盘 | `http://10.61.20.11/users/el01/public/tonglian/data/YYYYMMDD/mdl_13_<id>_0.csv` | `tonglian-idc-pj-deploy` | `2026-07-01` 起（实测已到 `2026-11-26`） | **每日更新** |
 
-- **重叠窗口与切层建议：** 两层在 `2026-07-01`–`2026-08-03` 重叠，实测 `2026-08-03` `AP610C8000` `09:00` 的 OHLC、成交量、成交额、持仓量完全一致。具体切层日可在清洗设计时按全量重叠比对后确定（例如 `2026-07-31` 或 `2026-08-03`）。
+- **重叠窗口与切层（2026-11-27 已落地）：** 硬切层 `cutoff_day = 2026-07-31`（`<= 2026-07-31` 仅读历史日包，`>= 2026-08-01` 仅读每日 MDL）。重叠日 `2026-08-03` 全 5 所对账显示 `xdce`/`xgfe`/`xsge`/`xsie` 共 671 万行键 100% 一致且 OHLCVA 0 差异，`xzce` 历史日包在 `15:00` 存在负成交额异常而每日 MDL 正常。
+- **清洗二进制与产物（`crates/cn/cn_options_1min`，bin `cn-options-1min`，配置 `config/cn_options_1min.toml`，文档 [docs/cn_options_1min.md](docs/cn_options_1min.md)）：**
+  - 输出目录：`/mnt/hdd-raid5-72t/liang_torch/cn_futures_option_data/baseline_data_1min/{exchange}/{PRODUCT}/{TradDay:%Y%m%d}.parquet`（ZSTD、单 Row Group、按 `(contract_id, ts)` 严格升序去重保留最后一条）。
+  - 严格 **9 列**（零衍生列）：`contract_id, ts, open, high, low, close, volume, amount, open_interest`；`ts` 为通联右端点 `- 60s`（对齐期货 `baseline_data_1min` 左端点）；剔除 `09:00`/`21:00` 集合竞价分钟，保留连续段内 `volume=0` 行；统一 `XSIE` 历史日包品种前缀为小写以对齐每日 MDL。
+  - 状态文件：`/mnt/nvme-raid0-28t/fanghaizhou/cn_futures_data/cn_options_1min_state.json`。2026-11-27 已完成全量回补：`2017-03-31`–`2026-11-26` 共 2,345 个交易日、69 品种、61,461 文件、79.17 亿行、7.1 GB。待提交并通过 `scripts/deploy-release.sh` 部署后，再将 `cn-options-1min-daily` 写入 `config/market_replay_server.toml`。
 - **历史日包格式：** 每个 `.zip` 内含单个 UTF-8 TSV `future_opt_priceminYYYYMMDD.txt`，按 `CLEARINGDAY`（交易日）打包，列为 `CLEARINGDAY, TDATE, CONTRACTID, MARKET, Offset, bartime, closeprice, openprice, highprice, lowprice, volume, value, vwap, OPENINTS`（注意 `closeprice` 在 `openprice` 前面）。
 - **每日 MDL 文件与交易所对应（仅商品期权 1 分钟）：**
   - `mdl_13_40_0.csv`（郑商所 `XZCE`）、`mdl_13_42_0.csv`（大商所 `XDCE`）、`mdl_13_61_0.csv`（上期所 `XSGE`）：纯 1 分钟线，13 列（无 `Unit` 列）；对应的 `_41`、`_43`、`_62` 是 3/5/15 分钟等多周期文件，1 分钟清洗不读。
@@ -113,6 +117,7 @@
 | `crates/cn/cn_futures_l2` | 从 mkt_signal `685896ce` 迁入：通联 → RocksDB 回放，以及 1s / 1min / ylabel / hfq 导出 |
 | `crates/cn/cn_futures_trim` | 从 mkt_signal `eb58eaf4` 迁入：按 reference 服务的交易时段快照裁剪 parquet |
 | `crates/cn/cn_daily` | 每日任务 `cn-daily`：回放、导出、裁剪、分桶、审计、钉钉通知，见 [docs/cn_daily_and_kline.md](docs/cn_daily_and_kline.md) |
+| `crates/cn/cn_options_1min` | 国内商品期权 1 分钟清洗 `cn-options-1min`：历史日包 + 每日 MDL -> 严格 9 列 `baseline_data_1min` Parquet，见 [docs/cn_options_1min.md](docs/cn_options_1min.md) |
 | `crates/cn/cn_kline_server` + `crates/proto/cn_market_proto` | gRPC `cn_market.v1` 分钟线服务（读 parquet，不做 Binance 兼容） |
 | `crates/common/dingtalk` | 钉钉机器人客户端（凭据只从环境变量读取） |
 | `crates/core/cme_roll_metadata` | 共享：CME 换月元数据（mkt_signal 根 crate 的 `cme_features_1min_hfq` 也在用） |

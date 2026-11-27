@@ -975,6 +975,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cn_options_1min"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "chrono-tz 0.10.4",
+ "clap",
+ "dingtalk",
+ "parquet",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "zip",
+]
+
+[[package]]
 name = "cn_reference"
 version = "0.1.0"
 dependencies = [
