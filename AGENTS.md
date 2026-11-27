@@ -84,6 +84,8 @@
 
 `baseline_data_{5min,15min,1h,1day}_hfq` 由 Rust 二进制 `cn-hfq-bars`（`crates/cn/cn_hfq_bars`）每日增量维护，服务器任务 `cn-hfq-bars-daily`（上海 18:00，排在 `cn-hfq-daily` 之后）；因子、`ylabel_*_hfq`、`backtest_1s` 按用户决定不再更新，停在 2026-08-26。切 bar 规则不变（连续段首起每 N 分钟，休市或缺分钟收成短 bar，周期不固定），换月导致旧 1min 文件变化时该品种整体重建。说明见 [docs/cn_hfq_bars.md](docs/cn_hfq_bars.md)。实盘 `cta-cn-futures`（mkt_signal）的 1h 切法与此相同，在每个连续段的 10:15、11:30、14:30、15:00 等 bar 结束点更新仓位。
 
+- **合约级非 HFQ 2018–2020 补充（2026-11-27）：** 按用户确认，不补只有 L1 的 `xsge`/`xsie`（保持从 L2 首日 `2019-08-09` 起），不更新主力与 HFQ。从 `/mnt/nfs/30.3_tonglian_comm_l2` 回放 `ccfx`/`xdce`/`xzce` 2018 全年（独立临时 RocksDB，不写生产库）并按 `2026-11-26` 时段快照裁剪、用 `fill_1min_size_buckets --same-month-all-contracts`（同自然月全合约 P50/P90 旧规则）补齐 12 个大小单列，写入 `baseline_data_1min`（7,513 文件、16,471,110 行）。另新增合约级聚合二进制 `cn-baseline-bars`（`crates/cn/cn_hfq_bars/src/bin/cn_baseline_bars.rs`，复用 `cn_hfq_bars` 同套切 bar 与 NumPy 求和口径，允许远月空盘口），生成 `2018–2020` 的非 HFQ 合约级 `baseline_data_{5min,15min,1h,1day}`（每套 31,376 文件，与 `baseline_data_1min` 56 列 schema 与量额守恒逐一核验通过）。
+
 ## 已定范围（2026-11-14，用户确认）
 
 - 回放只支持 msg 层（2023-12-07 起）。**不做** `comm_l2` 历史日包支持。

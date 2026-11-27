@@ -22,7 +22,7 @@ use chrono::{Datelike, Duration, NaiveDate, TimeZone};
 use chrono_tz::Asia::Shanghai;
 use clap::Parser;
 use cn_futures_core::segments::trad_day_from_ts;
-use cn_futures_l2::baseline_1min::{minute_left_sec, SizeBuckets};
+use cn_futures_l2::baseline_1min::{linear_percentile, minute_left_sec, SizeBuckets};
 use cn_futures_l2::codec::{decode_key, decode_trade, encode_key, KIND_TRADE};
 use cn_futures_l2::db::{
     open_rocksdb_read_only, L2Db, DEFAULT_ROCKSDB_DIR, FORBIDDEN_ROCKSDB_MARK,
@@ -71,6 +71,10 @@ struct Args {
     /// With --export-month: recompute even when a valid file exists.
     #[arg(long)]
     force: bool,
+    /// Legacy pre-2024 rule: P50/P90 per Shanghai calendar month over ALL contracts of the product
+    /// (does not read or write dominant_by_day thresholds or roll tables).
+    #[arg(long)]
+    same_month_all_contracts: bool,
 }
 
 fn day_of(path: &Path) -> Option<NaiveDate> {
@@ -215,6 +219,111 @@ fn scan_range(
     Ok((buckets, missing))
 }
 
+/// Legacy pre-2024 rule: compute linear P50/P90 over ALL contracts of `product` within each
+/// Shanghai calendar month touched by `range`, then bucket every trade in `range` by its own
+/// Shanghai calendar month.
+fn scan_range_same_month_all_contracts(
+    db: &L2Db,
+    all_cfs: &[(i32, String)],
+    range: (NaiveDate, NaiveDate),
+) -> Result<(
+    HashMap<(String, i64), SizeBuckets>,
+    HashMap<NaiveDate, BTreeSet<u32>>,
+)> {
+    let first_month = range.0.year() as u32 * 100 + range.0.month();
+    let last_month = range.1.year() as u32 * 100 + range.1.month();
+    let (m_start, _) = thresholds::month_days(first_month)?;
+    let (_, m_end) = thresholds::month_days(last_month)?;
+    let cf_names = cfs_for(all_cfs, m_start, m_end);
+    let lo_month = midnight_ns(m_start);
+    let hi_month = midnight_ns(m_end + Duration::days(1));
+
+    // Pass 1: gather all positive finite trade amounts per Shanghai calendar month.
+    let mut by_month: HashMap<u32, Vec<f64>> = HashMap::new();
+    for cf_name in &cf_names {
+        let cf = db
+            .cf_handle(cf_name)
+            .ok_or_else(|| anyhow::anyhow!("missing cf {cf_name}"))?;
+        let start = encode_key(KIND_TRADE, "", 0, 0)?;
+        for item in db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward)) {
+            let (key, value) = item.context("iterate trade (pass 1)")?;
+            let (kind, _, ts_ns, _) = decode_key(&key)?;
+            if kind != KIND_TRADE {
+                break;
+            }
+            if ts_ns < lo_month || ts_ns >= hi_month {
+                continue;
+            }
+            let rec = decode_trade(&value)?;
+            let amount = rec.turnover.unwrap_or(rec.price * rec.volume);
+            if !(amount.is_finite() && amount > 0.0) {
+                continue;
+            }
+            let m = month_of_ns(ts_ns);
+            if m >= first_month && m <= last_month {
+                by_month.entry(m).or_default().push(amount);
+            }
+        }
+    }
+
+    let mut month_thr: HashMap<u32, (f64, f64)> = HashMap::new();
+    for (m, mut vals) in by_month {
+        if vals.is_empty() {
+            continue;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if let (Some(p50), Some(p90)) = (
+            linear_percentile(&vals, 0.50),
+            linear_percentile(&vals, 0.90),
+        ) {
+            if p50.is_finite() && p90.is_finite() && p50 > 0.0 && p90 >= p50 {
+                month_thr.insert(m, (p50, p90));
+            }
+        }
+    }
+
+    // Pass 2: bucket trades belonging to TradDays in `range`.
+    let lo_range = midnight_ns(range.0 - Duration::days(4));
+    let hi_range = midnight_ns(range.1 + Duration::days(1));
+    let mut buckets: HashMap<(String, i64), SizeBuckets> = HashMap::new();
+    let mut missing: HashMap<NaiveDate, BTreeSet<u32>> = HashMap::new();
+    for cf_name in &cf_names {
+        let cf = db
+            .cf_handle(cf_name)
+            .ok_or_else(|| anyhow::anyhow!("missing cf {cf_name}"))?;
+        let start = encode_key(KIND_TRADE, "", 0, 0)?;
+        for item in db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward)) {
+            let (key, value) = item.context("iterate trade (pass 2)")?;
+            let (kind, id, ts_ns, _) = decode_key(&key)?;
+            if kind != KIND_TRADE {
+                break;
+            }
+            if ts_ns < lo_range || ts_ns >= hi_range {
+                continue;
+            }
+            let day = trad_day_from_ts((ts_ns / 1_000_000_000) as i64);
+            if day < range.0 || day > range.1 {
+                continue;
+            }
+            let rec = decode_trade(&value)?;
+            let amount = rec.turnover.unwrap_or(rec.price * rec.volume);
+            if !(amount.is_finite() && amount > 0.0) {
+                continue;
+            }
+            let m = month_of_ns(ts_ns);
+            let Some(&(p50, p90)) = month_thr.get(&m) else {
+                missing.entry(day).or_default().insert(m);
+                continue;
+            };
+            buckets
+                .entry((id, minute_left_sec(ts_ns)))
+                .or_default()
+                .add(amount, rec.aggressor, p50, p90);
+        }
+    }
+    Ok((buckets, missing))
+}
+
 fn overlay_day(path: &Path, buckets: &HashMap<(String, i64), SizeBuckets>) -> Result<u64> {
     let mut rows = read_day_parquet(path)?;
     if rows.is_empty() {
@@ -348,6 +457,7 @@ fn main() -> Result<()> {
     let files = Arc::new(AtomicU64::new(0));
     let hits = Arc::new(AtomicU64::new(0));
     let skipped = Arc::new(AtomicU64::new(0));
+    let same_month = args.same_month_all_contracts;
     let mut handles = Vec::new();
     for _ in 0..args.workers {
         let rx = rx.clone();
@@ -366,14 +476,18 @@ fn main() -> Result<()> {
                 if days.is_empty() {
                     continue;
                 }
-                let (buckets, missing) = scan_range(
-                    &db,
-                    &product,
-                    &all_cfs,
-                    range,
-                    &threshold_dir,
-                    &dominant_dir,
-                )?;
+                let (buckets, missing) = if same_month {
+                    scan_range_same_month_all_contracts(&db, &all_cfs, range)?
+                } else {
+                    scan_range(
+                        &db,
+                        &product,
+                        &all_cfs,
+                        range,
+                        &threshold_dir,
+                        &dominant_dir,
+                    )?
+                };
                 let mut product_hits = 0u64;
                 for (day, path) in &days {
                     if let Some(months) = missing.get(day) {

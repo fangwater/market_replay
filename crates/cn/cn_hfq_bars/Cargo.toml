@@ -8,6 +8,10 @@ description = "Daily incremental CN HFQ coarse bars (5min / 15min / 1h / 1day) f
 name = "cn-hfq-bars"
 path = "src/main.rs"
 
+[[bin]]
+name = "cn-baseline-bars"
+path = "src/bin/cn_baseline_bars.rs"
+
 [dependencies]
 anyhow = "1.0"
 arrow-array = "=54.3.1"
