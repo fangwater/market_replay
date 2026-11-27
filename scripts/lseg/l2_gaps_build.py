@@ -22,6 +22,7 @@ tas_days   = day directories of the RIC-year (a day directory exists only when t
 kind       none    = no L2 file for the RIC-year; partial = l2_days < 0.8 * tas_days
 reason     not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict
            | in_package_not_delivered (listed with data, covered, but nothing delivered: a defect to look at)
+           | alias_unverified | alias_partial (COMEX metals: L2 exists under the 1-prefixed Globex RIC, --aliases)
 Publishing: a new file is hard-linked into place (never overwritten); --replace swaps an existing l2_gaps.sqlite
 by an atomic rename, so a reader sees either the old or the new complete file.
 """
@@ -47,6 +48,8 @@ ap.add_argument("--ric-catalog", default="/mnt/nvme-raid0-28t/fanghaizhou/lseg_d
                 help="purchase catalog (routed_product, source_layers per RIC): tells whether an L2 layer was ever ordered")
 ap.add_argument("--raw-reports", default="/mnt/nvme-raid0-28t/fanghaizhou/lseg_data/runtime/l2_raw",
                 help="directory with report_<year>.csv.gz of the Raw LL2 packages (used to say whether Raw has the RIC)")
+ap.add_argument("--aliases", help="plan.csv of lseg_l2_alias (COMEX 1-prefixed Globex RICs, see docs/lseg/l2_alias.md)")
+ap.add_argument("--alias-delivered", help="delivered.tsv journal of lseg_l2_alias deliver (alias, standard, year, day, path)")
 ap.add_argument("--no-gate", action="store_true")
 ap.add_argument("--publish")
 ap.add_argument("--replace", action="store_true")
@@ -145,6 +148,31 @@ if os.path.exists(a.ric_catalog):
             prod_layers[r["routed_product"]] |= ls
 HAS_L2 = {"normalisedLL2", "rawLL2"}
 
+# COMEX metals: L2 before 2024-07 is published under the Globex RIC with a leading 1 (1GCZ2 for GCZ2);
+# lseg_l2_alias checks it against the standard RIC's TAS quotes and delivers the verified ones under the standard RIC
+aliases, alias_delivered = {}, collections.Counter()
+if a.aliases:
+    with open(a.aliases) as f:
+        for r in csv.DictReader(f):
+            aliases[(r["standard"], int(r["utc_year"]))] = r
+if a.alias_delivered:
+    with open(a.alias_delivered) as f:
+        for line in f:
+            al, st, y = line.rstrip("\n").split("\t")[:3]
+            alias_delivered[(st, int(y))] += 1
+ALIAS_RULE = ("a 1-prefixed GC/SI/HG/ALI RIC (one- or two-digit year) is the standard RIC when, on up to 3 sample days, the median share of L2 grid "
+              "points whose L1 bid/ask equals a standard-RIC TAS quote within 1 s is >= 0.5 and every negative control (another month of "
+              "the same root) is <= 0.05; only days the standard RIC has no L2 file are delivered (docs/lseg/l2_alias.md)")
+
+
+def alias_reason(ric, y, reason, ev):
+    al = aliases.get((ric, y))
+    if al is None:
+        return reason, ev
+    ev2 = "%s; alias %s verdict %s, sample days %s, alias rates %s, negative %s %s" % (
+        ev, al["alias"], al["verdict"], al["sample_days"] or "-", al["alias_rates"] or "-", al["negative_rics"] or "-", al["negative_rates"] or "-")
+    return ("alias_partial" if al["verdict"] == "pass" else "alias_unverified"), ev2
+
 
 def cause_of(ric, prod, reason, ev, year=None):
     """The reason in plain words (what is missing and why), for the person reading the table."""
@@ -170,6 +198,18 @@ def cause_of(ric, prod, reason, ev, year=None):
         if rc == 0:
             return base + " The Raw LL2 package lists it with Count 0 as well: no L2 exists at LSEG for it. Cannot be filled."
         return base + " The Raw LL2 package has %d messages for it: fillable from Raw (see l2_raw_versions)." % rc
+    if reason in ("alias_unverified", "alias_partial"):
+        al = aliases[(ric, year)]
+        if reason == "alias_partial":
+            return ("L2 exists under the Globex RIC %s (verified same book) and was delivered under this RIC for %d days; the alias does not "
+                    "cover the rest of the TAS days." % (al["alias"], alias_delivered.get((ric, year), 0)))
+        why = {"fail": "a negative control (another month) matched too, so the identity is not proven",
+               "no_tas_quote_to_check": "this RIC has no TAS quotes on the sample days to compare with",
+               "no_comparable_day": "no day has both alias L2, a TAS quote of this RIC and a negative control",
+               "no_negative_control": "no other month of the root had TAS quotes on the sample days",
+               "no_standard_directory": "this RIC has no delivery directory"}.get(al["verdict"], al["verdict"])
+        return ("L2 exists under the Globex RIC %s (directory comex/%d/%s), but it was not delivered under this RIC: %s. Read the alias "
+                "directory if needed." % (al["alias"], year, al["alias"], why))
     if reason == "outside_package_window":
         return "Partly missing: the LSEG package covers %s only; the rest of the TAS period is outside it." % ev.split("Start..End ")[-1].split(", TAS")[0]
     if reason == "in_package_not_delivered":
@@ -285,6 +325,7 @@ for (ric, y), days in sorted(walked.items()):
         continue
     tf, tl = d8(days[0]), d8(days[-1])
     rs, ev = reason_for(ric, y, tf, tl)
+    rs, ev = alias_reason(ric, y, rs, ev)
     rows.append((ric, y, prod, exdir, tf, tl, len(days), have[2] if have else 0,
                  d8(have[0]) if have else None, d8(have[1]) if have else None, kind, rs, ev))
 
@@ -311,6 +352,10 @@ CREATE TABLE l2_raw_versions (
  ric TEXT NOT NULL, utc_year INTEGER NOT NULL, directory TEXT NOT NULL, first_day TEXT NOT NULL,
  last_day TEXT NOT NULL, days INTEGER NOT NULL, product TEXT, source TEXT NOT NULL, PRIMARY KEY(ric, utc_year));
 CREATE TABLE l2_raw_days (ric TEXT NOT NULL, utc_year INTEGER NOT NULL, utc_day TEXT NOT NULL, PRIMARY KEY(ric, utc_year, utc_day));
+CREATE TABLE l2_aliases (
+ alias TEXT NOT NULL, standard TEXT NOT NULL, utc_year INTEGER NOT NULL, product TEXT NOT NULL,
+ alias_days INTEGER NOT NULL, missing_days INTEGER NOT NULL, delivered_days INTEGER NOT NULL, verdict TEXT NOT NULL,
+ sample_days TEXT, alias_rates TEXT, negative_rics TEXT, negative_rates TEXT, PRIMARY KEY(alias, utc_year));
 CREATE VIEW l2_unfillable_products AS
  SELECT product, utc_year, SUM(COALESCE(n_rics, 1)) rics, kind, GROUP_CONCAT(DISTINCT reason) reasons
  FROM l2_unfillable GROUP BY product, utc_year, kind;
@@ -329,6 +374,11 @@ if any(r[1] == "source" for r in cat.execute("pragma table_info(l2_directories)"
     if cat.execute("select count(*) from sqlite_master where name='l2_raw_days'").fetchone()[0]:
         for row in cat.execute("select ric, utc_year, utc_day from l2_raw_days"):
             db.execute("insert into l2_raw_days values (?,?,?)", row)
+for (st, y), al in sorted(aliases.items()):
+    root = al["alias"][1:].rstrip("0123456789")[:-1]
+    db.execute("insert into l2_aliases values (?,?,?,?,?,?,?,?,?,?,?,?)",
+               (al["alias"], st, y, root, int(al["alias_days"]), int(al["deliver_days"]), alias_delivered.get((st, y), 0), al["verdict"],
+                al["sample_days"] or None, al["alias_rates"] or None, al["negative_rics"] or None, al["negative_rates"] or None))
 inv = json.load(open(a.packages_json)) if a.packages_json else {}
 allp = json.load(open(a.inventory_json)) if a.inventory_json else {}
 meta = {p["job"].strip("/"): p for y in allp.values() for p in y["packages"]}
@@ -407,10 +457,13 @@ conv = {
     "tas_days": "day directories of the RIC-year up to the last L2 day; for partial candidates only days holding trade.parquet or quote.parquet",
     "partial_threshold": "l2_days < %.1f * tas_days" % THRESHOLD, "window_slack_days": str(SLACK_DAYS),
     "scope": "L2 wanted from %d on; before that only the TAS kline (kind out_of_scope)" % L2_SCOPE_FROM,
-    "reasons": "not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict | in_package_not_delivered",
+    "reasons": "not_in_any_package | report_count_zero | outside_package_window | unmapped_exchange | overlap_conflict | in_package_not_delivered | alias_unverified | alias_partial",
     "daily_2026_note": "L2 from 2026-06-01 comes from daily files that have no Report here; 2026 reasons only know the package Reports up to 2026-05-30",
     "cause": "plain-language reason per row; purchase_layers = source layers of the RIC/product in the purchase catalog (artifacts/lseg_exchange_groups_20261109/ric_catalog.csv): no normalisedLL2/rawLL2 there means L2 was never ordered",
     "l2_raw_versions": "RIC-years whose L2 files are built from Raw LL2 (Legacy Level 2 slot updates, book rebuilt by us, see docs/lseg/l2_raw.md), not from Normalized LL2; every other L2 RIC-year is Normalized. Same information: catalog.sqlite l2_directories.source",
+    "l2_aliases": ("COMEX GC/SI/HG/ALI L2 under the 1-prefixed Globex RIC (until 2024-09-27; the standard RIC has depth only from "
+                   "2024-07-10): alias, its standard RIC, verdict of the identity check and days delivered under the standard RIC "
+                   "(missing_days = days the standard RIC had no L2 file at planning). Rule: " + ALIAS_RULE) if aliases else "not loaded",
     "query": "select product, rics, kind, reasons from l2_unfillable_products where utc_year=2025 order by product",
 }
 db.executemany("insert into conventions values (?,?)", conv.items())

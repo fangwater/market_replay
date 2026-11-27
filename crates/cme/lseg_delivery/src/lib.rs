@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod gz_members;
+pub mod l2_alias;
 pub mod l2_backfill;
 pub mod l2_batch;
 pub mod l2_db;

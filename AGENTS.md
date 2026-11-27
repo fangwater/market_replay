@@ -270,6 +270,7 @@ TWAP 口径（2026-11-23 用户确认）：连续段首分钟只按第一笔快�
 - **L2 范围（2026-11-21 用户决定）：** 2020 年以前只要 TAS 的 K 线，不要 L2（2010–2019 的 L2 不洗、不交付；缺口表里记为 `out_of_scope`）。L2 只做 2020 年起：2020–2023 的主包在本地待洗，补充包按需。
 - **L2 索引与每日任务：** `lseg-daily` 每次重建 `catalog.sqlite`；旧版会删掉 `l2_directories`，新版（`build` 带 carry-over 和单写者锁）保留它。`lseg_catalog l2-sync` 按交付盘重新生成（约 1 小时，只在没有任务时跑）。
 - **L2 缺口原因：** `l2_gaps.sqlite` 每行有 `cause`（人话原因）和 `purchase_layers`。没有 L2 的 RIC 多数是采购目录里只有 `tas`/`summarised` 层（L2 从没订购，要补需向 LSEG 新申请）；采购目录的 L2 层按 RIC 名记、不分年份，同代码的旧合约会重名（如 CGBM7 的 L2 属于 2017 年合约）。
+- **COMEX 金属的 `1` 开头代码（2026-11-27）：** GC/SI/HG/ALI 在 2024-07-10 以前的盘口只在 Globex 代码 `1GCZ2` 这类目录下（`comex_globex` 包，到 2024-09-27 为止），TAS 只用正规代码。`lseg_l2_alias` 先用 TAS 报价核实是同一本盘口（带负对照），再把缺的日子以正规代码补交付到正规目录（`ric` 列改名，文件尾记 `l2_alias_of`，不覆盖）。美债 2020–2024 从未订购 L2，YM 2020–2024 的 Report 为 0，都补不了，只能用 OI 和成交量。见 [docs/lseg/l2_alias.md](docs/lseg/l2_alias.md)。
 - **IB：** 来源是 MySQL `ib_data.minute_data`，只做纯导出，用于对比："有多少切多少"，不补、不改、不对齐。
 - **`review/` 交易所目录（2026-11-26）：** 两个原因。
   - 一位数年份的 RIC 撞名：比如 `TNH2` 在 HRD 里同时对应 2012 年 NYMEX 的运费合约和 2022 年 CBOT 的美债。

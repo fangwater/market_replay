@@ -403,10 +403,11 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 
 - `l2_unfillable(ric, utc_year, product, exchange_dir, tas_first_day, tas_last_day, tas_days, l2_days, l2_first_day, l2_last_day, kind, reason, evidence, checked_packages, checked_utc, n_rics)`：2024–2026 每个 RIC-年一行；2010–2023 只做了清点（没有洗库），按品种一行（`ric` 为空，`n_rics` 是该品种当年有 TAS 的 RIC 数）。
 - `kind`：`none`（有 TAS、没有任何 L2 文件）、`partial`（`l2_days < 0.8 * tas_days`）、`not_washed`（2010–2023：远端有 L2、本地没洗）、`not_in_any_package`（2010–2023：没有任何包有该品种）。
-- `reason`：`not_in_any_package`（所有检查过的 Report 里都没有这个 RIC）、`report_count_zero`（Report 里有但 Count 为 0）、`outside_package_window`（有数据但日期没盖住 TAS 的区间，容差 7 天）、`unmapped_exchange`、`overlap_conflict`、`in_package_not_delivered`（有数据且盖住却没交付，是缺陷，应为 0）。`evidence` 是 Report 行或一句话，`checked_packages` 是检查过的包列表（JSON）。
+- `reason`：`not_in_any_package`（所有检查过的 Report 里都没有这个 RIC）、`report_count_zero`（Report 里有但 Count 为 0）、`outside_package_window`（有数据但日期没盖住 TAS 的区间，容差 7 天）、`unmapped_exchange`、`overlap_conflict`、`in_package_not_delivered`（有数据且盖住却没交付，是缺陷，应为 0）。COMEX 金属另有 `alias_unverified`（L2 在 `1` 开头的 Globex 代码下，但没核实成同一本盘口，没以正规代码交付）和 `alias_partial`（已核实并补交付，但 `1` 开头的那份没盖满 TAS 的日子）。`evidence` 是 Report 行或一句话，`checked_packages` 是检查过的包列表（JSON）。
 - `tas_days` = RIC-年目录下的日目录数（到 2026-11-12）；怀疑 `partial` 的 RIC-年才逐日检查有没有 `trade.parquet` / `quote.parquet`。`l2_days` 取自 `l2_directories`。2026-06 起的 L2 来自日包，没有 Report，所以 2026 的原因只认得到 2026-05-30 的包。
 - 另有 `l2_package_inventory`（2010–2026 每个包一行，空包标注；2024 之前 `washed`/`delivered` 为 0）、`l2_year_summary`（每年主包与补充包 GB、RIC 数、L2 品种数、TAS 品种数、没有 L2 的 TAS 品种数；2012–2016 目录里没有 TAS，无从比较）和 `conventions`（方法、阈值、生成时间）。
 - 重建：`scripts/lseg/l2_gaps_build.py --out <本地.sqlite> --reports <runtime/l2_supplement/reports> --packages-json … --inventory-json …`（先在任务空闲时跑 `lseg_catalog l2-sync`；NFS 只做 ≤8 线程的 listdir，约 1.5 分钟、内存 143 MB），再 `--publish <本地.sqlite>` 发布：新文件用硬链接不覆盖；刷新时加 `--replace`，是同目录里写临时文件后原子 rename，读者要么看到旧的完整文件、要么看到新的完整文件。
+- `l2_aliases`：COMEX 金属每个 `1` 开头的合约-年一行，含对应的正规代码、核实判定和依据（样本日、一致率、负对照）、补交付的日数。重建时加 `--aliases <plan.csv> --alias-delivered <stage/delivered.tsv>`（`lseg_l2_alias` 的产物，见 [l2_alias.md](l2_alias.md)）；不加就没有这张表，金属行仍按 Report 归因。
 - 按品种的覆盖范围另有 `scripts/lseg/l2_coverage.py`（每个品种首末日和没有 L2 的月份）。
 
 ## 范围：L2 只做 2020 年起（2026-11-21）
@@ -420,6 +421,10 @@ select product, rics, kind, reasons from l2_unfillable_products where utc_year=2
 - Raw 补缺：仍没有 L2 但 Raw 有数据的 RIC（2020 年 99 个，2021–2023 年各约 330 个，只占 Raw 包消息的约 0.001%），用 `rawll2_segments.py` 只取需要的段，洗进 `_stream/raw2020..raw2023`，交付标 `raw` 来源。
 - 补充包 + Raw 共交付 402,701 个文件，0 个问题。下载的补充包已删，RocksDB 保留。
 - 2010–2019 年按用户决定不做 L2（缺口表里记为 `out_of_scope`）。
+
+## COMEX 金属的 `1` 开头代码（2026-11-27）
+
+`comex_globex` 补充包里 GC、SI、HG、ALI 的盘口用 Globex 代码（`1GCZ2` 这样前面加 `1`）发布，到 2024-09-27 为止；正规代码 2024-07-10 前没有深度。所以 2020–2023 年这几个品种的 L2 其实已经洗库并交付了，只是放在 `comex/<年>/1GC…/` 下，`l2_gaps.sqlite` 按正规代码查不到。核实是同一本盘口后，用 `lseg_l2_alias` 在正规代码目录下补交付（`ric` 改成正规代码，文件尾记 `l2_alias_of`）。方法、依据和结果见 [l2_alias.md](l2_alias.md)。美债 2020–2024 从未订购 L2、YM 2020–2024 的 Report 为 0，都补不了，也记在那里。
 
 ## 源包的清理（2026-11-24，用户确认）
 
